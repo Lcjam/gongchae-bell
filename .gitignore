@@ -1,2 +1,10 @@
 .env
 review/
+.env.*
+!.env.example
+.tools/
+.gradle/
+build/
+*.log
+.idea/
+*.iml
