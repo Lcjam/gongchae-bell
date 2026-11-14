@@ -50,3 +50,9 @@ Windows x64, Java Temurin 21.0.13, Gradle 9.9.1, Docker 29.9.2, PostgreSQL 17 Te
 - 로컬 gitleaks 8.30.1로 `925aa18..HEAD`의 #4 구현 두 커밋을 검사해 누출 0건이었다.
 - 초안 PR: [#11](https://github.com/Lcjam/gongchae-bell/pull/11), base `feat/#3-ingestion-core`. #3 main 반영 후 main으로 base 변경과 통합 검증이 필요하다. PR 생성은 GitHub 연결 도구로 수행했다. CI 결과는 [PR checks](https://github.com/Lcjam/gongchae-bell/pull/11/checks)에서 추적한다.
 - 코어/웹 파일, V1/V2, 원본 사용자 변경에는 손대지 않았다. 머지/배포/DNS 변경 없음. root 및 두 번째 구현자 교차 검토 대기.
+
+### 느린 본문 타임아웃 후속 수정
+
+추가 HTTP 대역 검증에서 헤더를 먼저 보낸 뒤 본문을 늦추면 Java HttpClient의 HttpRequest.timeout만으로 전체 응답 시간을 제한하지 못하는 결함을 확인했다(테스트 제한 60ms, 본문 지연 300ms, 수정 전 실패). sendAsync 응답 future에 본문 완료까지의 전체 deadline을 적용하고 초과/인터럽트 때 cancel하도록 고쳤다. 기존 고정 오류 코드·독립 예산·최대 3회 재시도는 유지한다.
+
+후속 수정 뒤 init-script 없는 전체 `check bootJar`가 다시 성공했다. JUnit XML 실측 합계는 **60 tests / 0 failures / 0 skipped**(#3 31 + #4 29)다. 위 59건 기록은 이 회귀 테스트를 추가하기 전 결과다. 원격 CI 43655122480(309216a)의 test/secrets는 모두 success였고 새 후속 head의 CI는 PR checks에서 확인한다.

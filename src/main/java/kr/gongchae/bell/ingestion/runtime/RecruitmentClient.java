@@ -53,7 +53,7 @@ public class RecruitmentClient {
             long id = budget.reserve(kind,attempt+1);
             Duration delay = Duration.ofSeconds(2L << attempt);
             try {
-                var response=http.send(HttpRequest.newBuilder(uri).timeout(timeout).GET().build(),HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+                var response=send(HttpRequest.newBuilder(uri).timeout(timeout).GET().build());
                 int code=response.statusCode();
                 if (code==200) { budget.finish(id,"SUCCESS"); return response.body(); }
                 last=code==429 ? CollectionFailure.Code.HTTP_RATE_LIMIT : CollectionFailure.Code.HTTP_STATUS;
@@ -74,6 +74,20 @@ public class RecruitmentClient {
             }
         }
         throw new CollectionFailure(last);
+    }
+    private HttpResponse<String> send(HttpRequest request) throws IOException,InterruptedException {
+        var response=http.sendAsync(request,HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        try {
+            // HttpRequest.timeout alone does not bound a slow response body.
+            return response.get(timeout.toNanos(),java.util.concurrent.TimeUnit.NANOSECONDS);
+        } catch(java.util.concurrent.TimeoutException expired) {
+            response.cancel(true);throw new HttpTimeoutException("HTTP_TIMEOUT");
+        } catch(java.util.concurrent.ExecutionException failed) {
+            if(failed.getCause() instanceof IOException io) throw io;
+            throw new IOException("HTTP_CONNECTION");
+        } catch(InterruptedException interrupted) {
+            response.cancel(true);throw interrupted;
+        }
     }
     private Duration retryAfter(String value, Duration fallback) {
         try { return Duration.ofSeconds(Math.max(0,Long.parseLong(value.trim()))); }

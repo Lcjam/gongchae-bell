@@ -79,6 +79,13 @@ class RecruitmentClientTest {
         assertThatThrownBy(()->client(Duration.ofSeconds(1)).regularList()).hasMessage("BUDGET_EXHAUSTED");
         assertThat(requests).hasValue(0);
     }
+    @Test void requestTimeoutAlsoBoundsBodyAfterHeadersArrive() {
+        server.createContext("/",e->{requests.incrementAndGet();e.sendResponseHeaders(200,1);e.getResponseBody().flush();
+            try {Thread.sleep(300);} catch(InterruptedException ignored) {}
+            try {e.getResponseBody().write('x');} finally {e.close();} });
+        assertThatThrownBy(()->client(Duration.ofMillis(60)).regularList()).hasMessage("HTTP_TIMEOUT");
+        verify(budget,times(3)).reserve(eq("REGULAR"),anyInt());
+    }
     @Test void requestTimeoutIsBoundedAndExceptionContainsOnlyFixedCode() {
         server.createContext("/",e->{ requests.incrementAndGet(); try {Thread.sleep(150);} catch(InterruptedException ignored) {}
             try {e.sendResponseHeaders(200,-1);} finally {e.close();} });
