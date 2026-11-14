@@ -19,6 +19,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.dao.TransientDataAccessResourceException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.mock.web.MockHttpServletRequest;
+import tools.jackson.databind.ObjectMapper;
 
 class CatalogUnitTest {
 
@@ -166,5 +167,54 @@ class CatalogUnitTest {
         assertThat(unavailable.display()).isEqualTo(FreshnessService.UNAVAILABLE_DISPLAY);
         assertThat(unavailable.delayed()).isFalse();
         assertThat(unavailable.available()).isFalse();
+    }
+
+    @Test
+    void parsesVerifiedDetailStepAndFileFieldsWithoutDumpingUnknownRawValues() {
+        CatalogRepository repo = new CatalogRepository(mock(JdbcClient.class), new ObjectMapper());
+
+        // Official swagger detail_response contract fixture (unwrapped by #4 DetailCollector)
+        var verified = repo.parseSteps("""
+                [{"sortNo":1,"recrutNope":5,"aplyNope":30,"cmpttRt":"6.0","recrutPbancTtl":"숨김제목","recrutStepSn":9901,"rsnOcrnYmd":"20261114"}]
+                """);
+        assertThat(verified.unknownFormat()).isFalse();
+        assertThat(verified.items()).containsExactly(
+                new CatalogViews.StepItem("전형 정보 1", "모집 인원: 5명\n지원자 수: 30명\n경쟁률: 6.0")
+        );
+
+        var wrappedStep = repo.parseSteps("""
+                [{"step":{"sortNo":2,"aplyNope":"12","cmpttRt":"2.4"}}]
+                """);
+        assertThat(wrappedStep.unknownFormat()).isFalse();
+        assertThat(wrappedStep.items()).containsExactly(
+                new CatalogViews.StepItem("전형 정보 2", "지원자 수: 12명\n경쟁률: 2.4")
+        );
+
+        for (String unknownJson : new String[]{
+                "[{\"stepNm\":\"임의키\",\"raw\":\"RAW_STEP\"}]",
+                "[{\"recrutPbancTtl\":\"stage\"}]",
+                "[\"plain raw string\"]",
+                "{invalid-json"
+        }) {
+            var parsed = repo.parseSteps(unknownJson);
+            assertThat(parsed.items()).as(unknownJson).isEmpty();
+            assertThat(parsed.unknownFormat()).as(unknownJson).isTrue();
+        }
+
+        var files = repo.parseFiles("""
+                [
+                  {"atchFileNm":"공고문.pdf","url":"https://example.go.kr/a.pdf","recrutAtchFileNo":1,"sortNo":1},
+                  {"file":{"atchFileNm":"악성링크","url":"javascript:alert(1)"}}
+                ]
+                """);
+        assertThat(files.unknownFormat()).isFalse();
+        assertThat(files.items()).containsExactly(
+                new CatalogViews.FileItem("공고문.pdf", "https://example.go.kr/a.pdf"),
+                new CatalogViews.FileItem("악성링크", null)
+        );
+
+        var unknownFile = repo.parseFiles("[{\"recrutAtchFileNo\":7,\"rawOnly\":\"RAW_FILE\"}]");
+        assertThat(unknownFile.items()).isEmpty();
+        assertThat(unknownFile.unknownFormat()).isTrue();
     }
 }

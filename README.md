@@ -8,9 +8,9 @@
 
 필수: Java 17 이상(Gradle 실행용), Docker (Linux 컨테이너). Gradle은 Wrapper로 실행하고 앱 컴파일·실행용 Java 21은 toolchain이 다운로드합니다. 최초 실행에는 네트워크가 필요합니다.
 
-1. `.env.example`을 `.env`로 복사하고 세 항목을 모두 채웁니다. `DB_USER`, `DB_PASSWORD`는 직접 정하고, `DB_URL`에는 `jdbc:postgresql://localhost:5432/gongchae`를 넣습니다. **DB_URL을 빈 문자열로 내보내면 시작할 수 없습니다.** `.env`는 git에서 제외됩니다.
+1. `.env.example`을 `.env`로 복사하고 항목을 채웁니다. `DB_USER`, `DB_PASSWORD`는 직접 정하고, `DB_URL`에는 `jdbc:postgresql://localhost:5432/gongchae`를 넣습니다. **DB_URL을 빈 문자열로 내보내면 시작할 수 없습니다.** `APP_BASE_URL`은 기본값이 `http://localhost:8080`이며, 운영 환경에서는 `sitemap.xml`이 올바른 주소를 생성하도록 실제 공개 외부 주소(예: `https://example.com`)를 정확히 설정해야 합니다. `.env`는 git에서 제외됩니다.
 2. `docker compose -f compose.dev.yml up -d --wait`
-3. 같은 `DB_USER`, `DB_PASSWORD`를 앱 실행 셸의 환경변수에 설정합니다. **Spring은 `.env`를 자동으로 읽지 않습니다.**
+3. 같은 `DB_USER`, `DB_PASSWORD`(및 필요 시 `APP_BASE_URL`)를 앱 실행 셸의 환경변수에 설정합니다. **Spring은 `.env`를 자동으로 읽지 않습니다.**
 4. `./gradlew bootRun` (Windows PowerShell은 `.\gradlew.bat bootRun`)
 5. <http://localhost:8080>을 엽니다. readiness는 <http://127.0.0.1:8081/actuator/health/readiness>입니다.
 

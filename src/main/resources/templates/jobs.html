@@ -105,10 +105,20 @@
   </div>
 
   <div th:if="${#lists.isEmpty(result.items)}" class="empty-state">
-    <h2 class="h5" th:text="${criteria.hasActiveFilter()} ? '조건에 맞는 공고가 없습니다' : '아직 수집된 공고가 없습니다'">조건에 맞는 공고가 없습니다</h2>
-    <p class="mb-3 text-secondary"
-       th:text="${criteria.hasActiveFilter()} ? '다른 조건으로 다시 검색하거나 필터를 초기화해 보세요.' : '첫 수집이 끝나면 조건에 맞는 공고를 찾을 수 있습니다.'"></p>
-    <a th:if="${criteria.hasActiveFilter()}" th:href="@{/jobs}" class="btn btn-outline-primary btn-sm">필터 초기화</a>
+    <th:block th:if="${criteria.hasActiveFilter()}">
+      <h2 class="h5">조건에 맞는 공고가 없습니다</h2>
+      <p class="mb-3 text-secondary">다른 조건으로 다시 검색하거나 필터를 초기화해 보세요.</p>
+      <a th:href="@{/jobs}" class="btn btn-outline-primary btn-sm">필터 초기화</a>
+    </th:block>
+    <th:block th:if="${!criteria.hasActiveFilter() and (hasAnyPosting ?: false)}">
+      <h2 class="h5">현재 진행 중인 공고가 없습니다</h2>
+      <p class="mb-3 text-secondary">마감된 공고를 포함한 전체 공고 이력을 보려면 상태를 '전체'로 변경해 보세요.</p>
+      <a th:href="@{/jobs(status='all')}" class="btn btn-outline-primary btn-sm">전체 공고 보기</a>
+    </th:block>
+    <th:block th:if="${!criteria.hasActiveFilter() and !(hasAnyPosting ?: false)}">
+      <h2 class="h5">아직 수집된 공고가 없습니다</h2>
+      <p class="mb-3 text-secondary">첫 수집이 끝나면 조건에 맞는 공고를 찾을 수 있습니다.</p>
+    </th:block>
   </div>
 
   <div th:unless="${#lists.isEmpty(result.items)}">

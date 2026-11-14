@@ -81,22 +81,24 @@ public class CatalogController {
         JobSearchCriteria criteria = JobSearchCriteria.normalize(
                 ncs, region, hire, career, status, q, sort, page, allowedCodes);
         CatalogViews.JobSearchResult result = repository.searchJobs(criteria, kstToday);
+        boolean hasAnyPosting = result.items().isEmpty() && !criteria.hasActiveFilter() && repository.hasAnyPosting();
 
         model.addAttribute("title", "채용공고 · 공채벨");
         model.addAttribute("description", "직무, 지역, 고용형태, 채용구분별 공공기관 채용공고를 비교하세요.");
         model.addAttribute("filterOptions", filterOptions);
         model.addAttribute("criteria", criteria);
         model.addAttribute("result", result);
+        model.addAttribute("hasAnyPosting", hasAnyPosting);
         model.addAttribute("pageNumbers", buildPageWindow(result.page(), result.totalPages()));
         return "jobs";
     }
 
     @GetMapping("/jobs/{sn}")
     String jobDetail(@PathVariable long sn, Model model, HttpServletRequest request) {
-        metrics.recordPageView("job_detail", request);
         LocalDate kstToday = LocalDate.now(clock);
         CatalogViews.PostingDetail job = repository.findJobDetail(sn, kstToday)
                 .orElseThrow(PostingNotFoundException::new);
+        metrics.recordPageView("job_detail", request);
 
         model.addAttribute("title", job.title() + " · " + job.instName() + " · 공채벨");
         model.addAttribute("description", job.instName() + " 채용공고 (" + job.bgngDate() + " ~ " + job.endDate() + ")");
@@ -129,11 +131,11 @@ public class CatalogController {
         if (code == null || code.isBlank() || code.length() > 40) {
             throw new PostingNotFoundException();
         }
-        metrics.recordPageView("institution", request);
         LocalDate kstToday = LocalDate.now(clock);
         int requestedPage = JobSearchCriteria.parsePositiveInt(page, 1);
         CatalogViews.InstitutionDetailView detail = repository.findInstitutionDetail(code.trim(), kstToday, requestedPage)
                 .orElseThrow(PostingNotFoundException::new);
+        metrics.recordPageView("institution", request);
 
         model.addAttribute("title", detail.summary().name() + " 채용 이력 · 공채벨");
         model.addAttribute("description", detail.summary().name() + " 최근 3년 공공기관 채용 이력, 시기 패턴, 직무 분포");

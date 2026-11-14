@@ -92,17 +92,26 @@
       <div th:if="${job.hasCollectedDetail()}" class="row g-3 mt-1">
         <div class="col-12 col-md-6">
           <h3 class="h6 fw-semibold">전형 단계</h3>
-          <p th:if="${#lists.isEmpty(job.steps)}" class="small text-secondary mb-0">등록된 단계가 없습니다.</p>
+          <p th:if="${#lists.isEmpty(job.steps) and !job.stepsUnknownFormat}" class="small text-secondary mb-0">등록된 단계가 없습니다.</p>
+          <p th:if="${#lists.isEmpty(job.steps) and job.stepsUnknownFormat}" class="small text-secondary mb-0">
+            전형 단계 정보의 형식을 확인할 수 없어 표시하지 않았습니다.
+          </p>
           <ul th:unless="${#lists.isEmpty(job.steps)}" class="list-group list-group-flush small">
             <li class="list-group-item px-0" th:each="step : ${job.steps}">
-              <strong th:text="${step.title}">단계</strong>
+              <strong th:text="${step.title}">전형 정보</strong>
               <span th:if="${!#strings.isEmpty(step.detail)}" class="text-secondary d-block pre-line-text" th:text="${step.detail}"></span>
             </li>
           </ul>
+          <p th:if="${!#lists.isEmpty(job.steps) and job.stepsUnknownFormat}" class="small text-secondary mt-2 mb-0">
+            일부 단계 정보는 형식을 확인할 수 없어 표시하지 않았습니다.
+          </p>
         </div>
         <div class="col-12 col-md-6">
           <h3 class="h6 fw-semibold">첨부파일</h3>
-          <p th:if="${#lists.isEmpty(job.files)}" class="small text-secondary mb-0">첨부파일이 없습니다.</p>
+          <p th:if="${#lists.isEmpty(job.files) and !job.filesUnknownFormat}" class="small text-secondary mb-0">첨부파일이 없습니다.</p>
+          <p th:if="${#lists.isEmpty(job.files) and job.filesUnknownFormat}" class="small text-secondary mb-0">
+            첨부파일 정보의 형식을 확인할 수 없어 표시하지 않았습니다.
+          </p>
           <ul th:unless="${#lists.isEmpty(job.files)}" class="list-group list-group-flush small">
             <li class="list-group-item px-0" th:each="file : ${job.files}">
               <a th:if="${file.safeUrl != null}"
@@ -113,6 +122,9 @@
               <span th:if="${file.safeUrl == null}" th:text="${file.name}">파일</span>
             </li>
           </ul>
+          <p th:if="${!#lists.isEmpty(job.files) and job.filesUnknownFormat}" class="small text-secondary mt-2 mb-0">
+            일부 첨부파일 정보는 형식을 확인할 수 없어 표시하지 않았습니다.
+          </p>
         </div>
       </div>
     </section>

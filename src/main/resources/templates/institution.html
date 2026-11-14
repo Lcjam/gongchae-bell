@@ -9,7 +9,10 @@
       <p class="eyebrow mb-1">기관별 최근 3년 채용 이력</p>
       <h1 class="fw-bold mb-1" th:text="${institution.summary.name}">기관명</h1>
       <p class="small text-secondary mb-0"
-         th:text="${'기준 기간: 최근 3년 (' + #temporals.format(institution.summary.fromDate, 'yyyy-MM-dd') + ' ~ ' + #temporals.format(institution.summary.toDate, 'yyyy-MM-dd') + ', 공고 시작일 기준)'}">기준 기간</p>
+         th:text="${'기준 기간: 최근 3년 (' + #temporals.format(institution.summary.fromDate, 'yyyy-MM-dd') + ' ~ ' + #temporals.format(institution.summary.toDate, 'yyyy-MM-dd') + ', 오늘까지 시작한 공고 기준)'}">기준 기간</p>
+      <p class="small text-secondary mb-0 mt-1">
+        공고 시작일이 오늘 이후인 예정 공고는 목록 화면에서 먼저 볼 수 있으며, 시작일이 도래하기 전까지 이력 통계와 목록에는 포함되지 않습니다.
+      </p>
     </div>
     <a class="btn btn-outline-primary btn-sm flex-shrink-0"
        href="https://job.alio.go.kr/orgcompare.do"

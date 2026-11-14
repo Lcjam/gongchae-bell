@@ -161,20 +161,22 @@ class CatalogIntegrationTest {
         insertPosting(400004, "C0099", "어제마감 지연 공고", "2026-11-01", "2026-11-14",
                 "R2010", "2명", 2L, "https://example.go.kr/400004", false, false, "OPEN", "NONE", "[]", "[]");
 
-        // 5) Malicious XSS & javascript: URL + DONE detail with safe/unsafe files
+        // 5) Malicious XSS & javascript: URL + DONE detail using official swagger contract shape (not a live capture)
         insertPosting(400005, "C0099", "<script>alert('xss')</script> 100% 공개채용", "2026-11-10", "2026-11-25",
                 "R2010", "5명", 5L, "javascript:alert(1)", false, false, "OPEN", "DONE",
-                "[{\"stepNm\":\"1차 서류\",\"stepCn\":\"지원서 평가\"}]",
-                "[{\"atchFileNm\":\"모집요강.pdf\",\"url\":\"https://example.go.kr/files/guide.pdf\"},{\"atchFileNm\":\"악성파일\",\"url\":\"javascript:alert(2)\"}]");
+                "[{\"sortNo\":1,\"recrutNope\":5,\"aplyNope\":30,\"cmpttRt\":\"6.0\",\"recrutPbancTtl\":\"미노출제목\",\"recrutStepSn\":77777,\"rsnOcrnYmd\":\"20261114\"}]",
+                "[{\"atchFileNm\":\"모집요강.pdf\",\"url\":\"https://example.go.kr/files/guide.pdf\",\"recrutAtchFileNo\":1,\"sortNo\":1},{\"atchFileNm\":\"악성파일\",\"url\":\"javascript:alert(2)\"}]");
         jdbc.sql("UPDATE posting SET aply_qlfc = '<img src=x onerror=alert(1)>' WHERE sn = 400005").update();
         insertCode(400005, "NCS", "R600001");
         insertCode(400005, "NCS", "R600020");
         insertCode(400005, "REGION", "R3013");
         insertCode(400005, "HIRE", "R1010");
 
-        // 6) Career-only (R2020) OPEN posting for C0661 (does not affect C0099 3-year counts)
+        // 6) Career-only (R2020) OPEN posting for C0661 (does not affect C0099 3-year counts) + unknown step/file JSON shape
         insertPosting(400006, "C0661", "경력전용 공개채용 공고", "2026-11-12", "2026-11-20",
-                "R2020", "2명", 2L, "https://example.go.kr/400006", false, false, "OPEN", "NONE", "[]", "[]");
+                "R2020", "2명", 2L, "https://example.go.kr/400006", false, false, "OPEN", "DONE",
+                "[{\"stepNm\":\"임의단계키\",\"raw\":\"RAW_SECRET_STEP\"}]",
+                "[{\"recrutAtchFileNo\":99,\"raw\":\"RAW_SECRET_FILE\"}]");
         insertCode(400006, "NCS", "R600006");
         insertCode(400006, "REGION", "R3013");
         insertCode(400006, "HIRE", "R1040");
@@ -338,16 +340,31 @@ class CatalogIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(content().string(containsString("https://job.alio.go.kr/recruitview.do?idx=307027")));
 
-        // XSS payload + javascript: src_url + DONE detail with mixed safe/unsafe files
+        // XSS payload + javascript: src_url + DONE detail with verified swagger step fields and safe/unsafe files
         mvc.perform(get("/jobs/400005"))
                 .andExpect(status().isOk())
                 .andExpect(content().string(containsString("&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;")))
                 .andExpect(content().string(not(containsString("<script>alert('xss')</script>"))))
                 .andExpect(content().string(not(containsString("<img src=x"))))
-                .andExpect(content().string(containsString("1차 서류")))
+                .andExpect(content().string(containsString("전형 정보 1")))
+                .andExpect(content().string(containsString("모집 인원: 5명")))
+                .andExpect(content().string(containsString("지원자 수: 30명")))
+                .andExpect(content().string(containsString("경쟁률: 6.0")))
+                .andExpect(content().string(not(containsString("미노출제목"))))
+                .andExpect(content().string(not(containsString("77777"))))
+                .andExpect(content().string(not(containsString("20261114"))))
                 .andExpect(content().string(containsString("https://example.go.kr/files/guide.pdf")))
                 .andExpect(content().string(not(containsString("href=\"javascript:"))))
                 .andExpect(content().string(not(containsString("/jobs/400005/source"))));
+
+        // Unknown step/file JSON shape must not dump raw field values
+        mvc.perform(get("/jobs/400006"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(containsString("전형 단계 정보의 형식을 확인할 수 없어 표시하지 않았습니다.")))
+                .andExpect(content().string(containsString("첨부파일 정보의 형식을 확인할 수 없어 표시하지 않았습니다.")))
+                .andExpect(content().string(not(containsString("RAW_SECRET_STEP"))))
+                .andExpect(content().string(not(containsString("RAW_SECRET_FILE"))))
+                .andExpect(content().string(not(containsString("임의단계키"))));
 
         mvc.perform(get("/jobs/400005/source")).andExpect(status().isNotFound());
         mvc.perform(get("/jobs/999999")).andExpect(status().isNotFound());
@@ -357,7 +374,15 @@ class CatalogIntegrationTest {
 
     @Test
     void institutionPageShowsYearlyRecruitsDistinctNcsAndPaginatedThreeYearHistory() throws Exception {
-        // C0099 has 26 postings in [2023-11-15 .. 2026-11-15] (400101 on 2023-11-14 excluded):
+        // Future-start boundary (tomorrow = 2026-11-16): visible on /jobs, excluded from [today-3y, today] institution stats
+        insertPosting(400102, "C0099", "내일 시작 예정 공고", "2026-11-16", "2026-11-30",
+                "R2010", "7명", 7L, "https://example.go.kr/400102", false, false, "OPEN", "NONE", "[]", "[]");
+        mvc.perform(get("/jobs").param("status", "open").param("q", "내일 시작"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(containsString("내일 시작 예정 공고")))
+                .andExpect(content().string(containsString("/jobs/400102")));
+
+        // C0099 has 26 postings in [2023-11-15 .. 2026-11-15] (400101 on 2023-11-14 and 400102 on 2026-11-16 excluded):
         //   2026: 5 postings (400001:3, 400002:null, 400003:1, 400004:2, 400005:5) -> 5건, 11명, 제외 1건
         //   2025: 10 postings (400200:null + 9x 2명) -> 10건, 18명, 제외 1건
         //   2024: 10 postings (10x 2명) -> 10건, 20명, 제외 0건
@@ -366,13 +391,15 @@ class CatalogIntegrationTest {
         //   NCS counts (DISTINCT sn): R600020=23, R600001=1 (400005 belongs to both R600020 & R600001), R600002=1 (400100)
         String instHtml = mvc.perform(get("/institutions/C0099"))
                 .andExpect(status().isOk())
-                .andExpect(content().string(containsString("2023-11-15 ~ 2026-11-15")))
+                .andExpect(content().string(containsString("2023-11-15 ~ 2026-11-15, 오늘까지 시작한 공고 기준")))
+                .andExpect(content().string(containsString("시작일이 도래하기 전까지 이력 통계와 목록에는 포함되지 않습니다")))
                 .andExpect(content().string(containsString("26건")))
                 .andExpect(content().string(containsString("53명")))
                 .andExpect(content().string(containsString("숫자로 확인되지 않은 공고 2건 제외")))
                 .andExpect(content().string(not(containsString("실제 채용 실적"))))
                 .andExpect(content().string(containsString("다중 직무가 지정된 공고는 각 직무에 모두 포함")))
                 .andExpect(content().string(not(containsString("3년 이전 제외 공고"))))
+                .andExpect(content().string(not(containsString("내일 시작 예정 공고"))))
                 .andReturn().getResponse().getContentAsString();
 
         assertThat(extractTableRows(instHtml, "yearly-recruit-heading")).containsExactly(
@@ -420,7 +447,26 @@ class CatalogIntegrationTest {
         assertThat(counterValue("gongchae.page.views", "page", "jobs", "traffic", "internal")).isEqualTo(internalBefore + 1);
 
         double redirectGenericBefore = counterValue("gongchae.source.redirects", "generic", "true", "traffic", "user");
+        double detailViewBefore = counterValue("gongchae.page.views", "page", "job_detail", "traffic", "user");
+        double instViewBefore = counterValue("gongchae.page.views", "page", "institution", "traffic", "user");
+        double redirectFalseBefore = counterValue("gongchae.source.redirects", "generic", "false", "traffic", "user");
+
+        // 404 requests must NOT increment G2 counters
+        mvc.perform(get("/jobs/999999").header("User-Agent", "Mozilla/5.0")).andExpect(status().isNotFound());
+        mvc.perform(get("/jobs/not-a-number").header("User-Agent", "Mozilla/5.0")).andExpect(status().isNotFound());
+        mvc.perform(get("/institutions/UNKNOWN").header("User-Agent", "Mozilla/5.0")).andExpect(status().isNotFound());
+        mvc.perform(get("/jobs/999999/source").header("User-Agent", "Mozilla/5.0")).andExpect(status().isNotFound());
+        mvc.perform(get("/jobs/400005/source").header("User-Agent", "Mozilla/5.0")).andExpect(status().isNotFound());
+        assertThat(counterValue("gongchae.page.views", "page", "job_detail", "traffic", "user")).isEqualTo(detailViewBefore);
+        assertThat(counterValue("gongchae.page.views", "page", "institution", "traffic", "user")).isEqualTo(instViewBefore);
+        assertThat(counterValue("gongchae.source.redirects", "generic", "false", "traffic", "user")).isEqualTo(redirectFalseBefore);
+
+        // Successful 200 detail/institution & 302 source requests DO increment counters
+        mvc.perform(get("/jobs/307027").header("User-Agent", "Mozilla/5.0")).andExpect(status().isOk());
+        mvc.perform(get("/institutions/C0099").header("User-Agent", "Mozilla/5.0")).andExpect(status().isOk());
         mvc.perform(get("/jobs/307027/source").header("User-Agent", "Mozilla/5.0")).andExpect(status().isFound());
+        assertThat(counterValue("gongchae.page.views", "page", "job_detail", "traffic", "user")).isEqualTo(detailViewBefore + 1);
+        assertThat(counterValue("gongchae.page.views", "page", "institution", "traffic", "user")).isEqualTo(instViewBefore + 1);
         assertThat(counterValue("gongchae.source.redirects", "generic", "true", "traffic", "user"))
                 .isEqualTo(redirectGenericBefore + 1);
 
@@ -483,6 +529,21 @@ class CatalogIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(content().string(containsString("2026.11.15 08:55 KST")))
                 .andExpect(content().string(not(containsString("수집 지연"))));
+    }
+
+    @Test
+    void jobsPageDoesNotClaimEmptyCollectionWhenOnlyClosedPostingsExist() throws Exception {
+        jdbc.sql("UPDATE posting SET status = 'CLOSED', end_date = DATE '2026-11-10'").update();
+
+        mvc.perform(get("/jobs"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(containsString("현재 진행 중인 공고가 없습니다")))
+                .andExpect(content().string(containsString("/jobs?status=all")))
+                .andExpect(content().string(not(containsString("아직 수집된 공고가 없습니다"))));
+
+        mvc.perform(get("/jobs").param("status", "all"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(containsString("307027")));
     }
 
     private static List<Long> extractDesktopTableJobSns(String html) {
