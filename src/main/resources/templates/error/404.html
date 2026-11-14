@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="ko" xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments/layout :: head}"></head>
+<body>
+<header th:replace="~{fragments/layout :: header}"></header>
+<main id="main" class="container py-5">
+  <div class="empty-state">
+    <h1 class="h4 fw-bold mb-2">요청하신 페이지를 찾을 수 없습니다</h1>
+    <p class="text-secondary mb-4">주소가 바뀌었거나 삭제된 채용공고·기관 정보일 수 있습니다.</p>
+    <div class="d-flex justify-content-center gap-2 flex-wrap">
+      <a class="btn btn-primary btn-sm" th:href="@{/}">홈으로</a>
+      <a class="btn btn-outline-primary btn-sm" th:href="@{/jobs}">채용공고 둘러보기</a>
+    </div>
+  </div>
+</main>
+<footer th:replace="~{fragments/layout :: footer}"></footer>
+</body>
+</html>

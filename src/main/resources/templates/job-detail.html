@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="ko" xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments/layout :: head}"></head>
+<body>
+<header th:replace="~{fragments/layout :: header}"></header>
+<main id="main" class="container py-4 py-md-5">
+  <nav aria-label="위치" class="mb-3 small">
+    <a class="text-decoration-none" th:href="@{/jobs}">← 채용공고 목록</a>
+  </nav>
+
+  <div th:if="${job.brokenText}" class="alert alert-warning" role="alert">
+    <strong>품질 경고:</strong> 깨진 문자가 포함되어 있을 수 있습니다. 정확한 내용은 원문 또는 잡알리오에서 확인하세요.
+  </div>
+
+  <article class="bg-white border rounded-4 p-4 p-md-5">
+    <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+      <span class="badge"
+            th:classappend="${job.effectiveStatus == 'OPEN'} ? 'text-bg-success' : (${job.effectiveStatus == 'CHECK'} ? 'text-bg-warning' : 'text-bg-secondary')"
+            th:text="${job.statusLabel}">진행 중</span>
+      <span class="badge text-bg-light text-dark fw-semibold" th:text="${job.ddayLabel}">D-0</span>
+      <span class="badge text-bg-light" th:text="${job.recrutSeLabel}">구분</span>
+    </div>
+
+    <h1 class="h3 fw-bold mb-2" th:text="${job.title}">공고 제목</h1>
+    <p class="mb-4">
+      <a class="fw-semibold text-decoration-none"
+         th:href="@{/institutions/{code}(code=${job.instCode})}"
+         th:text="${job.instName}">기관명</a>
+    </p>
+
+    <dl class="row border-top border-bottom py-3 mb-4 small">
+      <dt class="col-4 col-md-2 text-secondary">공고 기간</dt>
+      <dd class="col-8 col-md-4" th:text="${#temporals.format(job.bgngDate, 'yyyy-MM-dd') + ' ~ ' + #temporals.format(job.endDate, 'yyyy-MM-dd')}">기간</dd>
+
+      <dt class="col-4 col-md-2 text-secondary">모집 인원</dt>
+      <dd class="col-8 col-md-4" th:text="${job.recrutNopeDisplay}">0명</dd>
+
+      <dt class="col-4 col-md-2 text-secondary">직무 (NCS)</dt>
+      <dd class="col-8 col-md-4" th:text="${#lists.isEmpty(job.ncsNames)} ? '-' : ${#strings.listJoin(job.ncsNames, ', ')}">-</dd>
+
+      <dt class="col-4 col-md-2 text-secondary">근무 지역</dt>
+      <dd class="col-8 col-md-4" th:text="${#lists.isEmpty(job.regionNames)} ? '-' : ${#strings.listJoin(job.regionNames, ', ')}">-</dd>
+
+      <dt class="col-4 col-md-2 text-secondary">고용 형태</dt>
+      <dd class="col-8 col-md-4" th:text="${#lists.isEmpty(job.hireNames)} ? '-' : ${#strings.listJoin(job.hireNames, ', ')}">-</dd>
+
+      <dt class="col-4 col-md-2 text-secondary">학력 조건</dt>
+      <dd class="col-8 col-md-4 mb-0" th:text="${#lists.isEmpty(job.eduNames)} ? '-' : ${#strings.listJoin(job.eduNames, ', ')}">-</dd>
+    </dl>
+
+    <div class="d-flex flex-wrap gap-2 mb-4">
+      <a th:if="${job.safeSrcUrl != null}"
+         class="btn btn-primary"
+         th:href="@{/jobs/{sn}/source(sn=${job.sn})}"
+         target="_blank"
+         rel="noopener noreferrer">원문 보기</a>
+      <a th:if="${job.srcUrlGeneric || job.safeSrcUrl == null}"
+         class="btn btn-outline-primary"
+         th:href="${job.alioUrl}"
+         target="_blank"
+         rel="noopener noreferrer">잡알리오에서 보기</a>
+      <a class="btn btn-outline-secondary"
+         th:href="@{/institutions/{code}(code=${job.instCode})}">이 기관 공고 이력</a>
+    </div>
+    <p th:if="${job.srcUrlGeneric}" class="small text-secondary mb-4">
+      원문 링크가 기관 대표 화면으로 연결될 수 있어 잡알리오 개별 공고 링크를 함께 제공합니다.
+    </p>
+
+    <section class="mb-4">
+      <h2 class="h5 fw-bold">지원 자격</h2>
+      <p class="pre-line-text text-body-secondary mb-0"
+         th:text="${#strings.isEmpty(job.aplyQlfc)} ? '기재된 내용이 없습니다.' : ${job.aplyQlfc}"></p>
+    </section>
+
+    <section class="mb-4">
+      <h2 class="h5 fw-bold">우대 사항</h2>
+      <p class="pre-line-text text-body-secondary mb-0"
+         th:text="${#strings.isEmpty(job.pref)} ? '기재된 내용이 없습니다.' : ${job.pref}"></p>
+    </section>
+
+    <section class="mb-4">
+      <h2 class="h5 fw-bold">전형 설명</h2>
+      <p class="pre-line-text text-body-secondary mb-0"
+         th:text="${#strings.isEmpty(job.scrnprcdr)} ? '기재된 내용이 없습니다.' : ${job.scrnprcdr}"></p>
+    </section>
+
+    <section>
+      <h2 class="h5 fw-bold">전형 단계 · 첨부파일</h2>
+      <div th:if="${!job.hasCollectedDetail()}" class="alert alert-light border text-secondary mb-0">
+        상세 정보 미수집
+      </div>
+      <div th:if="${job.hasCollectedDetail()}" class="row g-3 mt-1">
+        <div class="col-12 col-md-6">
+          <h3 class="h6 fw-semibold">전형 단계</h3>
+          <p th:if="${#lists.isEmpty(job.steps)}" class="small text-secondary mb-0">등록된 단계가 없습니다.</p>
+          <ul th:unless="${#lists.isEmpty(job.steps)}" class="list-group list-group-flush small">
+            <li class="list-group-item px-0" th:each="step : ${job.steps}">
+              <strong th:text="${step.title}">단계</strong>
+              <span th:if="${!#strings.isEmpty(step.detail)}" class="text-secondary d-block pre-line-text" th:text="${step.detail}"></span>
+            </li>
+          </ul>
+        </div>
+        <div class="col-12 col-md-6">
+          <h3 class="h6 fw-semibold">첨부파일</h3>
+          <p th:if="${#lists.isEmpty(job.files)}" class="small text-secondary mb-0">첨부파일이 없습니다.</p>
+          <ul th:unless="${#lists.isEmpty(job.files)}" class="list-group list-group-flush small">
+            <li class="list-group-item px-0" th:each="file : ${job.files}">
+              <a th:if="${file.safeUrl != null}"
+                 th:href="${file.safeUrl}"
+                 target="_blank"
+                 rel="noopener noreferrer"
+                 th:text="${file.name}">파일</a>
+              <span th:if="${file.safeUrl == null}" th:text="${file.name}">파일</span>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </article>
+</main>
+<footer th:replace="~{fragments/layout :: footer}"></footer>
+</body>
+</html>
