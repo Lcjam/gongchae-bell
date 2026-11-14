@@ -28,7 +28,7 @@ java -jar build/libs/gongchae-bell.jar --spring.main.web-application-type=none -
 
 미완료 달의 upstream totalCount가 바뀌어 기존 페이지와 합칠 수 없으면 멈춘다. 기간과 새 슬롯을 지정하고 `--collector.backfill-restart-pages=true`로 **미완료 달의 페이지**를 처음부터 다시 읽는다. 완료 달은 이 옵션에서도 건너뛴다. 중복 반영은 #3 코어가 멱등 처리한다.
 
-명령/월/페이지의 기간·페이지·원격 totalCount·받은 건수·고유 SN 집합과 고유 건수를 `collect_run`에 남긴다. null 결과의 종료된 기존 실행은 이력으로 보존한다. 세션 잠금의 채택 전 제안과 한계는 [검토 초안](../../collab/2026-11-15-implementation/sol-collector-lock-proposal.md)에 있다.
+명령/월/페이지의 기간·페이지·원격 totalCount·받은 건수·고유 SN 집합과 고유 건수를 `collect_run`에 남긴다. 전체 기간 고유 수는 월별 수신 SN의 실제 합집합이다. 재개한 명령/월 요약의 received는 저장된 완료 페이지까지 포함한 해당 범위의 수신 합계이며, 해당 명령에서 새로 발생한 HTTP 시도 수는 api_attempt로 구분한다. null 결과의 종료된 기존 실행은 이력으로 보존한다. 세션 잠금의 채택 전 제안과 한계는 [검토 초안](../../collab/2026-11-15-implementation/sol-collector-lock-proposal.md)에 있다.
 
 ## 운영 지표
 
