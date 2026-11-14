@@ -2,6 +2,8 @@
 
 > 스키마의 원본은 Flyway 스크립트다. 이 문서는 그와 일치해야 한다. 시각은 `timestamptz`, 날짜는 `date`(KST 기준)로 저장한다.
 
+구현 현황 (2026-11-14): `V1__catalog_and_ingestion.sql`은 공고 5개 테이블과 `collect_run`, `api_budget`을 만든다. V2는 마지막 완전 수집 조회용 부분 인덱스와 코드 유형 제약을 추가한다. 아래 `rate_limit`, 구독/발송 테이블은 아직 설계이며 후속 마이그레이션으로 구현한다.
+
 ```mermaid
 erDiagram
     institution ||--o{ posting : "공시"
