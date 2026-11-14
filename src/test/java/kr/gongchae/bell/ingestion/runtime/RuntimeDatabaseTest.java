@@ -1,0 +1,214 @@
+package kr.gongchae.bell.ingestion.runtime;
+
+import static org.assertj.core.api.Assertions.*;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import org.flywaydb.core.Flyway;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.jdbc.support.JdbcTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.postgresql.PostgreSQLContainer;
+
+@Testcontainers
+class RuntimeDatabaseTest {
+    @Container static PostgreSQLContainer postgres=new PostgreSQLContainer("postgres:17");
+    JdbcClient jdbc;
+    JdbcTransactionManager manager;
+    DriverManagerDataSource dataSource;
+    ApiBudget first;
+    ApiBudget second;
+    Clock clock=Clock.fixed(Instant.parse("2026-11-15T15:01:00Z"),ZoneOffset.UTC);
+    @BeforeEach void setup() {
+        var ds=new DriverManagerDataSource(postgres.getJdbcUrl(),postgres.getUsername(),postgres.getPassword());
+        dataSource=ds;
+        Flyway.configure().dataSource(ds).load().migrate(); jdbc=JdbcClient.create(ds); manager=new JdbcTransactionManager(ds);
+        jdbc.sql("TRUNCATE api_attempt, api_budget, collect_run RESTART IDENTITY CASCADE").update();
+        var properties=new CollectorProperties(false,null,500,900,false,null,null,null,false);
+        first=new ApiBudget(jdbc,manager,clock,properties); second=new ApiBudget(jdbc,manager,clock,properties);
+    }
+    String completeFixture() throws Exception {
+        var json=tools.jackson.databind.json.JsonMapper.builder().build();
+        var root=(tools.jackson.databind.node.ObjectNode)json.readTree(java.nio.file.Files.readString(java.nio.file.Path.of("fixtures/alio-public-list-sample.json"))).path("data");
+        root.put("totalCount",root.path("result").size());
+        for(var row:root.path("result")) {
+            ((tools.jackson.databind.node.ObjectNode)row).put("pbancBgngYmd","20261101").put("pbancEndYmd","20261231");
+        }
+        return json.writeValueAsString(root);
+    }
+    @Test void twoCompleteRuntimeInstancesMakeOneExternalRequestAndOneActualCoreApply() throws Exception {
+        jdbc.sql("TRUNCATE institution CASCADE").update();
+        String body=completeFixture();
+        var requests=new java.util.concurrent.atomic.AtomicInteger();
+        var server=com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1",0),0);
+        server.createContext("/",e->{requests.incrementAndGet();byte[] bytes=body.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            e.sendResponseHeaders(200,bytes.length);e.getResponseBody().write(bytes);e.close();});server.start();
+        try(var http=java.net.http.HttpClient.newHttpClient();var pool=Executors.newFixedThreadPool(2)) {
+            var uri=java.net.URI.create("http://127.0.0.1:"+server.getAddress().getPort()+"/");
+            var runs=new CollectionRuns(jdbc,clock,manager);
+            var ingestor=new kr.gongchae.bell.ingestion.PostingIngestor(jdbc,manager,clock.withZone(ApiBudget.KST));
+            var details=org.mockito.Mockito.mock(DetailCollector.class);
+            var one=new RegularCollector(runs,new RecruitmentClient(http,first,"fixture",uri,d->{},clock,java.time.Duration.ofSeconds(2)),ingestor,details,clock);
+            var two=new RegularCollector(runs,new RecruitmentClient(http,second,"fixture",uri,d->{},clock,java.time.Duration.ofSeconds(2)),ingestor,details,clock);
+            var start=new CountDownLatch(1);
+            var a=pool.submit(()->{start.await();return one.collect(clock.instant());});
+            var b=pool.submit(()->{start.await();return two.collect(clock.instant());});start.countDown();
+            assertThat((a.get()?1:0)+(b.get()?1:0)).isEqualTo(1);
+            assertThat(requests).hasValue(1);
+            assertThat(jdbc.sql("SELECT count(*) FROM posting").query(Integer.class).single()).isEqualTo(10);
+            assertThat(jdbc.sql("SELECT result FROM collect_run WHERE kind='REGULAR'").query(String.class).single()).isEqualTo("COMPLETE");
+            assertThat(jdbc.sql("SELECT count FROM api_budget").query(Integer.class).single()).isEqualTo(1);
+            org.mockito.Mockito.verify(details).collect(RegularCollector.slot(clock.instant()));
+        } finally {server.stop(0);}
+    }
+    @Test void regularHttpAndCoreFailuresKeepLastCompleteAndCoreOwnsParserFailureCode() throws Exception {
+        jdbc.sql("TRUNCATE institution CASCADE").update();
+        var runs=new CollectionRuns(jdbc,clock,manager);
+        var client=org.mockito.Mockito.mock(RecruitmentClient.class);
+        var ingestor=new kr.gongchae.bell.ingestion.PostingIngestor(jdbc,manager,clock.withZone(ApiBudget.KST));
+        var details=org.mockito.Mockito.mock(DetailCollector.class);
+        var collector=new RegularCollector(runs,client,ingestor,details,clock);
+        org.mockito.Mockito.when(client.regularList()).thenReturn(completeFixture()).thenReturn("not-json fixture secret")
+                .thenThrow(new CollectionFailure(CollectionFailure.Code.HTTP_TIMEOUT));
+        assertThat(collector.collect(clock.instant())).isTrue();
+        var last=jdbc.sql("SELECT max(finished_at)::text FROM collect_run WHERE result='COMPLETE'").query(String.class).single();
+        assertThat(collector.collect(clock.instant().plusSeconds(3600))).isFalse();
+        assertThat(collector.collect(clock.instant().plusSeconds(7200))).isFalse();
+        assertThat(jdbc.sql("SELECT error FROM collect_run WHERE result='FAILED' ORDER BY id").query(String.class).list())
+                .containsExactly("NON_JSON","HTTP_TIMEOUT");
+        assertThat(jdbc.sql("SELECT max(finished_at)::text FROM collect_run WHERE result='COMPLETE'").query(String.class).single()).isEqualTo(last);
+        assertThat(jdbc.sql("SELECT count(*) FROM posting").query(Integer.class).single()).isEqualTo(10);
+        org.mockito.Mockito.verify(details).collect(RegularCollector.slot(clock.instant()));
+    }
+    @Test void completedPageCheckpointKeepsExactIdsAndPeriodForResume() {
+        var runs=new CollectionRuns(jdbc,clock,manager);
+        var from=java.time.LocalDate.of(2024,2,1);var to=java.time.LocalDate.of(2024,2,29);
+        long page=runs.claim("BACKFILL","manual1/2024-02/page1").orElseThrow();
+        runs.metadata(page,from.minusYears(1),to,from,to,1);
+        runs.completePage(page,3,3,3,0,0,java.util.Set.of(5L,9L,12L));
+        var resumed=runs.completedPage(from,to,1).orElseThrow();
+        assertThat(resumed.total()).isEqualTo(3);assertThat(resumed.received()).isEqualTo(3);
+        assertThat(resumed.sns()).containsExactlyInAnyOrder(5L,9L,12L);
+        assertThat(runs.completedMonth(from,to)).isFalse();
+        long month=runs.claim("BACKFILL","manual2/2024-02").orElseThrow();runs.metadata(month,from.minusYears(1),to,from,to,null);
+        runs.finish(month,"COMPLETE",null,3,3,3);
+        assertThat(runs.completedMonth(from,to)).isTrue();assertThat(runs.completedMonth(from,to.minusDays(1))).isFalse();
+    }
+    @Test void supplementalSessionLockExcludesAnotherOwnerAndReleasesAfterCloseAndBackendDeath() {
+        var leases=new AdvisoryLease(dataSource);
+        var firstLease=leases.acquire(AdvisoryLease.BACKFILL).orElseThrow();
+        assertThat(leases.acquire(AdvisoryLease.BACKFILL)).isEmpty();
+        firstLease.close();
+        var interrupted=leases.acquire(AdvisoryLease.BACKFILL).orElseThrow();
+        jdbc.sql("SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype='advisory' AND objid=:key")
+                .param("key",AdvisoryLease.BACKFILL).query(Boolean.class).list();
+        assertThatThrownBy(interrupted::close).hasMessage("DATABASE_FAILURE");
+        try(var resumed=leases.acquire(AdvisoryLease.BACKFILL).orElseThrow()) {
+            assertThat(leases.acquire(AdvisoryLease.BACKFILL)).isEmpty();
+        }
+    }
+    void posting() {
+        jdbc.sql("TRUNCATE institution CASCADE").update();
+        jdbc.sql("INSERT INTO institution(code,name) VALUES ('TEST','fixture')").update();
+        jdbc.sql("""
+                INSERT INTO posting(sn,inst_code,title,bgng_date,end_date,status,from_backfill,content_hash,first_seen_at,last_seen_at)
+                VALUES (42,'TEST','fixture','2026-11-01','2026-12-01','OPEN',false,'fixture',now(),now())
+                """).update();
+    }
+    @Test void detailIsIndependentAndMalformedResponseKeepsSavedArrays() {
+        posting();
+        var collector=new DetailCollector(jdbc,org.mockito.Mockito.mock(RecruitmentClient.class),
+                new CollectionRuns(jdbc,clock,manager),new AdvisoryLease(dataSource),clock);
+        collector.save(42,"{\"resultCode\":\"200\",\"result\":{\"recrutPblntSn\":\"42\",\"steps\":[{\"step\":{\"recrutPbancTtl\":\"stage\"}}],\"files\":[{\"file\":{\"atchFileNm\":\"fixture.pdf\"}}]}}");
+        String before=jdbc.sql("SELECT steps::text || files::text FROM posting WHERE sn=42").query(String.class).single();
+        assertThatThrownBy(()->collector.save(42,"{\"resultCode\":200,\"result\":{\"recrutPblntSn\":42}}"))
+                .hasMessage("INVALID_DETAIL");
+        assertThat(jdbc.sql("SELECT detail_status FROM posting WHERE sn=42").query(String.class).single()).isEqualTo("DONE");
+        assertThat(jdbc.sql("SELECT steps::text || files::text FROM posting WHERE sn=42").query(String.class).single()).isEqualTo(before);
+        assertThat(jdbc.sql("SELECT title FROM posting WHERE sn=42").query(String.class).single()).isEqualTo("fixture");
+    }
+    @Test void detailsRetryFailuresAtNextSlotButNeverRequestSuccessfulOrHistoricalPostingAgain() {
+        posting(); var client=org.mockito.Mockito.mock(RecruitmentClient.class);
+        org.mockito.Mockito.when(client.detail(42)).thenThrow(new CollectionFailure(CollectionFailure.Code.HTTP_TIMEOUT))
+                .thenReturn("{\"resultCode\":200,\"result\":{\"recrutPblntSn\":42,\"steps\":[],\"files\":[]}}");
+        var collector=new DetailCollector(jdbc,client,new CollectionRuns(jdbc,clock,manager),new AdvisoryLease(dataSource),clock);
+        collector.collect("slot1");
+        assertThat(jdbc.sql("SELECT detail_status FROM posting WHERE sn=42").query(String.class).single()).isEqualTo("FAILED");
+        collector.collect("slot1"); org.mockito.Mockito.verify(client).detail(42);
+        collector.collect("slot2"); collector.collect("slot3");
+        org.mockito.Mockito.verify(client,org.mockito.Mockito.times(2)).detail(42);
+        jdbc.sql("UPDATE posting SET from_backfill=true, detail_status='NONE'").update();
+        collector.collect("slot4"); org.mockito.Mockito.verifyNoMoreInteractions(client);
+    }
+    @Test void everyAttemptSurvivesCallerRollbackAndServiceRestartInKstDay() {
+        var tx=new TransactionTemplate(manager);
+        assertThatThrownBy(()->tx.executeWithoutResult(status->{ first.reserve("REGULAR"); throw new IllegalStateException(); }))
+                .isInstanceOf(IllegalStateException.class);
+        assertThat(jdbc.sql("SELECT count FROM api_budget WHERE day='2026-11-16'").query(Integer.class).single()).isEqualTo(1);
+        long next=second.reserve("DETAIL"); second.finish(next,"HTTP_TIMEOUT");
+        assertThat(jdbc.sql("SELECT count(*) FROM api_attempt").query(Integer.class).single()).isEqualTo(2);
+        assertThat(jdbc.sql("SELECT count(*) FROM api_attempt WHERE outcome IS NULL").query(Integer.class).single()).isEqualTo(1);
+    }
+    @Test void twoInstancesRacingAt899MakeExactlyOneReservation() throws Exception {
+        jdbc.sql("INSERT INTO api_budget(day,count) VALUES ('2026-11-16',899)").update();
+        var start=new CountDownLatch(1);
+        try(var pool=Executors.newFixedThreadPool(2)) {
+            var a=pool.submit(()->reserve(start,first)); var b=pool.submit(()->reserve(start,second)); start.countDown();
+            assertThat(a.get()+b.get()).isEqualTo(1);
+        }
+        assertThat(jdbc.sql("SELECT count FROM api_budget").query(Integer.class).single()).isEqualTo(900);
+        assertThat(jdbc.sql("SELECT count(*) FROM api_attempt").query(Integer.class).single()).isEqualTo(1);
+    }
+    int reserve(CountDownLatch start,ApiBudget budget) throws Exception {
+        start.await(); try {budget.reserve("REGULAR");return 1;}
+        catch(CollectionFailure e) { assertThat(e.code()).isEqualTo(CollectionFailure.Code.BUDGET_EXHAUSTED); return 0; }
+    }
+    @Test void metricsExposePersistedAttemptsRetriesAndLastCompleteAfterRestart() {
+        first.reserve("REGULAR",1);first.reserve("REGULAR",2);
+        jdbc.sql("""
+                INSERT INTO collect_run(kind,slot,started_at,finished_at,result) VALUES
+                  ('REGULAR','one',now(), '2026-11-14T00:00:00Z','COMPLETE'),
+                  ('REGULAR','two',now(),now(),'FAILED'),('REGULAR','three',now(),now(),'INCOMPLETE')
+                """).update();
+        var registry=new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        try {
+            new CollectorMetrics(registry,jdbc,clock);
+            assertThat(registry.get("collector.api.attempts.today").gauge().value()).isEqualTo(2);
+            assertThat(registry.get("collector.api.retries.today").gauge().value()).isEqualTo(1);
+            assertThat(registry.get("collector.regular.incomplete.consecutive").gauge().value()).isEqualTo(2);
+            assertThat(registry.get("collector.last.complete.epoch").gauge().value())
+                    .isEqualTo(Instant.parse("2026-11-14T00:00:00Z").getEpochSecond());
+        } finally {registry.close();}
+    }
+    @Test void warningThresholdIsCrossedOnceAndNextDayHasFreshBudget() {
+        jdbc.sql("INSERT INTO api_budget(day,count) VALUES ('2026-11-16',499)").update();
+        var logger=(ch.qos.logback.classic.Logger)org.slf4j.LoggerFactory.getLogger(ApiBudget.class);
+        var events=new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();events.start();logger.addAppender(events);
+        try {first.reserve("BACKFILL");second.reserve("BACKFILL");}
+        finally {logger.detachAppender(events);events.stop();}
+        assertThat(events.list.stream().filter(e->e.getFormattedMessage().equals("API_BUDGET_WARNING")).count()).isEqualTo(1);
+        assertThat(jdbc.sql("SELECT count FROM api_budget").query(Integer.class).single()).isEqualTo(501);
+        var tomorrow=new ApiBudget(jdbc,manager,Clock.fixed(Instant.parse("2026-11-16T15:00:00Z"),ZoneOffset.UTC),
+                new CollectorProperties(false,null,500,900,false,null,null,null,false));
+        tomorrow.reserve("REGULAR");
+        assertThat(jdbc.sql("SELECT count FROM api_budget WHERE day='2026-11-17'").query(Integer.class).single()).isEqualTo(1);
+    }
+    @Test void twoRunOwnersClaimOneSlotAndCompletedResultCannotBeOverwritten() throws Exception {
+        var runs=new CollectionRuns(jdbc,clock,manager); var start=new CountDownLatch(1);
+        try(var pool=Executors.newFixedThreadPool(2)) {
+            var a=pool.submit(()->{start.await();return runs.claim("REGULAR","2026-11-16T00:00+09:00");});
+            var b=pool.submit(()->{start.await();return runs.claim("REGULAR","2026-11-16T00:00+09:00");}); start.countDown();
+            assertThat((a.get().isPresent()?1:0)+(b.get().isPresent()?1:0)).isEqualTo(1);
+        }
+        long id=jdbc.sql("SELECT id FROM collect_run").query(Long.class).single();
+        runs.finish(id,"COMPLETE",null,1,1,1); runs.fail(id,CollectionFailure.Code.HTTP_TIMEOUT);
+        assertThat(jdbc.sql("SELECT result FROM collect_run").query(String.class).single()).isEqualTo("COMPLETE");
+    }
+}

@@ -35,3 +35,9 @@ management:
       group:
         readiness:
           include: readinessState,db
+
+collector:
+  enabled: ${COLLECTOR_ENABLED:false}
+  service-key: ${COLLECTOR_SERVICE_KEY:}
+  warning-limit: ${COLLECTOR_WARNING_LIMIT:500}
+  stop-limit: ${COLLECTOR_STOP_LIMIT:900}

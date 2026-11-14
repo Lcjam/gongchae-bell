@@ -1,0 +1,87 @@
+package kr.gongchae.bell.ingestion.runtime;
+
+import java.io.IOException;
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
+import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.LocalDate;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import org.springframework.stereotype.Component;
+
+@Component
+public class RecruitmentClient {
+    private static final URI OFFICIAL = URI.create("https://apis.data.go.kr/1051000/recruitment/");
+    private final HttpClient http;
+    private final ApiBudget budget;
+    private final String serviceKey;
+    private final URI base;
+    private final Sleeper sleeper;
+    private final Clock clock;
+    private final Duration timeout;
+    @org.springframework.beans.factory.annotation.Autowired
+    public RecruitmentClient(ApiBudget budget, CollectorProperties properties, Clock clock) {
+        this(HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).followRedirects(HttpClient.Redirect.NEVER).build(),
+                budget, properties.serviceKey(), OFFICIAL, Thread::sleep, clock, Duration.ofSeconds(10));
+    }
+    RecruitmentClient(HttpClient http, ApiBudget budget, String serviceKey, URI base, Sleeper sleeper, Clock clock, Duration timeout) {
+        this.http=http; this.budget=budget; this.serviceKey=serviceKey; this.base=base;
+        this.sleeper=sleeper; this.clock=clock; this.timeout=timeout;
+    }
+    public String regularList() { return get("list", "REGULAR", Map.of("ongoingYn","Y","numOfRows","1000","pageNo","1")); }
+    public String backfillList(LocalDate from, LocalDate to, int page) {
+        return get("list", "BACKFILL", Map.of("pbancBgngYmd",from.toString(),"pbancEndYmd",to.toString(),
+                "numOfRows","1000","pageNo",Integer.toString(page)));
+    }
+    public String detail(long sn) { return get("detail","DETAIL", Map.of("sn",Long.toString(sn))); }
+    private String get(String endpoint, String kind, Map<String,String> params) {
+        Map<String,String> query = new LinkedHashMap<>();
+        query.put("serviceKey",serviceKey); query.put("resultType","json"); query.putAll(params);
+        String encoded = query.entrySet().stream().map(e -> encode(e.getKey())+"="+encode(e.getValue()))
+                .collect(java.util.stream.Collectors.joining("&"));
+        URI uri = base.resolve(endpoint + "?" + encoded);
+        CollectionFailure.Code last = CollectionFailure.Code.HTTP_CONNECTION;
+        for (int attempt=0; attempt<3; attempt++) {
+            long id = budget.reserve(kind,attempt+1);
+            Duration delay = Duration.ofSeconds(2L << attempt);
+            try {
+                var response=http.send(HttpRequest.newBuilder(uri).timeout(timeout).GET().build(),HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+                int code=response.statusCode();
+                if (code==200) { budget.finish(id,"SUCCESS"); return response.body(); }
+                last=code==429 ? CollectionFailure.Code.HTTP_RATE_LIMIT : CollectionFailure.Code.HTTP_STATUS;
+                budget.finish(id,last.name());
+                if (code==429) delay=retryAfter(response.headers().firstValue("Retry-After").orElse(""),delay);
+                else if (code<500 || code>599) throw new CollectionFailure(last);
+            } catch (HttpTimeoutException e) {
+                last=CollectionFailure.Code.HTTP_TIMEOUT; budget.finish(id,last.name());
+            } catch (IOException e) {
+                last=CollectionFailure.Code.HTTP_CONNECTION; budget.finish(id,last.name());
+            } catch (InterruptedException e) {
+                budget.finish(id,CollectionFailure.Code.INTERRUPTED.name()); Thread.currentThread().interrupt();
+                throw new CollectionFailure(CollectionFailure.Code.INTERRUPTED);
+            }
+            if (attempt<2) {
+                try { sleeper.sleep(delay); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new CollectionFailure(CollectionFailure.Code.INTERRUPTED); }
+            }
+        }
+        throw new CollectionFailure(last);
+    }
+    private Duration retryAfter(String value, Duration fallback) {
+        try { return Duration.ofSeconds(Math.max(0,Long.parseLong(value.trim()))); }
+        catch (RuntimeException ignored) {
+            try { return Duration.ofMillis(Math.max(0,Duration.between(clock.instant(),ZonedDateTime.parse(value,DateTimeFormatter.RFC_1123_DATE_TIME).toInstant()).toMillis())); }
+            catch (RuntimeException invalid) { return fallback; }
+        }
+    }
+    private static String encode(String value) { return URLEncoder.encode(value,StandardCharsets.UTF_8); }
+    @FunctionalInterface interface Sleeper { void sleep(Duration duration) throws InterruptedException; }
+}
