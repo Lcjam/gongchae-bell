@@ -2,7 +2,7 @@
 
 공공기관 채용공고에서 기관의 최근 3년 채용 이력까지 이어 보고, 관심 조건의 새 공고와 마감 임박 알림을 받는 서비스입니다.
 
-현재는 **M1 구현 중**입니다. 실행 기반, PostgreSQL 스키마, 홈/목록 빈 상태만 구현됐습니다. 수집·필터·기관 상세·알림·공개 배포는 아직 제공하지 않습니다. 전체 요구사항은 [PRD](docs/prd.md), 구조는 [아키텍처](docs/design/architecture.md), 작업은 [Issues](https://github.com/Lcjam/gongchae-bell/issues)에서 확인할 수 있습니다.
+현재는 **M1 구현 중**입니다. 실행 기반, PostgreSQL 스키마, 공고 웹 화면(`/` · `/jobs` · `/jobs/{sn}` · `/institutions/{code}` · `/robots.txt` · `/sitemap.xml`)이 구현됐습니다. 수집(배치)·알림·공개 배포는 아직 제공하지 않습니다. 전체 요구사항은 [PRD](docs/prd.md), 구조는 [아키텍처](docs/design/architecture.md), 작업은 [Issues](https://github.com/Lcjam/gongchae-bell/issues)에서 확인할 수 있습니다.
 
 ## 로컬 실행
 

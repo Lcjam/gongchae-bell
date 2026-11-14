@@ -19,6 +19,8 @@ spring:
         # ADR-0014: let a running collection finish for up to 30s on shutdown instead of cutting it off.
         await-termination: true
         await-termination-period: 30s
+app:
+  base-url: ${APP_BASE_URL:http://localhost:8080}
 server:
   shutdown: graceful
   error:
