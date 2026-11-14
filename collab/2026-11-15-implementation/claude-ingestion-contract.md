@@ -4,6 +4,12 @@
 > 브랜치 `feat/#3-ingestion-core` (main `9402015` 기반). 근거: [준비안](../2026-11-14-resume/claude-ingestion-ready.md)과 codex 검수 지시.
 > **이 계약을 바꿀 때는 이 파일을 먼저 고치고 #4 담당에게 알린다.**
 
+## 변경 이력
+| 판 | 날짜 | 바뀐 점 |
+|---|---|---|
+| v1 | 2026-11-15 `497db48` | 최초 |
+| **v2** | 2026-11-15 (codex 검수 `collab/2026-11-15-review/03-codex-ingestion-review.md` 반영, 원본 작업 경로에 있음) | ① `upsertPage` 반환을 `Counts` → **`PageResult(Counts counts, Set<Long> sns)`**로 바꾼다. ② `pref`를 U+001F 연결에서 **라벨과 줄바꿈으로 된 읽을 수 있는 텍스트**로 바꾸고, U+001F가 들어 있어도 거부하지 않는다. ③ 음수 `totalCount`는 `INVALID_ENVELOPE`. `applyRegular`의 시그니처와 동작은 그대로다 |
+
 ## 1. 공개 API (`kr.gongchae.bell.ingestion`)
 
 ```java
@@ -13,17 +19,20 @@ public class PostingIngestor {
     public RunResult applyRegular(long runId, String body, Instant observedAt);
 
     /** 최초 적재 한 페이지. 반영만 한다. 실패하면 IngestionException, 아무것도 반영하지 않는다. */
-    public Counts upsertPage(String body, Instant observedAt);
+    public PageResult upsertPage(String body, Instant observedAt);
 }
 
 public record Counts(int totalCount, int received, int inserted, int changed, int closed) {}
+/** sns: 이 페이지에서 검증하고 반영한 모든 recrutPblntSn. 새로 넣은 것과 이미 있던 것을 모두 포함한다.
+ *  수정할 수 없는 정렬된 집합이고, 페이지 안 중복은 DUPLICATE_SN으로 거부되므로 sns.size() == counts.received()다. */
+public record PageResult(Counts counts, SortedSet<Long> sns) {}
 public record RunResult(String result, Failure failure, Counts counts) {}   // result: COMPLETE | INCOMPLETE | FAILED
 public class IngestionException extends RuntimeException { public Failure failure(); }
 
 public enum Failure {          // collect_run.result   // collect_run.error에는 name()만 저장
     NON_JSON,                  // FAILED       JSON 아님, 잘린 JSON, 최상위가 객체 아님
     RESULT_CODE_NOT_OK,        // FAILED       resultCode 없음 또는 200 아님 (원래 코드 값은 저장하지 않는다)
-    INVALID_ENVELOPE,          // FAILED       totalCount가 정수가 아님, result가 배열이 아님
+    INVALID_ENVELOPE,          // FAILED       totalCount가 0 이상의 정수가 아님, result가 배열이 아님
     INVALID_ROW,               // INCOMPLETE   필수값 누락·형식 오류 행이 하나라도 있음
     DUPLICATE_SN,              // INCOMPLETE   한 응답 안에 같은 recrutPblntSn
     COUNT_MISMATCH,            // INCOMPLETE   (정기만) totalCount ≠ 받은 건수
@@ -53,7 +62,12 @@ public enum Failure {          // collect_run.result   // collect_run.error에�
 
 ### `upsertPage` (최초 적재)
 - 한 트랜잭션. **행 하나라도 `Failure`에 걸리면 페이지 전체를 반영하지 않고 `IngestionException`을 던진다.** 호출자는 그 달을 `INCOMPLETE` 또는 `FAILED`로 기록하고, **건너뛰고 COMPLETE로 처리하면 안 된다**(codex 지시).
-- 페이지 단위라서 `COUNT_MISMATCH`, `EMPTY_SNAPSHOT`은 검사하지 않는다. 대신 `Counts.totalCount`, `Counts.received`를 돌려주니 호출자가 월 단위 합(받은 건수 합 = `totalCount`, 고유 sn 수)을 검사한다. 빈 페이지(`totalCount = 0`, `result = []`)는 0건 반영으로 정상 반환한다.
+- 페이지 단위라서 `COUNT_MISMATCH`, `EMPTY_SNAPSHOT`은 검사하지 않는다. 호출자는 반환값으로 월 단위를 검사한다.
+  - `counts.totalCount`: 그 페이지 응답의 `totalCount`(월 전체 건수).
+  - `sns`: 그 페이지의 고유 공고 번호. 여러 페이지의 `sns` 합집합 크기가 월의 고유 수이고, 페이지끼리 겹치는 번호가 페이지 간 중복이다.
+  - `counts.inserted`는 **DB에 없던 행만** 센다. 이미 저장된 공고가 다시 오면 0이 되므로 고유 수 계산에 쓰면 안 된다.
+  - **같은 본문을 #4에서 다시 파싱하지 않는다.** 한 번 파싱해서 한 번 반영하고 그 결과를 돌려준다.
+- 빈 페이지(`totalCount = 0`, `result = []`)는 `PageResult(Counts(0, 0, 0, 0, 0), {})`로 정상 반환한다.
 - 새 행은 `from_backfill = true`. 이미 있는 행은 정기 수집과 같은 규칙으로 비교·갱신하고 `from_backfill`은 바꾸지 않는다.
 - 응답에 없는 행의 누락 판정(CHECK)은 하지 않는다. `collect_run`은 건드리지 않는다.
 - `resultCode`가 200이 아니면(공식 문서의 3번 등 의미 미확인 코드 포함) `RESULT_CODE_NOT_OK`다. 빈 달이 200 + 빈 배열로 오는지 3번으로 오는지는 #4가 실응답으로 확인한다.
@@ -62,7 +76,7 @@ public enum Failure {          // collect_run.result   // collect_run.error에�
 HTTP 호출, `serviceKey`, 재시도, `api_budget`, 회차 선점, 스케줄러, Healthchecks 핑, 상세 수집(`steps`·`files`·`detail_*` 컬럼은 읽지도 쓰지도 않는다), 새 공고 알림과 M2 outbox.
 
 ## 4. 받는 응답 형식
-- 공식 봉투: `{"resultCode": 200, "resultMsg": "...", "totalCount": n, "result": [ ... ]}`. `resultCode`는 정수 또는 숫자 문자열.
+- 공식 봉투: `{"resultCode": 200, "resultMsg": "...", "totalCount": n, "result": [ ... ]}`. `resultCode`는 정수 또는 숫자 문자열. `totalCount`는 0 이상의 정수(JSON 정수)여야 한다.
 - 배열 원소는 평평한 객체 또는 공식 swagger처럼 `{"item": { ... }}`. 둘 다 받는다. #4가 실응답을 확인하면 쓰지 않는 쪽을 지우도록 알려 준다.
 - 공개 경로의 `{"data": { ... }}` 래퍼는 받지 않는다(PRD §8, 대체 경로를 섞지 않음). 테스트 헬퍼만 벗긴다.
 
@@ -76,11 +90,22 @@ HTTP 호출, `serviceKey`, 재시도, `api_budget`, 회차 선점, 스케줄러,
 | `ongoingYn` | 없음, `Y`, `N` 중 하나 |
 | `recrutSe` | 20자 이하 |
 | 코드 목록의 각 코드 | 40자 이하 |
-| `prefCondCn`, `prefCn` | U+001F 문자가 없어야 한다(§6의 구분자) |
 | 모든 텍스트 필드 | 값이 객체나 배열이 아니어야 한다(문자열, 숫자, null만) |
 
+텍스트 내용(제어 문자 포함)은 검사하지 않는다. v1에 있던 "`prefCondCn`·`prefCn`에 U+001F 금지"는 v2에서 없앴다.
+
 ## 6. 저장 규칙 요약
-- **우대(`pref`)**: `prefCondCn`과 `prefCn` 원문을 **U+001F(Unit Separator)로 이어** 한 컬럼에 둔다. 형식은 `<prefCondCn>U+001F<prefCn>`이고 null은 빈 문자열로 쓴다. 둘 다 null이면 `pref`도 null이다. 읽는 쪽(#5)은 `pref.split("\u001F", -1)`로 [요약, 상세]를 얻는다. null과 빈 문자열은 구분하지 않는다(실측 497건에서 빈 문자열 0건). 어느 쪽이 바뀌어도 해시와 `pref` 변경 기록에 잡힌다.
+- **우대(`pref`)**: 두 원문을 라벨이 붙은 단락으로 이어 한 컬럼에 둔다. 화면은 따로 나눌 필요 없이 줄바꿈을 살려(`white-space: pre-line` 등) 그대로 보여 주면 된다.
+  ```text
+  [우대조건]
+  <prefCondCn 원문>
+
+  [우대내용]
+  <prefCn 원문>
+  ```
+  - null인 쪽은 그 단락(라벨 포함)을 빼고, 둘 다 null이면 `pref`도 null이다. 빈 문자열은 라벨만 있는 단락이 된다.
+  - 원문은 바꾸지 않는다(줄바꿈 `\r\n`, 앞뒤 공백, 제어 문자 그대로). 단락 사이 구분은 `\n\n`이다.
+  - 라벨이 늘 붙으므로 어느 쪽 원문이 바뀌거나 생기거나 사라져도 `pref` 값이 달라지고, 해시와 `pref` 변경 기록에 잡힌다. 원문 안에 `\n\n[우대내용]\n` 같은 글이 그대로 들어 있는 경우까지 두 원문으로 되돌릴 수 있다고 보장하지는 않는다(표시용 형식이다).
 - **변경 관측**: PRD FR-C4의 12개 필드(코드 목록은 정렬)를 해시한다. 다르면 `posting_change` 1행 `{"필드": {"old", "new"}}`. `EDU` 코드, `ongoing_yn`, 기관명, 품질 플래그는 덮어쓰기만 한다.
 - **상태**: 응답에 있는 행은 `end_date < 오늘` 또는 `ongoingYn = N`이면 CLOSED, 아니면 OPEN이다(마감 연장으로 다시 나타난 CLOSED도 OPEN이 된다). 정기 수집이 COMPLETE일 때만, 응답에 없는 OPEN·CHECK 행을 `end_date < 오늘`이면 CLOSED, 아니면 CHECK로 바꾼다. `closed`는 이번에 CLOSED로 **바뀐** 기존 행 수다(새로 들어온 행은 세지 않는다).
 - **`src_url`**: 원문 문자열 그대로 저장한다(정규화 없음). `src_url_generic`은 http(s)로 파싱되는 URL 중 (a) 경로가 비거나 `/`이고 쿼리가 없거나, (b) **같은 응답에서 같은 기관(`pblntInstCd`)의 다른 공고가 문자열까지 같은 URL을 쓸 때** true다. 한 번 true면 URL이 바뀌기 전까지 유지한다.
