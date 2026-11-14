@@ -1,15 +1,23 @@
 package kr.gongchae.bell.catalog;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.OffsetDateTime;
 import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.TransientDataAccessResourceException;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.mock.web.MockHttpServletRequest;
 
 class CatalogUnitTest {
@@ -116,5 +124,47 @@ class CatalogUnitTest {
         var internalProbeReq = new MockHttpServletRequest("GET", "/");
         internalProbeReq.addHeader("User-Agent", "UptimeRobot/2.0");
         assertThat(metrics.classifyTraffic(internalProbeReq)).isEqualTo(CatalogMetrics.TrafficType.INTERNAL);
+    }
+
+    @Test
+    void freshnessDetectsTwoHourDelayRecoversAndHandlesDbOutageWithoutThrowing() {
+        ZoneId kst = ZoneId.of("Asia/Seoul");
+        Instant now = Instant.parse("2026-11-15T00:00:00Z"); // 09:00:00 KST
+        Clock clock = Clock.fixed(now, kst);
+        JdbcClient failingJdbc = mock(JdbcClient.class);
+        when(failingJdbc.sql(anyString())).thenThrow(new TransientDataAccessResourceException("simulated outage"));
+
+        FreshnessService service = new FreshnessService(failingJdbc, clock);
+
+        var empty = service.evaluate(Optional.empty(), now);
+        assertThat(empty.display()).isEqualTo(FreshnessService.EMPTY_DISPLAY);
+        assertThat(empty.delayed()).isFalse();
+
+        // Exactly 2 hours (07:00 KST -> 09:00 KST) is not yet delayed
+        var boundary = service.evaluate(
+                Optional.of(OffsetDateTime.of(2026, 11, 15, 7, 0, 0, 0, ZoneOffset.ofHours(9))),
+                now);
+        assertThat(boundary.display()).isEqualTo("2026.11.15 07:00 KST");
+        assertThat(boundary.delayed()).isFalse();
+
+        // Over 2 hours (06:59 KST -> 09:00 KST) is flagged as delayed while keeping COMPLETE timestamp
+        var delayed = service.evaluate(
+                Optional.of(OffsetDateTime.of(2026, 11, 15, 6, 59, 0, 0, ZoneOffset.ofHours(9))),
+                now);
+        assertThat(delayed.display()).isEqualTo("2026.11.15 06:59 KST");
+        assertThat(delayed.delayed()).isTrue();
+
+        // Recovered (08:55 KST -> 09:00 KST) clears delay notice
+        var recovered = service.evaluate(
+                Optional.of(OffsetDateTime.of(2026, 11, 15, 8, 55, 0, 0, ZoneOffset.ofHours(9))),
+                now);
+        assertThat(recovered.display()).isEqualTo("2026.11.15 08:55 KST");
+        assertThat(recovered.delayed()).isFalse();
+
+        // Safe wrapper swallows DB errors during error page dispatch
+        var unavailable = service.currentStatusSafe();
+        assertThat(unavailable.display()).isEqualTo(FreshnessService.UNAVAILABLE_DISPLAY);
+        assertThat(unavailable.delayed()).isFalse();
+        assertThat(unavailable.available()).isFalse();
     }
 }
