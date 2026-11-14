@@ -9,6 +9,6 @@ Closes #2
 
 검증: Windows/Java 21/Docker에서 `gradlew.bat check bootJar` 통과, 로컬 관리 readiness/Prometheus 200, 홈 360px 가로 넘침 없음. ARM64 CI는 이 PR에서 실행합니다.
 
-리뷰: [agy](collab/2026-11-14-implementation/02-agy-foundation-review.md), Claude 검토 진행 중. [반영·검증 기록](collab/2026-11-14-implementation/03-foundation-validation.md).
+리뷰: [agy](collab/2026-11-14-implementation/02-agy-foundation-review.md), [Claude](collab/2026-11-14-implementation/02-claude-foundation-review.md). CI 액션 갱신, 실제 HTTP 포트 분리, 인덱스, 실행 JAR 사본, README 수정 반영. [반영·검증 기록](collab/2026-11-14-implementation/03-foundation-validation.md). Gitleaks 8.30.1 전체 커밋 검사에서 누출 0건.
 
 수집/필터/상세/기관/구독/발송/운영 배포는 후속 이슈 범위입니다. 현재 단계는 공개 출시가 아닙니다.

@@ -14,8 +14,10 @@
 - robots DB 쿼리 제거, Clock 시간대 재사용, 푸터 출처, CI 타임아웃 반영.
 - posting_change CASCADE는 보류: 공고 삭제 기능이 없고 변경 이력을 묵시적으로 지울 이유가 없다.
 
-## Claude 진행 중 발견 사항
+## Claude 리뷰 반영
 - 오래된 Node20 Actions를 공식 현재 릴리스로 갱신했다: checkout v7.0.1, setup-java v6.3.0, gradle/actions v6.4.1, upload-artifact v7.0.2, gitleaks-action v3.0.0. 최종 CI 검증은 PR 실행으로 확인한다.
 - 공급 원본: 각 저장소의 GitHub release API 및 action.yml. Spring Boot/Gradle/JDK 버전은 두 에이전트가 공식 원본으로 교차 검증했다.
+- R1: 실행 JAR 사본으로 재시작 후 readiness와 Prometheus를 다시 확인했다. R2: `error`는 100자 이내 내부 코드 전용으로 명시했다. 원본 예외를 저장하지 않는 규칙으로 비밀값 노출도 막는다. R3: `.env.example`에는 키 이름만 둔다는 CLAUDE.md를 유지하고 README에서 세 값 모두 입력하도록 명시했다. R4: Java 17 이상으로 Gradle 실행, 앱은 21 toolchain이라는 문구로 정정했다.
+- 2026-11-14 17:35 KST: 체크섬을 검증한 Gitleaks 8.30.1로 `git . --redact --log-opts=HEAD` 실행, 누출 검출 0건. `.env`, `.tools`, 기존 사용자 미커밋 파일은 커밋 대상이 아니다.
 
 전체 서비스 출시와 실제 수집/발송/운영 리허설은 미완료다. #2 완료가 PRD 전체 완료를 뜻하지 않는다.

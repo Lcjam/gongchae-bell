@@ -6,9 +6,9 @@
 
 ## 로컬 실행
 
-필수: Java 21, Docker (Linux 컨테이너). Gradle은 Wrapper로 실행합니다. 로컬에 Java 17만 있으면 Wrapper가 실행되며 Java 21 toolchain을 다운로드합니다. 최초 실행에는 네트워크가 필요합니다.
+필수: Java 17 이상(Gradle 실행용), Docker (Linux 컨테이너). Gradle은 Wrapper로 실행하고 앱 컴파일·실행용 Java 21은 toolchain이 다운로드합니다. 최초 실행에는 네트워크가 필요합니다.
 
-1. `.env.example`을 `.env`로 복사하고 `DB_USER`, `DB_PASSWORD`를 채웁니다. `DB_URL`은 `jdbc:postgresql://localhost:5432/gongchae`입니다. `.env`는 git에서 제외됩니다.
+1. `.env.example`을 `.env`로 복사하고 세 항목을 모두 채웁니다. `DB_USER`, `DB_PASSWORD`는 직접 정하고, `DB_URL`에는 `jdbc:postgresql://localhost:5432/gongchae`를 넣습니다. **DB_URL을 빈 문자열로 내보내면 시작할 수 없습니다.** `.env`는 git에서 제외됩니다.
 2. `docker compose -f compose.dev.yml up -d --wait`
 3. 같은 `DB_USER`, `DB_PASSWORD`를 앱 실행 셸의 환경변수에 설정합니다. **Spring은 `.env`를 자동으로 읽지 않습니다.**
 4. `./gradlew bootRun` (Windows PowerShell은 `.\gradlew.bat bootRun`)
