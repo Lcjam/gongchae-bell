@@ -54,7 +54,6 @@ public class CatalogController {
     String home(Model model, HttpServletRequest request) {
         metrics.recordPageView("home", request);
         LocalDate kstToday = LocalDate.now(clock);
-        model.addAttribute("lastCollected", freshnessService.lastCollectedDisplay());
         model.addAttribute("title", "공채벨 · 공공기관 채용을 한눈에");
         model.addAttribute("description", "공공기관 채용공고와 기관별 최근 3년 채용 이력을 살펴보세요.");
         model.addAttribute("closingSoon", repository.findClosingSoon(kstToday));
@@ -83,7 +82,6 @@ public class CatalogController {
                 ncs, region, hire, career, status, q, sort, page, allowedCodes);
         CatalogViews.JobSearchResult result = repository.searchJobs(criteria, kstToday);
 
-        model.addAttribute("lastCollected", freshnessService.lastCollectedDisplay());
         model.addAttribute("title", "채용공고 · 공채벨");
         model.addAttribute("description", "직무, 지역, 고용형태, 채용구분별 공공기관 채용공고를 비교하세요.");
         model.addAttribute("filterOptions", filterOptions);
@@ -100,7 +98,6 @@ public class CatalogController {
         CatalogViews.PostingDetail job = repository.findJobDetail(sn, kstToday)
                 .orElseThrow(PostingNotFoundException::new);
 
-        model.addAttribute("lastCollected", freshnessService.lastCollectedDisplay());
         model.addAttribute("title", job.title() + " · " + job.instName() + " · 공채벨");
         model.addAttribute("description", job.instName() + " 채용공고 (" + job.bgngDate() + " ~ " + job.endDate() + ")");
         model.addAttribute("job", job);
@@ -138,7 +135,6 @@ public class CatalogController {
         CatalogViews.InstitutionDetailView detail = repository.findInstitutionDetail(code.trim(), kstToday, requestedPage)
                 .orElseThrow(PostingNotFoundException::new);
 
-        model.addAttribute("lastCollected", freshnessService.lastCollectedDisplay());
         model.addAttribute("title", detail.summary().name() + " 채용 이력 · 공채벨");
         model.addAttribute("description", detail.summary().name() + " 최근 3년 공공기관 채용 이력, 시기 패턴, 직무 분포");
         model.addAttribute("institution", detail);
@@ -173,10 +169,12 @@ public class CatalogController {
     @ExceptionHandler({PostingNotFoundException.class, MethodArgumentTypeMismatchException.class})
     @ResponseStatus(HttpStatus.NOT_FOUND)
     ModelAndView handleNotFound() {
+        FreshnessService.FreshnessStatus status = freshnessService.currentStatusSafe();
         ModelAndView mav = new ModelAndView("error/404", HttpStatus.NOT_FOUND);
         mav.addObject("title", "페이지를 찾을 수 없습니다 · 공채벨");
         mav.addObject("description", "요청하신 채용공고 또는 기관 정보를 찾을 수 없습니다.");
-        mav.addObject("lastCollected", freshnessService.lastCollectedDisplay());
+        mav.addObject("freshness", status);
+        mav.addObject("lastCollected", status.display());
         return mav;
     }
 
