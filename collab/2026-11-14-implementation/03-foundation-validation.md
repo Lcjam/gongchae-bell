@@ -15,9 +15,15 @@
 - posting_change CASCADE는 보류: 공고 삭제 기능이 없고 변경 이력을 묵시적으로 지울 이유가 없다.
 
 ## Claude 리뷰 반영
-- 오래된 Node20 Actions를 공식 현재 릴리스로 갱신했다: checkout v7.0.1, setup-java v6.3.0, gradle/actions v6.4.1, upload-artifact v7.0.2, gitleaks-action v3.0.0. 최종 CI 검증은 PR 실행으로 확인한다.
+- 오래된 Node20 Actions를 공식 현재 릴리스로 갱신했다: checkout v7.0.1, setup-java v6.3.0, gradle/actions v6.4.1, upload-artifact v7.0.2, gitleaks-action v3.0.0. 아래 PR 실행에서 최종 CI 통과를 확인했다.
 - 공급 원본: 각 저장소의 GitHub release API 및 action.yml. Spring Boot/Gradle/JDK 버전은 두 에이전트가 공식 원본으로 교차 검증했다.
 - R1: 실행 JAR 사본으로 재시작 후 readiness와 Prometheus를 다시 확인했다. R2: `error`는 100자 이내 내부 코드 전용으로 명시했다. 원본 예외를 저장하지 않는 규칙으로 비밀값 노출도 막는다. R3: `.env.example`에는 키 이름만 둔다는 CLAUDE.md를 유지하고 README에서 세 값 모두 입력하도록 명시했다. R4: Java 17 이상으로 Gradle 실행, 앱은 21 toolchain이라는 문구로 정정했다.
 - 2026-11-14 17:35 KST: 체크섬을 검증한 Gitleaks 8.30.1로 `git . --redact --log-opts=HEAD` 실행, 누출 검출 0건. `.env`, `.tools`, 기존 사용자 미커밋 파일은 커밋 대상이 아니다.
+
+## 원격 CI 및 후속 리뷰
+- 대상: [PR #8](https://github.com/Lcjam/gongchae-bell/pull/8), head `42d09d793f2258a64892e56debd689a09e24f804`. 2026-11-14 재개 시 GitHub API로 로컬 HEAD와 일치하고 PR이 열려 있으며 미머지 상태임을 확인했다.
+- [CI 실행 43576628354](https://github.com/Lcjam/gongchae-bell/actions/runs/43576628354): `pull_request` 실행 완료, 전체 `success`. [test](https://github.com/Lcjam/gongchae-bell/actions/runs/43576628354/job/132392154384)는 `ubuntu-24.04-arm`에서 `./gradlew --no-daemon check bootJar` 성공, [secrets](https://github.com/Lcjam/gongchae-bell/actions/runs/43576628354/job/132392154599)도 성공했다.
+- [Claude 후속 리뷰](../reviews/pr-8-claude.md)는 원격 `test-results`에서 테스트 4개, 실패 0개, 건너뜀 0개를 확인했고 CI 런타임 차단과 R1~R4가 해결됐다고 판정했다. [agy 후속 리뷰](../reviews/pr-8-agy.md)도 필수·권장 지적 반영과 DoD를 확인해 승인했다.
+- 문서 마감 작업에서는 앱 코드·테스트·설정을 바꾸지 않아 빌드와 통합 테스트를 반복하지 않았다. 이 결과는 위 head의 증거이며 후속 커밋의 CI 통과를 대신하지 않는다.
 
 전체 서비스 출시와 실제 수집/발송/운영 리허설은 미완료다. #2 완료가 PRD 전체 완료를 뜻하지 않는다.

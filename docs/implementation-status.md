@@ -4,7 +4,7 @@
 
 | 범위 | 검증해야 하는 근거 | 현재 상태 |
 |---|---|---|
-| 실행 기반 (#2) | Java 21 빌드, PostgreSQL 17 Flyway, CI, 홈/목록 빈 상태, 두 리뷰 | 구현/검증 중 |
+| 실행 기반 (#2) | Java 21 빌드, PostgreSQL 17 Flyway, CI, 홈/목록 빈 상태, 두 리뷰 | 구현·검증 완료, [PR #8](https://github.com/Lcjam/gongchae-bell/pull/8) 머지 대기 ([검증 기록](../collab/2026-11-14-implementation/03-foundation-validation.md#원격-ci-및-후속-리뷰)) |
 | FR-C1 | 월별 3년 최초 적재, 멱등 fixture, 실제 건수/표본 기록 | 미구현 |
 | FR-C2~C4 | 완결성/실패 시 무변경, KST 상태, 필드별 변경 관측 fixture | 미구현 |
 | FR-C5~C6 | 두 앱 선점/재시작, 영속 호출 예산/재시도/경보 | 스키마만 작성 |

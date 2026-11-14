@@ -7,8 +7,8 @@ Closes #2
 - ARM64 CI와 비밀값 검사, 로컬 실행 README
 - 실제 공개 API fixture와 후속 구현/출시 검증 현황
 
-검증: Windows/Java 21/Docker에서 `gradlew.bat check bootJar` 통과, 로컬 관리 readiness/Prometheus 200, 홈 360px 가로 넘침 없음. ARM64 CI는 이 PR에서 실행합니다.
+검증: Windows/Java 21/Docker에서 `gradlew.bat check bootJar` 통과, 로컬 관리 readiness/Prometheus 200, 홈 360px 가로 넘침 없음. head `42d09d7`의 [ARM64 CI](https://github.com/Lcjam/gongchae-bell/actions/runs/43576628354)에서 `check bootJar`와 `secrets` 모두 성공했습니다. Claude가 업로드된 결과에서 테스트 4개, 실패 0개, 건너뜀 0개를 확인했습니다.
 
-리뷰: [agy](collab/2026-11-14-implementation/02-agy-foundation-review.md), [Claude](collab/2026-11-14-implementation/02-claude-foundation-review.md). CI 액션 갱신, 실제 HTTP 포트 분리, 인덱스, 실행 JAR 사본, README 수정 반영. [반영·검증 기록](collab/2026-11-14-implementation/03-foundation-validation.md). Gitleaks 8.30.1 전체 커밋 검사에서 누출 0건.
+리뷰: [agy 후속 승인](https://github.com/Lcjam/gongchae-bell/blob/feat/%232-app-foundation/collab/reviews/pr-8-agy.md), [Claude 후속 확인](https://github.com/Lcjam/gongchae-bell/blob/feat/%232-app-foundation/collab/reviews/pr-8-claude.md). 두 리뷰 모두 머지를 막는 지적이 없다고 확인했습니다. CI 액션 갱신, 실제 HTTP 포트 분리, 인덱스, 실행 JAR 사본, README 수정 반영. [반영·검증 기록](https://github.com/Lcjam/gongchae-bell/blob/feat/%232-app-foundation/collab/2026-11-14-implementation/03-foundation-validation.md). Gitleaks 8.30.1 전체 커밋 검사에서 누출 0건. 사전 리뷰는 [agy](https://github.com/Lcjam/gongchae-bell/blob/feat/%232-app-foundation/collab/2026-11-14-implementation/02-agy-foundation-review.md), [Claude](https://github.com/Lcjam/gongchae-bell/blob/feat/%232-app-foundation/collab/2026-11-14-implementation/02-claude-foundation-review.md)에 보존했습니다.
 
 수집/필터/상세/기관/구독/발송/운영 배포는 후속 이슈 범위입니다. 현재 단계는 공개 출시가 아닙니다.
