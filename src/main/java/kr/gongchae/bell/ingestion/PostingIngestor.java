@@ -14,6 +14,7 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -22,6 +23,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.regex.Pattern;
 import kr.gongchae.bell.ingestion.ListResponseParser.Page;
 import kr.gongchae.bell.ingestion.ListResponseParser.PostingRow;
@@ -92,10 +94,13 @@ public class PostingIngestor {
         }
     }
 
-    public Counts upsertPage(String body, Instant observedAt) {
+    public PageResult upsertPage(String body, Instant observedAt) {
         requireNoTransaction();
         Page page = parser.parse(body);
-        return tx.execute(status -> write(page, true, false, observedAt));
+        Counts counts = tx.execute(status -> write(page, true, false, observedAt));
+        var sns = new TreeSet<Long>();
+        page.rows().forEach(row -> sns.add(row.sn()));
+        return new PageResult(counts, Collections.unmodifiableSortedSet(sns));
     }
 
     private RunResult fail(long runId, IngestionException e, Counts counts) {

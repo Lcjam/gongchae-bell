@@ -18,8 +18,6 @@ import tools.jackson.databind.json.JsonMapper;
 /** Reads the official recruitment list envelope. Any problem rejects the whole response (no partial rows). */
 final class ListResponseParser {
     static final JsonMapper JSON = JsonMapper.builder().build();
-    /** Joins prefCondCn and prefCn in posting.pref; readers split on it. */
-    static final String PREF_SEPARATOR = "\u001F";
     static final List<String> CODE_TYPES = List.of("NCS", "REGION", "HIRE", "EDU");
     private static final Map<String, String[]> CODE_FIELDS = Map.of(
             "NCS", new String[]{"ncsCdLst", "ncsCdNmLst"},
@@ -57,7 +55,7 @@ final class ListResponseParser {
         }
         JsonNode total = root.path("totalCount");
         JsonNode result = root.path("result");
-        if (!total.isInt() || !result.isArray()) {
+        if (!total.isInt() || total.intValue() < 0 || !result.isArray()) {
             throw new IngestionException(Failure.INVALID_ENVELOPE, null);
         }
         var rows = new ArrayList<PostingRow>();
@@ -103,17 +101,21 @@ final class ListResponseParser {
                 text(n, "srcUrl", sn), ongoing, codes, names);
     }
 
-    /** prefCondCn U+001F prefCn, so a change in either original is observed; null when both are absent. */
+    /**
+     * Both originals as readable labelled paragraphs, so screens print it as is and a change, appearance or removal of
+     * either original changes the value. Absent originals are left out; null when both are absent.
+     */
     private static String pref(JsonNode n, long sn) {
+        var paragraphs = new ArrayList<String>();
         String summary = text(n, "prefCondCn", sn);
         String detail = text(n, "prefCn", sn);
-        if (summary == null && detail == null) {
-            return null;
+        if (summary != null) {
+            paragraphs.add("[우대조건]\n" + summary);
         }
-        if ((summary != null && summary.contains(PREF_SEPARATOR)) || (detail != null && detail.contains(PREF_SEPARATOR))) {
-            throw invalid("pref", sn);
+        if (detail != null) {
+            paragraphs.add("[우대내용]\n" + detail);
         }
-        return (summary == null ? "" : summary) + PREF_SEPARATOR + (detail == null ? "" : detail);
+        return paragraphs.isEmpty() ? null : String.join("\n\n", paragraphs);
     }
 
     private static void codes(JsonNode n, String type, String codeField, String nameField, long sn,

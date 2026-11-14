@@ -33,7 +33,7 @@ erDiagram
 | `recrutPblntSn`, `pblntInstCd`, `instNm`, `recrutPbancTtl`, `pbancBgngYmd`, `pbancEndYmd` | `sn`, `inst_code`, `institution.name`, `title`, `bgng_date`, `end_date` | 필수. 하나라도 없거나 형식이 틀리면 응답 전체를 반영하지 않는다(`INVALID_ROW`) |
 | `recrutNope` | `recrut_nope_raw`, `recrut_nope` | raw는 원문 문자열. 정수이거나 숫자만 있는 문자열일 때만 `recrut_nope` |
 | `aplyQlfcCn`, `scrnprcdrMthdExpln`, `srcUrl` | `aply_qlfc`, `scrnprcdr`, `src_url` | 원문 그대로(공백 정리와 URL 정규화 없음) |
-| `prefCondCn`, `prefCn` | `pref` | `<prefCondCn>` U+001F `<prefCn>`. null은 빈 문자열, 둘 다 없으면 null. 읽을 때 `split("\u001F", -1)` → [요약, 상세] |
+| `prefCondCn`, `prefCn` | `pref` | 읽을 수 있는 라벨 단락: `[우대조건]\n<prefCondCn>` + `\n\n` + `[우대내용]\n<prefCn>`. 없는 쪽 단락은 빼고, 둘 다 없으면 null. 원문(줄바꿈, 제어 문자)은 그대로. 화면은 나누지 않고 줄바꿈만 살려 출력한다 |
 | `ncsCdLst`·`workRgnLst`·`hireTypeLst`·`acbgCondLst` (+ `*NmLst`) | `posting_code`(NCS/REGION/HIRE/EDU), `code_name` | 쉼표로 나누고 정렬한다. 이름은 개수가 같을 때만 위치로 짝짓는다 |
 | `ongoingYn` | `ongoing_yn` | 상태 판정에 쓴다 |
 

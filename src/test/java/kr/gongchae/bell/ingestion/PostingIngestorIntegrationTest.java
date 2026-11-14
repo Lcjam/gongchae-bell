@@ -20,6 +20,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -98,9 +99,7 @@ class PostingIngestorIntegrationTest extends IntegrationTestSupport {
         regular(ListFixture.sample().complete(), T0);
         String summary = "모집 분야별 우대조건이 상이하므로 우대내용 확인 요망";
         String original = (String) posting(307028).get("pref");
-        String[] parts = original.split("\u001F", -1);
-        assertThat(parts).hasSize(2);
-        assertThat(parts[0]).isEqualTo(summary);
+        assertThat(original).startsWith("[우대조건]\n" + summary + "\n\n[우대내용]\n※공통").doesNotContain("\u001F");
         String hash = (String) posting(307028).get("content_hash");
 
         regular(ListFixture.sample().complete().edit(307028, r -> r.put("prefCondCn", "우대조건 요약 변경")), T1);
@@ -114,7 +113,54 @@ class PostingIngestorIntegrationTest extends IntegrationTestSupport {
             r.put("prefCn", "우대내용 변경");
         }), T2);
         assertThat(changes()).hasSize(2);
-        assertThat(posting(307028).get("pref")).isEqualTo("우대조건 요약 변경\u001F우대내용 변경");
+        assertThat(posting(307028).get("pref")).isEqualTo("[우대조건]\n우대조건 요약 변경\n\n[우대내용]\n우대내용 변경");
+
+        regular(ListFixture.sample().complete().edit(307028, r -> {
+            r.remove("prefCondCn");
+            r.put("prefCn", "우대내용 변경");
+        }), T2.plusSeconds(3600));
+        assertThat(changes()).as("summary disappearing is a change").hasSize(3);
+    }
+
+    @Test
+    void controlCharacterInPreferenceDoesNotBlockTheCollection() {
+        RunResult result = ingestor.applyRegular(run(),
+                ListFixture.sample().complete().edit(307032, r -> r.put("prefCn", "가\u001F나")).body(), T0);
+
+        assertThat(result.result()).isEqualTo("COMPLETE");
+        assertThat(count("posting")).isEqualTo(10);
+        assertThat((String) posting(307032).get("pref")).endsWith("[우대내용]\n가\u001F나");
+    }
+
+    @Test
+    void writeErrorMidwayRollsBackEveryTableAndRecordsApplyError() {
+        regular(ListFixture.sample().complete(), T0);
+        List<List<Map<String, Object>>> before = dump();
+        OffsetDateTime lastComplete = freshness();
+        long id = run();
+        // Rows are written in sn order: 307021 and 307023 change institution, posting, change log and codes before 307027 fails.
+        String body = ListFixture.sample().complete()
+                .edit(307021, r -> {
+                    r.put("pbancEndYmd", "20261201");
+                    r.put("instNm", "한국나노기술원(변경)");
+                })
+                .edit(307023, r -> {
+                    r.put("ncsCdLst", "R600015");
+                    r.put("ncsCdNmLst", "기계");
+                })
+                .edit(307032, r -> r.put("pbancEndYmd", "20261202"))
+                .body();
+        jdbc.sql("ALTER TABLE posting ADD CONSTRAINT test_reject_307027 CHECK (sn <> 307027) NOT VALID").update();
+        try {
+            assertThatThrownBy(() -> ingestor.applyRegular(id, body, T1)).isInstanceOf(DataIntegrityViolationException.class);
+        } finally {
+            jdbc.sql("ALTER TABLE posting DROP CONSTRAINT test_reject_307027").update();
+        }
+
+        assertThat(dump()).isEqualTo(before);
+        assertThat(freshness()).isEqualTo(lastComplete);
+        assertThat(runRow(id)).containsEntry("result", "FAILED").containsEntry("error", "APPLY_ERROR")
+                .containsEntry("total_count", 10).containsEntry("received", 10).containsEntry("inserted", 0);
     }
 
     @Test
@@ -246,22 +292,46 @@ class PostingIngestorIntegrationTest extends IntegrationTestSupport {
         regular(ListFixture.sample().complete(), T0);
         var page = ListFixture.sample().only(307032, 307021).edit(307021, r -> r.put("recrutPblntSn", 999001));
 
-        assertThat(ingestor.upsertPage(page.body(), T1)).isEqualTo(new Counts(497, 2, 1, 0, 0));
+        PageResult result = ingestor.upsertPage(page.body(), T1);
+        assertThat(result.counts()).isEqualTo(new Counts(497, 2, 1, 0, 0));
+        assertThat(result.sns()).containsExactly(307032L, 999001L);
         assertThat(posting(999001)).containsEntry("from_backfill", true).containsEntry("status", "OPEN");
         assertThat(posting(307032).get("from_backfill")).isEqualTo(false);
         assertThat(count("posting WHERE status <> 'OPEN'")).isZero();
-        assertThat(ingestor.upsertPage(ListFixture.sample().envelope(e -> {
+        PageResult empty = ingestor.upsertPage(ListFixture.sample().envelope(e -> {
             e.putArray("result");
             e.put("totalCount", 0);
-        }).body(), T1)).isEqualTo(new Counts(0, 0, 0, 0, 0));
+        }).body(), T1);
+        assertThat(empty.counts()).isEqualTo(new Counts(0, 0, 0, 0, 0));
+        assertThat(empty.sns()).isEmpty();
     }
 
     @Test
-    void backfillPageWithOneInvalidRowAppliesNothing() {
-        var page = ListFixture.sample().edit(307032, r -> r.put("pbancEndYmd", "2026-11-20"));
+    void pageSnSetCountsStoredPostingsAndStaysTheSameWhenThePageRepeats() {
+        regular(ListFixture.sample().complete(), T0);
+        String body = ListFixture.sample().only(307032, 307021, 307027).edit(307027, r -> r.put("recrutPblntSn", 999003)).body();
 
+        PageResult first = ingestor.upsertPage(body, T1);
+        PageResult again = ingestor.upsertPage(body, T2);
+
+        assertThat(first.sns()).containsExactly(307021L, 307032L, 999003L);
+        assertThat(first.counts().received()).isEqualTo(first.sns().size());
+        assertThat(first.counts().inserted()).as("only the new one").isEqualTo(1);
+        assertThat(again.sns()).isEqualTo(first.sns());
+        assertThat(again.counts().inserted()).as("all stored now, yet the set is unchanged").isZero();
+        assertThatThrownBy(() -> first.sns().add(1L)).isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @Test
+    void backfillPageWithOneInvalidRowOrNegativeTotalAppliesNothing() {
+        var page = ListFixture.sample().edit(307032, r -> r.put("pbancEndYmd", "2026-11-20"));
         assertThatThrownBy(() -> ingestor.upsertPage(page.body(), T0))
                 .isInstanceOfSatisfying(IngestionException.class, e -> assertThat(e.failure()).isEqualTo(Failure.INVALID_ROW));
+
+        var negative = ListFixture.sample().envelope(e -> e.put("totalCount", -1));
+        assertThatThrownBy(() -> ingestor.upsertPage(negative.body(), T0))
+                .isInstanceOfSatisfying(IngestionException.class, e -> assertThat(e.failure()).isEqualTo(Failure.INVALID_ENVELOPE));
+
         assertThat(count("posting")).isZero();
         assertThat(count("institution")).isZero();
     }
@@ -299,7 +369,9 @@ class PostingIngestorIntegrationTest extends IntegrationTestSupport {
             release.countDown();
             other.get(10, TimeUnit.SECONDS);
 
-            assertThat(page.get(30, TimeUnit.SECONDS)).isEqualTo(new Counts(497, 10, 9, 1, 0));
+            PageResult result = page.get(30, TimeUnit.SECONDS);
+            assertThat(result.counts()).isEqualTo(new Counts(497, 10, 9, 1, 0));
+            assertThat(result.sns()).hasSize(10).contains(307032L);
         }
         assertThat(posting(307032)).containsEntry("title", "2026년 의료요원(진료교수, 진료의사) 28차 초빙(긴급) 공고")
                 .containsEntry("from_backfill", false);
@@ -325,7 +397,7 @@ class PostingIngestorIntegrationTest extends IntegrationTestSupport {
                         .edit(307027, r -> r.put("recrutPblntSn", 999002)).body(), T1);
             });
             assertThat(regular.get(30, TimeUnit.SECONDS).result()).isEqualTo("COMPLETE");
-            assertThat(backfill.get(30, TimeUnit.SECONDS).received()).isEqualTo(10);
+            assertThat(backfill.get(30, TimeUnit.SECONDS).counts().received()).isEqualTo(10);
         }
         assertThat(count("posting")).isEqualTo(11);
     }

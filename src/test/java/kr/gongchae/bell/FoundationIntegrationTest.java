@@ -44,7 +44,10 @@ class FoundationIntegrationTest extends IntegrationTestSupport {
 
     @Test
     void migrationAndEmptyPagesWorkWithoutExternalServices() throws Exception {
-        assertThat(jdbc.sql("SELECT count(*) FROM flyway_schema_history WHERE success").query(Long.class).single()).isEqualTo(2);
+        // Later migrations (V3+) must not break this test; it only guards that V1 and V2 applied and nothing failed.
+        assertThat(jdbc.sql("SELECT version FROM flyway_schema_history WHERE success AND version IN ('1', '2') ORDER BY version")
+                .query(String.class).list()).containsExactly("1", "2");
+        assertThat(jdbc.sql("SELECT count(*) FROM flyway_schema_history WHERE NOT success").query(Long.class).single()).isZero();
         mvc.perform(get("/")).andExpect(status().isOk())
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("아직 완전 수집 기록이 없습니다")));
         mvc.perform(get("/jobs")).andExpect(status().isOk())
