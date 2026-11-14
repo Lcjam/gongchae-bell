@@ -77,6 +77,7 @@ HTTP 호출, `serviceKey`, 재시도, `api_budget`, 회차 선점, 스케줄러,
 | `recrutSe` | 20자 이하 |
 | 코드 목록의 각 코드 | 40자 이하 |
 | `prefCondCn`, `prefCn` | U+001F 문자가 없어야 한다(§6의 구분자) |
+| 모든 텍스트 필드 | 값이 객체나 배열이 아니어야 한다(문자열, 숫자, null만) |
 
 ## 6. 저장 규칙 요약
 - **우대(`pref`)**: `prefCondCn`과 `prefCn` 원문을 **U+001F(Unit Separator)로 이어** 한 컬럼에 둔다. 형식은 `<prefCondCn>U+001F<prefCn>`이고 null은 빈 문자열로 쓴다. 둘 다 null이면 `pref`도 null이다. 읽는 쪽(#5)은 `pref.split("\u001F", -1)`로 [요약, 상세]를 얻는다. null과 빈 문자열은 구분하지 않는다(실측 497건에서 빈 문자열 0건). 어느 쪽이 바뀌어도 해시와 `pref` 변경 기록에 잡힌다.
