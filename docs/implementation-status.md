@@ -9,7 +9,7 @@
 | FR-C2~C4 | 완결성/실패 시 무변경, KST 상태, 필드별 변경 관측 fixture | #3 반영 로직과 fixture 테스트 작성, PR 리뷰 대기. 실제 API 호출 경로(#4)와는 아직 연결되지 않음 ([결과](../collab/2026-11-15-implementation/claude-ingestion-result.md)) |
 | FR-C5~C6 | 두 앱 선점/재시작, 영속 호출 예산/재시도/경보 | 스키마만 작성 |
 | FR-C7~C8 | 상세 보존, 품질/개별 공고 링크 fixture | 목록 반영이 상세 컬럼을 건드리지 않음과 품질 플래그(#3) 테스트 작성, PR 리뷰 대기. 상세 수집(#4)과 화면 표시(#5)는 미구현 |
-| FR-W1~W4 | 필터/정렬/페이징, 홈, 상세, 3년 기관 통계, 원문 이동 | 구현 완료 (`#5` / `catalog`) |
+| FR-W1~W4 | 필터/정렬/페이징, 홈, 상세, 3년 기관 통계, 원문 이동 | 구현 완료 (`#5` / `catalog`, 단 `detail` 단계·첨부 표시는 공식 swagger 문서 계약 fixture 기준이며 실제 `detail` API 실응답은 미수신) |
 | FR-W5~W8 | 기준 시각, escaping/URL 검사, 메타데이터/robots, 360px 조작 | 구현 완료 (`#5` / `catalog`) |
 | FR-A1~A3 | 이메일 확인, Discord SSRF/암호화, 목적별 토큰, 수정/해지/복구 | 미구현 |
 | FR-A4~A5 | 트랜잭션 outbox, 일별 묶음, 재확인/선점/경합/복구/429/404 테스트 | 미구현 |
@@ -19,6 +19,6 @@
 | 운영 증거 | G4 성공/실패 배포, 경보 수신, 격리 복원, 부하/자원, 훈련 회고 | 미검증 |
 | 문서/프로세스 | 이슈/PR/두 리뷰, runbook, CHANGELOG, sprint 리뷰, 홍보 규정 | 진행 중 |
 
-공식 공개 JSON 표본은 [fixtures](../fixtures/README.md)에 있다. 운영 게이트웨이 fixture로 사용하려면 래퍼 변환을 명시해야 하며, 이것으로 실제 API 키 호출이나 3년 적재가 검증됐다고 주장하지 않는다.
+공식 공개 `list` JSON 표본은 [fixtures](../fixtures/README.md)에 있다. 운영 게이트웨이 fixture로 사용하려면 래퍼 변환을 명시해야 하며, 이것으로 실제 API 키 호출이나 3년 적재가 검증됐다고 주장하지 않는다. `detail` 단계(`steps`)·첨부(`files`) 화면 출력도 공식 swagger 문서 계약에 맞춘 테스트 fixture로 검증했으며 실제 API `detail` 응답을 수신해 검증한 것은 아니다.
 
 배포·실발송에는 사용자의 도메인/DNS, 서버 접속, 담당 연락처, API/Resend/운영 알림 설정 및 NAS pull 환경이 필요하다. 비밀값은 환경변수 또는 GitHub Secrets에만 둔다.

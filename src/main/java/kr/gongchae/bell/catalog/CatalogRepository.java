@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.regex.Pattern;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 import tools.jackson.databind.JsonNode;
@@ -36,6 +37,8 @@ public class CatalogRepository {
     public static final int HOME_CLOSING_LIMIT = 12;
     public static final int HOME_TODAY_LIMIT = 20;
     public static final int INSTITUTION_HISTORY_PAGE_SIZE = 20;
+
+    private static final Pattern DIGITS = Pattern.compile("^\\d+$");
 
     private final JdbcClient jdbc;
     private final ObjectMapper objectMapper;
@@ -181,6 +184,12 @@ public class CatalogRepository {
         return new JobSearchResult(attachCodes(rows, kstToday), totalCount, effectivePage, pageSize, totalPages);
     }
 
+    public boolean hasAnyPosting() {
+        return Boolean.TRUE.equals(jdbc.sql("SELECT EXISTS (SELECT 1 FROM posting)")
+                .query(Boolean.class)
+                .single());
+    }
+
     public Optional<PostingDetail> findJobDetail(long sn, LocalDate kstToday) {
         Optional<DetailRow> opt = jdbc.sql("""
                         SELECT p.sn, p.inst_code, i.name AS inst_name, p.title,
@@ -228,8 +237,12 @@ public class CatalogRepository {
         String ddayLabel = CatalogViews.ddayLabel(effectiveStatus, row.endDate(), kstToday);
         String recruitDisplay = formatRecruitDisplay(row.recrutNopeRaw(), row.recrutNope());
 
-        List<StepItem> steps = "DONE".equals(row.detailStatus()) ? parseSteps(row.stepsJson()) : List.of();
-        List<FileItem> files = "DONE".equals(row.detailStatus()) ? parseFiles(row.filesJson()) : List.of();
+        ParsedSteps parsedSteps = "DONE".equals(row.detailStatus())
+                ? parseSteps(row.stepsJson())
+                : new ParsedSteps(List.of(), false);
+        ParsedFiles parsedFiles = "DONE".equals(row.detailStatus())
+                ? parseFiles(row.filesJson())
+                : new ParsedFiles(List.of(), false);
 
         return Optional.of(new PostingDetail(
                 row.sn(),
@@ -252,8 +265,10 @@ public class CatalogRepository {
                 statusLabel,
                 ddayLabel,
                 row.detailStatus(),
-                steps,
-                files,
+                parsedSteps.items(),
+                parsedSteps.unknownFormat(),
+                parsedFiles.items(),
+                parsedFiles.unknownFormat(),
                 codes.getOrDefault("NCS", List.of()),
                 codes.getOrDefault("REGION", List.of()),
                 codes.getOrDefault("HIRE", List.of()),
@@ -517,98 +532,115 @@ public class CatalogRepository {
         return "미정";
     }
 
-    private List<StepItem> parseSteps(String json) {
+    record ParsedSteps(List<StepItem> items, boolean unknownFormat) {
+    }
+
+    record ParsedFiles(List<FileItem> items, boolean unknownFormat) {
+    }
+
+    /**
+     * Parses official swagger detail step objects (unwrapped from {"step": ...} by #4).
+     * Only fields with verified official semantics (sortNo, recrutNope, aplyNope, cmpttRt) are labeled;
+     * unrecognized shapes never emit raw values.
+     */
+    ParsedSteps parseSteps(String json) {
         if (json == null || json.isBlank()) {
-            return List.of();
+            return new ParsedSteps(List.of(), false);
         }
         try {
             JsonNode root = objectMapper.readTree(json);
             if (!root.isArray()) {
-                return List.of();
+                return new ParsedSteps(List.of(), true);
+            }
+            if (root.isEmpty()) {
+                return new ParsedSteps(List.of(), false);
             }
             List<StepItem> items = new ArrayList<>();
+            boolean unknownFormat = false;
             for (JsonNode node : root) {
-                if (node.isString()) {
-                    String text = node.asString();
-                    if (!text.isBlank()) {
-                        items.add(new StepItem(text, ""));
-                    }
-                } else if (node.isObject()) {
-                    String title = firstNonBlankText(node, "recrutStepNm", "stepNm", "stepTitle", "title", "name");
-                    String detail = firstNonBlankText(node, "recrutStepCn", "stepCn", "stepExpln", "description", "detail");
-                    if (title.isEmpty() && detail.isEmpty()) {
-                        title = joinObjectValues(node);
-                    }
-                    if (!title.isEmpty() || !detail.isEmpty()) {
-                        items.add(new StepItem(title.isEmpty() ? "전형 단계" : title, detail));
-                    }
+                JsonNode stepNode = node.isObject() && node.path("step").isObject() ? node.path("step") : node;
+                if (!stepNode.isObject()) {
+                    unknownFormat = true;
+                    continue;
                 }
+                String sortNo = nonBlankText(stepNode, "sortNo");
+                String recruitNope = nonBlankText(stepNode, "recrutNope");
+                String applyNope = nonBlankText(stepNode, "aplyNope");
+                String competitionRate = nonBlankText(stepNode, "cmpttRt");
+
+                List<String> details = new ArrayList<>();
+                if (!recruitNope.isEmpty()) {
+                    details.add("모집 인원: " + formatStepCount(recruitNope));
+                }
+                if (!applyNope.isEmpty()) {
+                    details.add("지원자 수: " + formatStepCount(applyNope));
+                }
+                if (!competitionRate.isEmpty()) {
+                    details.add("경쟁률: " + competitionRate);
+                }
+                if (details.isEmpty()) {
+                    unknownFormat = true;
+                    continue;
+                }
+                String title = sortNo.isEmpty() ? "전형 정보" : "전형 정보 " + sortNo;
+                items.add(new StepItem(title, String.join("\n", details)));
             }
-            return items;
+            return new ParsedSteps(items, unknownFormat);
         } catch (Exception ex) {
-            return List.of();
+            return new ParsedSteps(List.of(), true);
         }
     }
 
-    private List<FileItem> parseFiles(String json) {
+    /**
+     * Parses official swagger detail file objects (unwrapped from {"file": ...} by #4).
+     * Reads atchFileNm and url only; unrecognized objects never emit raw values.
+     */
+    ParsedFiles parseFiles(String json) {
         if (json == null || json.isBlank()) {
-            return List.of();
+            return new ParsedFiles(List.of(), false);
         }
         try {
             JsonNode root = objectMapper.readTree(json);
             if (!root.isArray()) {
-                return List.of();
+                return new ParsedFiles(List.of(), true);
+            }
+            if (root.isEmpty()) {
+                return new ParsedFiles(List.of(), false);
             }
             List<FileItem> items = new ArrayList<>();
+            boolean unknownFormat = false;
             for (JsonNode node : root) {
-                if (node.isString()) {
-                    String text = node.asString();
-                    if (!text.isBlank()) {
-                        items.add(new FileItem(text, null));
-                    }
-                } else if (node.isObject()) {
-                    String name = firstNonBlankText(node, "atchFileNm", "fileNm", "orgnlFileNm", "name", "title");
-                    String rawUrl = firstNonBlankText(node, "url", "atchFileUrl", "fileUrl", "downloadUrl", "href");
-                    String safeUrl = SafeUrlValidator.sanitizeHttpUrl(rawUrl);
-                    if (name.isEmpty()) {
-                        name = safeUrl != null ? "첨부파일" : joinObjectValues(node);
-                    }
-                    if (!name.isEmpty()) {
-                        items.add(new FileItem(name, safeUrl));
-                    }
+                JsonNode fileNode = node.isObject() && node.path("file").isObject() ? node.path("file") : node;
+                if (!fileNode.isObject()) {
+                    unknownFormat = true;
+                    continue;
                 }
+                String name = nonBlankText(fileNode, "atchFileNm");
+                String rawUrl = nonBlankText(fileNode, "url");
+                String safeUrl = SafeUrlValidator.sanitizeHttpUrl(rawUrl);
+                if (name.isEmpty() && safeUrl == null) {
+                    unknownFormat = true;
+                    continue;
+                }
+                items.add(new FileItem(name.isEmpty() ? "첨부파일" : name, safeUrl));
             }
-            return items;
+            return new ParsedFiles(items, unknownFormat);
         } catch (Exception ex) {
-            return List.of();
+            return new ParsedFiles(List.of(), true);
         }
     }
 
-    private static String firstNonBlankText(JsonNode node, String... keys) {
-        for (String key : keys) {
-            JsonNode value = node.get(key);
-            if (value != null && !value.isNull()) {
-                String text = value.asString("");
-                if (!text.isBlank()) {
-                    return text.trim();
-                }
-            }
+    private static String nonBlankText(JsonNode node, String key) {
+        JsonNode value = node.get(key);
+        if (value == null || value.isNull()) {
+            return "";
         }
-        return "";
+        String text = value.asString("");
+        return text.isBlank() ? "" : text.trim();
     }
 
-    private static String joinObjectValues(JsonNode node) {
-        List<String> parts = new ArrayList<>();
-        for (var entry : node.properties()) {
-            JsonNode value = entry.getValue();
-            if (value != null && !value.isNull()) {
-                String text = value.asString("");
-                if (!text.isBlank()) {
-                    parts.add(text.trim());
-                }
-            }
-        }
-        return String.join(" · ", parts);
+    private static String formatStepCount(String value) {
+        return DIGITS.matcher(value).matches() ? value + "명" : value;
     }
 
     private record SummaryRow(
