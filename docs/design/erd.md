@@ -2,6 +2,8 @@
 
 > 스키마의 원본은 Flyway 스크립트다. 이 문서는 그와 일치해야 한다. 시각은 `timestamptz`, 날짜는 `date`(KST 기준)로 저장한다.
 
+구현 현황 (2026-11-14): `V1__catalog_and_ingestion.sql`은 공고 5개 테이블과 `collect_run`, `api_budget`을 만든다. V2는 마지막 완전 수집 조회용 부분 인덱스와 코드 유형 제약을 추가한다. 아래 `rate_limit`, 구독/발송 테이블은 아직 설계이며 후속 마이그레이션으로 구현한다.
+
 ```mermaid
 erDiagram
     institution ||--o{ posting : "공시"
@@ -31,6 +33,8 @@ erDiagram
 | `collect_run` | `id`, `kind`(BACKFILL/REGULAR/DETAIL/DIGEST/DEADLINE), `slot`(회차 키: 매시 시각, 날짜, 적재 월), `started_at`, `finished_at`, `result`(COMPLETE/INCOMPLETE/FAILED, 진행 중이면 null), `total_count`, `received`, `inserted`, `changed`, `closed`, `error` | **UNIQUE (`kind`, `slot`)** ← 회차 선점 ([ADR-0003](../adr/0003-schedule-dedup-by-slot.md)) |
 | `api_budget` | `day`(KST), `count` | PK `day`. 요청 직전에 별도 커밋으로 증가시킨다(예약) |
 | `rate_limit` | `scope`(SUBSCRIBE/RESEND/WEBHOOK_TEST/TOKEN_FAIL/SEND_TOTAL), `key_hmac`, `window_start`, `count` | PK (`scope`, `key_hmac`, `window_start`). 창이 끝나면 지운다 |
+
+`collect_run.error`는 원본 예외 메시지나 요청 URL을 저장하지 않고 100자 이내 내부 오류 코드만 저장한다. API 키·개인정보 노출과 긴 오류 메시지로 결과 갱신이 실패하는 문제를 피한다.
 
 ## 구독과 발송
 | 테이블 | 컬럼 | 제약·인덱스 |

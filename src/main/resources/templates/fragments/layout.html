@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="ko" xmlns:th="http://www.thymeleaf.org">
+<head th:fragment="head">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title th:text="${title}">공채벨</title>
+  <meta name="description" th:content="${description}">
+  <link rel="stylesheet" th:href="@{/css/bootstrap.min.css}">
+  <link rel="stylesheet" th:href="@{/css/app.css}">
+</head>
+<body>
+<header th:fragment="header" class="border-bottom bg-white">
+  <a class="visually-hidden-focusable" href="#main">본문 바로가기</a>
+  <nav class="container d-flex align-items-center justify-content-between py-3" aria-label="주 메뉴">
+    <a class="brand text-decoration-none" th:href="@{/}">공채벨<span class="brand-dot" aria-hidden="true">●</span></a>
+    <a class="nav-link" th:href="@{/jobs}">채용공고</a>
+  </nav>
+</header>
+<footer th:fragment="footer" class="container border-top py-4 mt-5 text-secondary small">
+  <p>데이터 기준 <strong th:text="${lastCollected}">미수집</strong></p>
+  <p class="mb-0">공공기관 채용정보를 모아 전합니다. 지원 전 원문에서 조건과 일정을 확인하세요.</p>
+  <p class="mt-2 mb-0">출처: <a href="https://www.data.go.kr/data/15125273/openapi.do">공공데이터포털 · 공공기관 채용정보</a></p>
+</footer>
+</body>
+</html>
