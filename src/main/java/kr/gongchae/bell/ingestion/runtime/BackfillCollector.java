@@ -26,22 +26,25 @@ public class BackfillCollector {
             var run=runs.claim("BACKFILL","command/"+slot);
             if(run.isEmpty()) return Outcome.ALREADY_CLAIMED;
             runs.metadata(run.get(),period.from(),period.to(),null,null,null);
-            int total=0,received=0,unique=0;
+            int total=0,received=0;
+            Set<Long> periodSns=new HashSet<>();
             try {
                 for(BackfillRange month:period.months()) {
                     lease.verify();
                     var completed=runs.completedMonthSummary(month.from(),month.to());
                     if(completed.isPresent()) {
-                        total+=completed.get().total(); received+=completed.get().received(); unique+=completed.get().unique();
+                        Set<Long> sns=runs.completedMonthSns(month.from(),month.to());
+                        if(sns.size()!=completed.get().unique()) throw new CollectionFailure(CollectionFailure.Code.BACKFILL_PAGE_MISMATCH);
+                        total+=completed.get().total();received+=completed.get().received();periodSns.addAll(sns);
                         continue;
                     }
-                    int count=month(slot,period,month,restartPages,lease);
-                    total+=count;received+=count;unique+=count;
+                    var receipt=month(slot,period,month,restartPages,lease);
+                    total+=receipt.total();received+=receipt.received();periodSns.addAll(receipt.sns());
                 }
-                runs.finish(run.get(),"COMPLETE",null,total,received,unique);
+                runs.finish(run.get(),"COMPLETE",null,total,received,periodSns.size());
                 return Outcome.COMPLETE;
             } catch(IngestionException failure) {
-                runs.finish(run.get(),failure.failure().result(),failure.failure().name(),total,received,unique);throw failure;
+                runs.finish(run.get(),failure.failure().result(),failure.failure().name(),total,received,periodSns.size());throw failure;
             } catch(CollectionFailure failure) {
                 runs.fail(run.get(),failure.code());throw failure;
             } catch(RuntimeException failure) {
@@ -49,7 +52,7 @@ public class BackfillCollector {
             }
         }
     }
-    private int month(String slot,BackfillRange period,BackfillRange month,boolean restartPages,AdvisoryLease.Lease lease) {
+    private CollectionRuns.Page month(String slot,BackfillRange period,BackfillRange month,boolean restartPages,AdvisoryLease.Lease lease) {
         long run=runs.claim("BACKFILL",slot+"/"+month.from()).orElseThrow();
         runs.metadata(run,period.from(),period.to(),month.from(),month.to(),null);
         int expected=-1,received=0;
@@ -83,7 +86,7 @@ public class BackfillCollector {
                 if(received==expected) break;
             }
             if(seen.size()!=expected) throw new CollectionFailure(CollectionFailure.Code.BACKFILL_DUPLICATE_SN);
-            runs.finish(run,"COMPLETE",null,expected,received,seen.size());return expected;
+            runs.finish(run,"COMPLETE",null,expected,received,seen.size());return new CollectionRuns.Page(expected,received,Set.copyOf(seen));
         } catch(IngestionException failure) {
             runs.finish(run,failure.failure().result(),failure.failure().name(),expected<0?null:expected,received,seen.size());throw failure;
         } catch(CollectionFailure failure) {

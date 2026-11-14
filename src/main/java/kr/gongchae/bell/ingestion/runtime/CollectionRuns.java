@@ -59,16 +59,19 @@ public class CollectionRuns {
                 AND page_no IS NULL AND result='COMPLETE' ORDER BY id DESC LIMIT 1
                 """).param("f",from).param("t",to).query((rs,n)->new Month(rs.getInt(1),rs.getInt(2),rs.getInt(3))).optional();
     }
+    public Set<Long> completedMonthSns(LocalDate from,LocalDate to) {
+        return Set.copyOf(jdbc.sql("""
+                SELECT DISTINCT jsonb_array_elements_text(received_sns)::bigint FROM (
+                  SELECT DISTINCT ON (page_no) received_sns FROM collect_run WHERE kind='BACKFILL'
+                    AND range_from=:f AND range_to=:t AND page_no IS NOT NULL AND result='COMPLETE'
+                  ORDER BY page_no,id DESC
+                ) pages
+                """).param("f",from).param("t",to).query(Long.class).list());
+    }
     public boolean withinRange(Set<Long> sns,LocalDate from,LocalDate to) {
         if(sns.isEmpty()) return true;
         return jdbc.sql("SELECT count(*) FROM posting WHERE sn IN (:sns) AND bgng_date BETWEEN :f AND :t")
                 .param("sns",sns).param("f",from).param("t",to).query(Integer.class).single()==sns.size();
-    }
-    public boolean completedMonth(LocalDate from, LocalDate to) {
-        return jdbc.sql("""
-                SELECT EXISTS(SELECT 1 FROM collect_run WHERE kind='BACKFILL' AND range_from=:f
-                  AND range_to=:t AND page_no IS NULL AND result='COMPLETE')
-                """).param("f",from).param("t",to).query(Boolean.class).single();
     }
     public void completePage(long id,int total,int received,int inserted,int changed,int closed,Set<Long> sns) {
         independent.executeWithoutResult(status -> jdbc.sql("""

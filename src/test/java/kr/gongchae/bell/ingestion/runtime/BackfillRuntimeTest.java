@@ -72,6 +72,20 @@ class BackfillRuntimeTest {
         verify(client,times(2)).backfillList(LocalDate.of(2026,11,1),to,2);verifyNoMoreInteractions(client);
         assertThat(jdbc.sql("SELECT count(*) FROM posting WHERE from_backfill=true AND detail_status='NONE'").query(Integer.class).single()).isEqualTo(1002);
     }
+    @Test void periodUniqueCountUsesActualUnionEvenWhenAStartDateMovesAcrossMonths() {
+        var from=LocalDate.of(2026,10,1);var to=LocalDate.of(2026,11,30);var period=new BackfillRange(from,to);
+        when(client.backfillList(from,LocalDate.of(2026,10,31),1)).thenReturn(page(1,1,100,"20261001"));
+        when(client.backfillList(LocalDate.of(2026,11,1),to,1)).thenReturn(page(1,1,100,"20261101"));
+        assertThat(collector().collect("moving",period,false)).isEqualTo(BackfillCollector.Outcome.COMPLETE);
+        assertThat(collector().collect("moving-resume",period,false)).isEqualTo(BackfillCollector.Outcome.COMPLETE);
+        for(String slot:new String[]{"command/moving","command/moving-resume"}) {
+            assertThat(jdbc.sql("SELECT received FROM collect_run WHERE slot=:slot").param("slot",slot).query(Integer.class).single()).isEqualTo(2);
+            assertThat(jdbc.sql("SELECT unique_count FROM collect_run WHERE slot=:slot").param("slot",slot).query(Integer.class).single()).isEqualTo(1);
+        }
+        assertThat(jdbc.sql("SELECT count(*) FROM posting").query(Integer.class).single()).isEqualTo(1);
+        verify(client).backfillList(from,LocalDate.of(2026,10,31),1);verify(client).backfillList(LocalDate.of(2026,11,1),to,1);
+        verifyNoMoreInteractions(client);
+    }
     @Test void rejectsDuplicateAcrossPagesAndChangedTotalWithoutCompletingMonth() {
         var from=LocalDate.of(2026,11,1);var to=LocalDate.of(2026,11,30);var period=new BackfillRange(from,to);
         when(client.backfillList(from,to,1)).thenReturn(page(1001,1000,100,"20261101"));

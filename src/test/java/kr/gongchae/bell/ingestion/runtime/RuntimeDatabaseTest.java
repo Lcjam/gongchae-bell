@@ -96,10 +96,10 @@ class RuntimeDatabaseTest {
         var resumed=runs.completedPage(from,to,1).orElseThrow();
         assertThat(resumed.total()).isEqualTo(3);assertThat(resumed.received()).isEqualTo(3);
         assertThat(resumed.sns()).containsExactlyInAnyOrder(5L,9L,12L);
-        assertThat(runs.completedMonth(from,to)).isFalse();
+        assertThat(runs.completedMonthSummary(from,to)).isEmpty();
         long month=runs.claim("BACKFILL","manual2/2024-02").orElseThrow();runs.metadata(month,from.minusYears(1),to,from,to,null);
         runs.finish(month,"COMPLETE",null,3,3,3);
-        assertThat(runs.completedMonth(from,to)).isTrue();assertThat(runs.completedMonth(from,to.minusDays(1))).isFalse();
+        assertThat(runs.completedMonthSummary(from,to)).isPresent();assertThat(runs.completedMonthSummary(from,to.minusDays(1))).isEmpty();
     }
     @Test void supplementalSessionLockExcludesAnotherOwnerAndReleasesAfterCloseAndBackendDeath() {
         var leases=new AdvisoryLease(dataSource);
