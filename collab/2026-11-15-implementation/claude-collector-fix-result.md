@@ -3,7 +3,8 @@
 > 2026-11-15 · 수정: claude (Sol 종료 후 #11 수정 소유권 인계) · 검수: codex · 다음 교차 리뷰: agy
 > 지시: 원본 작업 경로의 `collab/2026-11-15-review/11-review-decisions.md`, `11-codex-collector-review.md`, `collab/reviews/pr-9-agy.md`. 2차: `collab/2026-11-15-review/11-second-review.md` 1~6번, `collab/reviews/pr-11-agy.md` §5, `official-fixtures-sol-review.md` → [아래 2차 절](#2차-수정-codex-11-재검수-16번)
 > **claude가 #4를 수정했으므로 claude의 [PR #11 리뷰](../reviews/pr-11-claude.md)(원본 작업 경로)는 이 head의 독립 리뷰로 세지 않는다.**
-> 머지하지 않았다. 두 PR 모두 초안이다. 원본 작업 경로, 사용자 변경, 웹(#5), 배포, V1·V2·V3는 건드리지 않았다.
+> 3차: PR #9·#12·#10 머지 뒤 main 통합 → [아래 main 통합 절](#main-통합-pr-9--12--10-머지-뒤)
+> claude는 머지하지 않았다. PR #9는 codex가 `0bf3d40`으로 머지했고 PR #11은 초안이다. 원본 작업 경로, 사용자 변경, 웹(#5), 배포, V1·V2·V3는 건드리지 않았다.
 
 ## 커밋과 CI
 | 브랜치 | 커밋 | 내용 | 원격 CI |
@@ -14,9 +15,11 @@
 | 〃 | `1a7e470`, `5f9db02` | #3 결과 문서 커밋을 merge하고 SHA·CI 기록, SHA 오타 정정 | [43682540599](https://github.com/Lcjam/gongchae-bell/actions/runs/43682540599) test·secrets 성공 |
 | 〃 | `e3b3867`, `304389c` | **2차**: agy 공식 fixture 커밋 `5b78c55`·`b95fa67`(`docs/#4-official-fixtures`, 로컬 커밋, 원격 미push)을 cherry-pick. 내용 그대로, SHA만 다르다 | — |
 | 〃 | `5e2950bd93dc6a8f6b5b1fb1b5aff0dbf6aae9b3` | **2차** 수정 6건, 테스트, 문서, ADR-0016 | [43684660748](https://github.com/Lcjam/gongchae-bell/actions/runs/43684660748) test·secrets 성공 |
-| 〃 | (이 문서) | 2차 SHA·CI 기록 | 문서만 |
+| 〃 | `56faf0510c30d2b7cecc00a40e2757c2d509128e` | 2차 SHA·CI 기록 | [43684804047](https://github.com/Lcjam/gongchae-bell/actions/runs/43684804047) test·secrets 성공 |
+| 〃 | `dc8d016c5e8dc654c4ffb84783880058a8ca49b9` | **main 통합**: `origin/main` `764819a`를 **merge**(부모 `56faf05`·`764819a`). 충돌 2파일 양쪽 보존, 상태 문서 2개 갱신 → [아래 main 통합 절](#main-통합-pr-9--12--10-머지-뒤) | [43704687576](https://github.com/Lcjam/gongchae-bell/actions/runs/43704687576) test(ARM64)·secrets 성공 |
+| 〃 | (이 문서) | main 통합 SHA·충돌·건수·CI 기록 | 문서만 |
 
-PR #11의 base는 지시대로 `feat/#3-ingestion-core`로 둔다.
+PR #11의 base는 main 통합 뒤 `feat/#3-ingestion-core`에서 `main`으로 바꿨다.
 
 ## #3 계약 v3 (먼저 처리)
 [계약 v3](claude-ingestion-contract.md) 변경 이력과 §1·§3. 요약:
@@ -91,3 +94,40 @@ PR #11의 base는 지시대로 `feat/#3-ingestion-core`로 둔다.
 - 상세 sweep이 DB 장애로 실패 기록(`failed`, `runs.fail`)까지 못 하면 예외가 `RegularCollector.collect` 밖으로 나간다. 그 정기 회차는 이미 `COMPLETE`로 커밋돼 있고 Spring 스케줄러가 오류를 로그로 남긴 뒤 다음 정시에 다시 돈다. 공고 상태가 `FAILED`로 안 바뀐 그 회차는 실패 횟수에도 안 들어갈 수 있다(DETAIL 행이 `result IS NULL`로 남음). 코드로 막지 않았다.
 - 같은 sweep 안에서 429(`HTTP_RATE_LIMIT`)가 나도 남은 공고를 계속 시도한다(agy 재검수 5-2-3). 예산 상한과 공고당 3회로 비용은 묶여 있다. 바꾸지 않았다.
 - 키 정규화는 `%`의 유무로 표기를 판단한다. 포털 키는 base64 문자(`A-Za-z0-9+/=`)라 Decoding 표기에 `%`가 없다는 전제다. 첫 실패의 원인이 이중 인코딩이었다는 것은 HTTP 상태 번호가 없어 여전히 추정이다.
+
+## main 통합 (PR #9 · #12 · #10 머지 뒤)
+
+지시: codex 조율. PR #9 `0bf3d40`, PR #12 `6fdf2df`, PR #10 `764819a`가 main에 머지된 뒤 #4를 main 위로 올린다. 새 앱 로직·V1~V3·env·개인정보는 바꾸지 않는다. Sol 격리 합본 `fc752ad7`은 참고만 하고, 통합 테스트와 테스트 컨텍스트 `false` 고정은 후속 PR로 남긴다.
+
+### 방법
+- `git fetch` 뒤 `56faf05`에서 `git merge --no-ff origin/main`(`764819a`) → 머지 커밋 `dc8d016`. rebase와 force push는 하지 않았다. Sol·agy의 기존 커밋 SHA는 그대로다.
+- PR #11 base: `feat/#3-ingestion-core` → `main`. 변경 뒤 GitHub `mergeable=MERGEABLE`, main 대비 38파일.
+
+### 충돌 범위
+양쪽이 함께 바꾼 파일은 이 2개뿐이고 둘 다 텍스트 충돌이었다. 양쪽 내용을 모두 남겼다.
+
+| 파일 | #4 쪽 | main(#5) 쪽 | 결과 |
+|---|---|---|---|
+| `src/main/resources/application.yml` | `spring.task.scheduling.shutdown` 30초 대기(ADR-0014) | `app.base-url: ${APP_BASE_URL:http://localhost:8080}` | 둘 다. `spring.task` 아래 #4, 그 뒤 최상위 `app` |
+| `.env.example` | `COLLECTOR_ENABLED`·`COLLECTOR_SERVICE_KEY`·`COLLECTOR_WARNING_LIMIT`·`COLLECTOR_STOP_LIMIT` | `APP_BASE_URL` | 키 이름 다섯 개 모두, 값은 비움 |
+
+- 두 파일은 Sol의 `fc752ad7`과 바이트 단위로 같다(`git diff fc752ad7 -- <두 파일>` 출력 없음).
+- 두 부모 어느 쪽과도 다른 파일은 4개뿐이다: 위 2개와 아래 상태 문서 2개. 나머지 파일(Java·V1~V3·테스트·fixture 전부)은 한쪽 부모와 같다. 파일별로 `git diff --quiet HEAD|MERGE_HEAD`를 돌려 확인했다.
+- 내 M1 검수 L4(a)에서 우려한 `agy-result.md` 충돌은 일어나지 않았다. main에는 이 파일이 없고 #4의 §5 정정본이 그대로 남았다. `fixtures/`와 `collab/2026-11-15-api-verification/`도 `56faf05`와 같다.
+- `fc752ad7`과 비교한 소스 차이는 후속 PR 몫 3파일뿐이다: `OfficialFixtureIntegrationTest`(신규 3건)와 `IntegrationTestSupport`·`CatalogIntegrationTest`의 `collector.enabled/backfill=false` 고정. 이 3파일은 cherry-pick하지 않았다.
+
+### 상태 문서 (머지 상태에 맞춤)
+- `docs/implementation-status.md`: 기준일 2026-11-15. #2 "PR #8 머지 대기"를 "머지"로 바꿨다. #3 "PR 리뷰 대기"는 "PR #9 머지"로 바꾸고, #4가 같은 반영 경로를 부른다는 점을 더했다. FR-C1과 FR-C5~C6에는 #4 구현과 PR #11 리뷰 대기를 적고, 실제 3년 적재 기록이 없다는 점과 두 앱 실제 동시 운영이 미검증이라는 점을 남겼다. FR-C7~C8에는 #4 상세 수집과 공식 `detail` 표본 저장 테스트를 더했다. FR-W1~W4에는 PR #10 머지를 적었다. 공식 `detail` 표본으로 화면까지 잇는 테스트는 별도 PR이라고 적었다. fixture 문단은 공식 OpenAPI 응답 3종이 있다는 사실로 고쳤다.
+- `README.md`: 첫 상태 문단에 수집 실행기가 PR #11에서 리뷰 중이고 기본값이 꺼짐이라고 적었다. 검증 절에는 테스트 셸에 `COLLECTOR_ENABLED=true`나 `COLLECTOR_BACKFILL=true`를 두지 말라는 한 줄을 넣었다. 일부 테스트 컨텍스트가 아직 이 값을 고정하지 않아서다(M1 검수 L2, 후속 PR에서 고정).
+
+### 검증
+- 로컬: Windows x64, Java 21.0.13, Gradle 9.9.1, Docker 29.9.2. 셸에 `COLLECTOR_ENABLED=false COLLECTOR_BACKFILL=false`를 주고 `gradlew check bootJar`를 1회 실행해 **BUILD SUCCESSFUL**을 얻었다. 결과는 **91 tests / 0 failures / 0 errors / 0 skipped**다(테스트 결과 XML 합계). 내역은 기존 79(#2·#3 32 + #4 47)에 #5 12를 더한 값이고 기대와 같다. M1 검수에서 쓴 94는 Sol의 신규 3건을 포함한 수라 여기에는 해당하지 않는다. `build/libs/gongchae-bell.jar`가 만들어졌다.
+- DB: Testcontainers PostgreSQL 17만 썼다. 영속 dev DB 컨테이너(`gongchae-bell-dev-postgres-1`)는 실행 중인 것을 `docker ps`로 보기만 했고 연결·중지·변경하지 않았다. 실제 API 호출과 메일 발송은 0회다.
+- Gitleaks 8.30.1(`gitleaks git --redact`): 전체 이력 44커밋과 PR 범위 `origin/main..HEAD` 11커밋 모두 **no leaks found**.
+- 원격 CI: `dc8d016` → [43704687576](https://github.com/Lcjam/gongchae-bell/actions/runs/43704687576) `test`(ubuntu-24.04-arm, Temurin 21.0.13 aarch64)·`secrets` 성공.
+- 추가 코드 수정은 없다. 이 머지의 Java·SQL·테스트 내용은 검수된 두 head(`56faf05`, `764819a`)의 합 그대로다.
+
+### 하지 않은 것
+- 원격 머지: root 검수 전이라 하지 않았다.
+- 후속 PR 몫: Sol 통합 테스트 3건과 테스트 `false` 고정.
+- 원본 작업 경로·사용자 변경·agy 작업·Sol 격리 브랜치: 수정하지 않았다.
