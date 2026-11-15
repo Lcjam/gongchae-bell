@@ -4,7 +4,7 @@
 
 | PR | 지정 head | 독립 검수 | 해당 head CI |
 |---|---|---|---|
-| #9 코어 | aab6d5b2a9b64fe4b767f8deb415c77417e4dd86 | codex·Sol 수용, 이전 agy 의견 반영 | [43681733201](https://github.com/Lcjam/gongchae-bell/actions/runs/43681733201) 성공 |
+| #9 코어 | 6c9ef7b2fc220728b9553a32e44b29df8124483a(코드 aab6d5b) | codex·Sol 수용, 이전 agy 의견 반영 | [43682527088](https://github.com/Lcjam/gongchae-bell/actions/runs/43682527088) 성공 |
 | #10 웹 | 4334af809e3d8ce97205e29dcf9a22d28fcddaa6 | codex·Sol 수용, Claude 의견 반영 | [43656050416](https://github.com/Lcjam/gongchae-bell/actions/runs/43656050416) 성공 |
 | #11 실행기 | 56faf0510c30d2b7cecc00a40e2757c2d509128e | codex·agy 최종 수용 | [43684804047](https://github.com/Lcjam/gongchae-bell/actions/runs/43684804047) 성공 |
 
@@ -20,9 +20,10 @@ Sol의 격리 합본은 #11 최종 head와 #10, 공식 fixture 및 새 통합 �
 
 전체 공식 목록의 파서·DB 반영, 한 행을 발췌한 상세의 실제 빈→로컬 HTTP 대역→DB→HTML, 공식 빈 응답의 정기 실패/최초 적재 0건 차이를 검사했다. 외부 API·브라우저·배포 시험은 이 합본에서 수행하지 않았다.
 
+최종 보완 head `fc752ad7e78c776ac14448c42662dd1b8fffa1cd`는 두 기존 테스트 기반에 collector.enabled/backfill=false를 명시하고 전체 94건을 다시 통과했다. 프로덕션 코드와 설정, 새 fixture 테스트는 바뀌지 않았다. root는 이 최소 diff와 결과를 확인했다.
+
 ## 남은 게이트
 
-- 테스트가 개발 환경의 COLLECTOR_ENABLED/BACKFILL을 상속하지 않도록 기존 공용 기반과 CatalogIntegrationTest의 테스트 전용 설정을 명시한다. Sol에게 마지막 보완과 재검증을 배정했다.
 - 부모 PR을 병합하고 새 합본 테스트·설정 보완을 최종 저장소 CI에서 확인한다. 병합 중 충돌은 담당 구현자만 해결한다.
 - 최초 3년치 실제 적재와 오래된 코드·품질 표본 검수를 기록한다. 그 전에는 FR-C1 완료로 표시하지 않는다.
 - 500 경보 실제 수신은 M3 게이트다. 알림 기능, 서버 배포, HTTPS, 운영·백업·복원과 PRD 공개 출시 조건도 남아 있다.

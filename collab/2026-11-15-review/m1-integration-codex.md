@@ -9,3 +9,5 @@
 이 테스트는 실제 배포·브라우저·공식 API 재호출을 하지 않는다. 전체 목록의 RegularCollector HTTP/스케줄 경로를 통째로 실행하는 시험도 아니다. 그 부분은 기존 실행기 통합 테스트와 함께 판단한다. 전형 행의 일반적 의미를 새로 추정하지 않고 현재 화면 계약을 확인했다.
 
 root는 소스를 읽기 검수했고 로컬 테스트를 다시 실행하지 않았다. 최신 56faf051 반영 후 합본 check/bootJar 결과와 Claude의 독립 리뷰를 마지막으로 대조한다.
+
+최종 대조: `fc752ad7e78c776ac14448c42662dd1b8fffa1cd`까지 보고된 최신 #4 포함 합본은 94건 통과했다. Claude의 독립 검수는 새 3개 테스트를 수용했다. 이후 L2 보완 diff는 공용 IntegrationTestSupport와 독립 CatalogIntegrationTest의 SpringBootTest 속성에 수집·최초 적재 false를 명시한 것뿐이며 root가 이를 확인했다. 새 공식 fixture 테스트는 변경되지 않았다. 개발 셸 설정을 상속하지 않는 테스트 속성 우선순위는 설치된 JAR 읽기로 검증됐고, 위험한 켜진 환경 실험은 하지 않았다.
