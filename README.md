@@ -2,15 +2,15 @@
 
 공공기관 채용공고에서 기관의 최근 3년 채용 이력까지 이어 보고, 관심 조건의 새 공고와 마감 임박 알림을 받는 서비스입니다.
 
-현재는 **M1 구현 중**입니다. 실행 기반, PostgreSQL 스키마, 홈/목록 빈 상태만 구현됐습니다. 수집·필터·기관 상세·알림·공개 배포는 아직 제공하지 않습니다. 전체 요구사항은 [PRD](docs/prd.md), 구조는 [아키텍처](docs/design/architecture.md), 작업은 [Issues](https://github.com/Lcjam/gongchae-bell/issues)에서 확인할 수 있습니다.
+현재는 **M1 구현 중**입니다. 실행 기반, PostgreSQL 스키마, 공고 웹 화면(`/` · `/jobs` · `/jobs/{sn}` · `/institutions/{code}` · `/robots.txt` · `/sitemap.xml`)이 구현됐습니다. 수집(배치)·알림·공개 배포는 아직 제공하지 않습니다. 전체 요구사항은 [PRD](docs/prd.md), 구조는 [아키텍처](docs/design/architecture.md), 작업은 [Issues](https://github.com/Lcjam/gongchae-bell/issues)에서 확인할 수 있습니다.
 
 ## 로컬 실행
 
 필수: Java 17 이상(Gradle 실행용), Docker (Linux 컨테이너). Gradle은 Wrapper로 실행하고 앱 컴파일·실행용 Java 21은 toolchain이 다운로드합니다. 최초 실행에는 네트워크가 필요합니다.
 
-1. `.env.example`을 `.env`로 복사하고 세 항목을 모두 채웁니다. `DB_USER`, `DB_PASSWORD`는 직접 정하고, `DB_URL`에는 `jdbc:postgresql://localhost:5432/gongchae`를 넣습니다. **DB_URL을 빈 문자열로 내보내면 시작할 수 없습니다.** `.env`는 git에서 제외됩니다.
+1. `.env.example`을 `.env`로 복사하고 항목을 채웁니다. `DB_USER`, `DB_PASSWORD`는 직접 정하고, `DB_URL`에는 `jdbc:postgresql://localhost:5432/gongchae`를 넣습니다. **DB_URL을 빈 문자열로 내보내면 시작할 수 없습니다.** `APP_BASE_URL`은 기본값이 `http://localhost:8080`이며, 운영 환경에서는 `sitemap.xml`이 올바른 주소를 생성하도록 실제 공개 외부 주소(예: `https://example.com`)를 정확히 설정해야 합니다. `.env`는 git에서 제외됩니다.
 2. `docker compose -f compose.dev.yml up -d --wait`
-3. 같은 `DB_USER`, `DB_PASSWORD`를 앱 실행 셸의 환경변수에 설정합니다. **Spring은 `.env`를 자동으로 읽지 않습니다.**
+3. 같은 `DB_USER`, `DB_PASSWORD`(및 필요 시 `APP_BASE_URL`)를 앱 실행 셸의 환경변수에 설정합니다. **Spring은 `.env`를 자동으로 읽지 않습니다.**
 4. `./gradlew bootRun` (Windows PowerShell은 `.\gradlew.bat bootRun`)
 5. <http://localhost:8080>을 엽니다. readiness는 <http://127.0.0.1:8081/actuator/health/readiness>입니다.
 
