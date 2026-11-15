@@ -10,7 +10,8 @@
 |---|---|---|---|
 | `feat/#3-ingestion-core` (PR #9) | `aab6d5b2a9b64fe4b767f8deb415c77417e4dd86` | #3 계약 v3: 파싱·반영 분리, null 본문 `NON_JSON`, routes 표 | [43681733201](https://github.com/Lcjam/gongchae-bell/actions/runs/43681733201) test·secrets 성공 |
 | `feat/#4-collector-runtime` (PR #11) | `bd6b706` | #3 v3를 **merge**로 반영. Sol의 커밋 `8db36bc`·`b636168`·`309216a`·`7b3eb31`은 SHA 그대로 남는다(rebase·force push 없음) | — |
-| 〃 | (이 커밋) | 아래 수정 5건, 테스트, 문서 | 푸시 후 PR #11 checks |
+| 〃 | `e7099227` | 아래 수정 5건, 테스트, 문서 | [43682376057](https://github.com/Lcjam/gongchae-bell/actions/runs/43682376057) test·secrets 성공 |
+| 〃 | (이 문서) | #3 결과 문서 커밋을 merge하고 SHA·CI 기록 | 문서만 |
 
 PR #11의 base는 지시대로 `feat/#3-ingestion-core`로 둔다.
 
