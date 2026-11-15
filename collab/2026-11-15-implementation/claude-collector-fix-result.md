@@ -16,8 +16,10 @@
 | 〃 | `e3b3867`, `304389c` | **2차**: agy 공식 fixture 커밋 `5b78c55`·`b95fa67`(`docs/#4-official-fixtures`, 로컬 커밋, 원격 미push)을 cherry-pick. 내용 그대로, SHA만 다르다 | — |
 | 〃 | `5e2950bd93dc6a8f6b5b1fb1b5aff0dbf6aae9b3` | **2차** 수정 6건, 테스트, 문서, ADR-0016 | [43684660748](https://github.com/Lcjam/gongchae-bell/actions/runs/43684660748) test·secrets 성공 |
 | 〃 | `56faf0510c30d2b7cecc00a40e2757c2d509128e` | 2차 SHA·CI 기록 | [43684804047](https://github.com/Lcjam/gongchae-bell/actions/runs/43684804047) test·secrets 성공 |
-| 〃 | `dc8d016c5e8dc654c4ffb84783880058a8ca49b9` | **main 통합**: `origin/main` `764819a`를 **merge**(부모 `56faf05`·`764819a`). 충돌 2파일 양쪽 보존, 상태 문서 2개 갱신 → [아래 main 통합 절](#main-통합-pr-9--12--10-머지-뒤) | [43704687576](https://github.com/Lcjam/gongchae-bell/actions/runs/43704687576) test(ARM64)·secrets 성공 |
-| 〃 | (이 문서) | main 통합 SHA·충돌·건수·CI 기록 | 문서만 |
+| 〃 | `dc8d016c5e8dc654c4ffb84783880058a8ca49b9` | **main 통합**: `origin/main` `764819a`를 **merge**(부모 `56faf05`·`764819a`). 충돌 2파일 양쪽 보존 → [아래 main 통합 절](#main-통합-pr-9--12--10-머지-뒤). **커밋 메시지와 달리 상태 문서 2개 갱신은 이 커밋에 없다**(아래 `f75d8f1`) | [43704687576](https://github.com/Lcjam/gongchae-bell/actions/runs/43704687576) test(ARM64)·secrets 성공 |
+| 〃 | `d729422b602a11cb540eed35323bdc286c3fa823` | main 통합 SHA·충돌·건수·CI 기록(이 문서) | [43704886330](https://github.com/Lcjam/gongchae-bell/actions/runs/43704886330) test·secrets 성공 |
+| 〃 | `f75d8f1` | 머지 커밋에서 빠진 상태 문서 2개(`README.md`, `docs/implementation-status.md`) | 문서만 |
+| 〃 | (이 문서) | 위 누락 정정 기록 | 문서만 |
 
 PR #11의 base는 main 통합 뒤 `feat/#3-ingestion-core`에서 `main`으로 바꿨다.
 
@@ -112,18 +114,19 @@ PR #11의 base는 main 통합 뒤 `feat/#3-ingestion-core`에서 `main`으로 �
 | `.env.example` | `COLLECTOR_ENABLED`·`COLLECTOR_SERVICE_KEY`·`COLLECTOR_WARNING_LIMIT`·`COLLECTOR_STOP_LIMIT` | `APP_BASE_URL` | 키 이름 다섯 개 모두, 값은 비움 |
 
 - 두 파일은 Sol의 `fc752ad7`과 바이트 단위로 같다(`git diff fc752ad7 -- <두 파일>` 출력 없음).
-- 두 부모 어느 쪽과도 다른 파일은 4개뿐이다: 위 2개와 아래 상태 문서 2개. 나머지 파일(Java·V1~V3·테스트·fixture 전부)은 한쪽 부모와 같다. 파일별로 `git diff --quiet HEAD|MERGE_HEAD`를 돌려 확인했다.
+- 머지 커밋 `dc8d016`에서 두 부모 어느 쪽과도 다른 파일은 위 2개뿐이다. 나머지 파일(Java·V1~V3·테스트·fixture·문서 전부)은 한쪽 부모와 같다. 양쪽 차이 파일마다 `git diff --quiet 56faf05|764819a dc8d016 -- <파일>`로 확인했다. 아래 상태 문서 2개는 그 뒤 `f75d8f1`에서 따로 고쳤다.
 - 내 M1 검수 L4(a)에서 우려한 `agy-result.md` 충돌은 일어나지 않았다. main에는 이 파일이 없고 #4의 §5 정정본이 그대로 남았다. `fixtures/`와 `collab/2026-11-15-api-verification/`도 `56faf05`와 같다.
 - `fc752ad7`과 비교한 소스 차이는 후속 PR 몫 3파일뿐이다: `OfficialFixtureIntegrationTest`(신규 3건)와 `IntegrationTestSupport`·`CatalogIntegrationTest`의 `collector.enabled/backfill=false` 고정. 이 3파일은 cherry-pick하지 않았다.
 
-### 상태 문서 (머지 상태에 맞춤)
+### 상태 문서 (머지 상태에 맞춤, `f75d8f1`)
+**정정**: 이 두 파일의 수정을 머지 커밋에 넣으려 했으나, 첫 커밋 시도가 로컬 커밋 메시지 hook에 막히면서 같은 명령의 `git add`도 실행되지 않았다. 다시 커밋할 때 `git add`를 빠뜨려 `dc8d016`에는 main 쪽 원본이 그대로 들어갔다. 그 커밋 메시지의 "Status docs updated" 문장은 사실과 다르다. force push 없이 바로 다음 커밋 `f75d8f1`에 두 파일만 넣었다. 로컬 `check bootJar`는 이 수정이 작업 트리에 있는 상태에서 돌렸다. 문서만 다르므로 빌드 결과는 같다.
 - `docs/implementation-status.md`: 기준일 2026-11-15. #2 "PR #8 머지 대기"를 "머지"로 바꿨다. #3 "PR 리뷰 대기"는 "PR #9 머지"로 바꾸고, #4가 같은 반영 경로를 부른다는 점을 더했다. FR-C1과 FR-C5~C6에는 #4 구현과 PR #11 리뷰 대기를 적고, 실제 3년 적재 기록이 없다는 점과 두 앱 실제 동시 운영이 미검증이라는 점을 남겼다. FR-C7~C8에는 #4 상세 수집과 공식 `detail` 표본 저장 테스트를 더했다. FR-W1~W4에는 PR #10 머지를 적었다. 공식 `detail` 표본으로 화면까지 잇는 테스트는 별도 PR이라고 적었다. fixture 문단은 공식 OpenAPI 응답 3종이 있다는 사실로 고쳤다.
 - `README.md`: 첫 상태 문단에 수집 실행기가 PR #11에서 리뷰 중이고 기본값이 꺼짐이라고 적었다. 검증 절에는 테스트 셸에 `COLLECTOR_ENABLED=true`나 `COLLECTOR_BACKFILL=true`를 두지 말라는 한 줄을 넣었다. 일부 테스트 컨텍스트가 아직 이 값을 고정하지 않아서다(M1 검수 L2, 후속 PR에서 고정).
 
 ### 검증
 - 로컬: Windows x64, Java 21.0.13, Gradle 9.9.1, Docker 29.9.2. 셸에 `COLLECTOR_ENABLED=false COLLECTOR_BACKFILL=false`를 주고 `gradlew check bootJar`를 1회 실행해 **BUILD SUCCESSFUL**을 얻었다. 결과는 **91 tests / 0 failures / 0 errors / 0 skipped**다(테스트 결과 XML 합계). 내역은 기존 79(#2·#3 32 + #4 47)에 #5 12를 더한 값이고 기대와 같다. M1 검수에서 쓴 94는 Sol의 신규 3건을 포함한 수라 여기에는 해당하지 않는다. `build/libs/gongchae-bell.jar`가 만들어졌다.
 - DB: Testcontainers PostgreSQL 17만 썼다. 영속 dev DB 컨테이너(`gongchae-bell-dev-postgres-1`)는 실행 중인 것을 `docker ps`로 보기만 했고 연결·중지·변경하지 않았다. 실제 API 호출과 메일 발송은 0회다.
-- Gitleaks 8.30.1(`gitleaks git --redact`): 전체 이력 44커밋과 PR 범위 `origin/main..HEAD` 11커밋 모두 **no leaks found**.
+- Gitleaks 8.30.1(`gitleaks git --redact`): `dc8d016` 기준 전체 이력 44커밋·PR 범위 `origin/main..HEAD` 11커밋, `f75d8f1` 기준 46커밋·13커밋 모두 **no leaks found**.
 - 원격 CI: `dc8d016` → [43704687576](https://github.com/Lcjam/gongchae-bell/actions/runs/43704687576) `test`(ubuntu-24.04-arm, Temurin 21.0.13 aarch64)·`secrets` 성공.
 - 추가 코드 수정은 없다. 이 머지의 Java·SQL·테스트 내용은 검수된 두 head(`56faf05`, `764819a`)의 합 그대로다.
 
