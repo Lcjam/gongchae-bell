@@ -29,3 +29,8 @@
 3. **원문 링크(`srcUrl`) 실제 사례**
    - 비표준 HTTPS 포트를 사용하는 정상 공고 존재: `recrutPblntSn=307028` (`https://www.knuch.kr:442/content/04info/11_01.asp?...`)
    - 기관 채용 메인/목록으로만 연결되는 공고 존재: `recrutPblntSn=307027` (`https://foodinfo.career.co.kr/`), `307032`·`307022` (`https://www.knuh.kr/content/04information/02_01.asp`)
+
+## 공식 OpenAPI 검증 상태 (`2026-11-15`)
+
+- `2026-11-15 14:35:22 KST`에 `docs/#4-official-fixtures` 워크트리의 `RecruitmentClient` + `ApiBudget` 경로로 `https://apis.data.go.kr/1051000/recruitment/list` (`ongoingYn=Y`, `numOfRows=1000`, `pageNo=1`, `resultType=json`) 1회 시도를 수행했으나 **`LIST_FAILURE=HTTP_STATUS`** (`api_attempt.id=1`, `attempt_no=1`, `outcome=HTTP_STATUS`)로 종료되었다.
+- 포털 오류 반복 호출 금지 지침에 따라 추가 호출 및 `detail`·빈 기간 조회를 중단했으며, 공식 API 응답 본문 JSON은 아직 확보되지 않았다. 위 `alio-public-list-*.json` 두 파일은 계속 **공개 AJAX 경로(`opendata.alio.go.kr`)** 출처로만 구분한다. 상세 기록: [`collab/2026-11-15-api-verification/agy-result.md`](../collab/2026-11-15-api-verification/agy-result.md).
