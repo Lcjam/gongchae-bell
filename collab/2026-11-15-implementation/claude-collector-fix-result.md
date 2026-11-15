@@ -4,6 +4,7 @@
 > 지시: 원본 작업 경로의 `collab/2026-11-15-review/11-review-decisions.md`, `11-codex-collector-review.md`, `collab/reviews/pr-9-agy.md`. 2차: `collab/2026-11-15-review/11-second-review.md` 1~6번, `collab/reviews/pr-11-agy.md` §5, `official-fixtures-sol-review.md` → [아래 2차 절](#2차-수정-codex-11-재검수-16번)
 > **claude가 #4를 수정했으므로 claude의 [PR #11 리뷰](../reviews/pr-11-claude.md)(원본 작업 경로)는 이 head의 독립 리뷰로 세지 않는다.**
 > 3차: PR #9·#12·#10 머지 뒤 main 통합 → [아래 main 통합 절](#main-통합-pr-9--12--10-머지-뒤)
+> 4차: 실제 적재에서 드러난 FR-C1 누락 수정(시작일 하한 전체 조회) → [아래 4차 절](#4차-최초-적재를-시작일-하한-전체-조회로-start_scan)
 > claude는 머지하지 않았다. PR #9는 codex가 `0bf3d40`으로 머지했고 PR #11은 초안이다. 원본 작업 경로, 사용자 변경, 웹(#5), 배포, V1·V2·V3는 건드리지 않았다.
 
 ## 커밋과 CI
@@ -19,7 +20,10 @@
 | 〃 | `dc8d016c5e8dc654c4ffb84783880058a8ca49b9` | **main 통합**: `origin/main` `764819a`를 **merge**(부모 `56faf05`·`764819a`). 충돌 2파일 양쪽 보존 → [아래 main 통합 절](#main-통합-pr-9--12--10-머지-뒤). **커밋 메시지와 달리 상태 문서 2개 갱신은 이 커밋에 없다**(아래 `f75d8f1`) | [43704687576](https://github.com/Lcjam/gongchae-bell/actions/runs/43704687576) test(ARM64)·secrets 성공 |
 | 〃 | `d729422b602a11cb540eed35323bdc286c3fa823` | main 통합 SHA·충돌·건수·CI 기록(이 문서) | [43704886330](https://github.com/Lcjam/gongchae-bell/actions/runs/43704886330) test·secrets 성공 |
 | 〃 | `f75d8f1` | 머지 커밋에서 빠진 상태 문서 2개(`README.md`, `docs/implementation-status.md`) | 문서만 |
-| 〃 | (이 문서) | 위 누락 정정 기록 | 문서만 |
+| 〃 | `c76edad132cec9e4986eccaea1e127fdff487de2` | 위 누락 정정 기록 | [43705112949](https://github.com/Lcjam/gongchae-bell/actions/runs/43705112949) test·secrets 성공 |
+| 〃 | `cdd778e` | **4차**: 검수된 Sol `fc752ad7`을 **merge**(부모 `c76edad`·`fc752ad`). 통합 테스트 3건, 테스트 기반 `false` 고정, Sol 보고 이력 → [아래 4차 절](#4차-최초-적재를-시작일-하한-전체-조회로-start_scan) | 아래 커밋과 함께 push |
+| 〃 | `2d9e263939f4ce9f27506e775a674d741cd17571` | **4차** 최초 적재 START_SCAN, V4, 공식 하한 fixture, 테스트, 문서 | [43710407513](https://github.com/Lcjam/gongchae-bell/actions/runs/43710407513) test(ARM64)·secrets 성공 |
+| 〃 | (이 문서) | 4차 SHA·테스트·CI 기록 | 문서만 |
 
 PR #11의 base는 main 통합 뒤 `feat/#3-ingestion-core`에서 `main`으로 바꿨다.
 
@@ -134,3 +138,81 @@ PR #11의 base는 main 통합 뒤 `feat/#3-ingestion-core`에서 `main`으로 �
 - 원격 머지: root 검수 전이라 하지 않았다.
 - 후속 PR 몫: Sol 통합 테스트 3건과 테스트 `false` 고정.
 - 원본 작업 경로·사용자 변경·agy 작업·Sol 격리 브랜치: 수정하지 않았다.
+
+## 4차: 최초 적재를 시작일 하한 전체 조회로 (START_SCAN)
+
+지시: codex 조율(실제 조회 계약 검증 뒤 #4 필수 수정 배정). 읽은 것은 root `collab/2026-11-15-backfill/`의 `agy-query-contract.md`, `claude-correction-plan.md`, `sol-correction-plan.md`, `codex-plan-review.md`와 CLAUDE.md다. 이 네 파일은 root 작업 경로에만 있다.
+
+### 결함
+2026-11-15 월별 실제 적재(37회, 22,733건)는 시작월과 마감월이 다른 공고를 하나도 받지 못했다. agy의 추가 검증 2회(`api_attempt` 42·43)에서 `pbancEndYmd`가 마감일 상한처럼 동작함을 확인했다. 같은 하한에서 `pbancEndYmd=2026-11-15`를 붙이면 totalCount가 36,277이었고, 빼면 36,772였다. 뺀 쪽의 1페이지에는 2026-11-15 이후 마감 381건과 그 뒤 시작 4건이 있었다. 공식 명세는 두 날짜 모두 "시작일 기준"이라고 적는다. 원인은 확인하지 않았다.
+
+### 1) Sol 통합 테스트 merge (`cdd778e`)
+- `git merge fc752ad7`(rebase 없음). 충돌 4파일:
+  - `README.md`, `docs/implementation-status.md`, `agy-catalog-result.md`는 c76(최신 main) 문구를 유지했다. `agy-catalog-result.md`는 main 쪽이 이미 #5 최종본이다.
+  - `CatalogIntegrationTest`는 fc752ad7 쪽을 받았다. 그 파일은 main 파일에 `collector.enabled/backfill=false` 두 줄만 더한 것이다.
+- 확인: 머지 결과의 `src/test`는 fc752ad7과, `src/main`과 문서는 c76edad와 같다(`git diff --quiet`). 이 머지에 프로덕션 변경은 없다.
+
+### 2) 수정 (`2d9e263`)
+| 부분 | 변경 |
+|---|---|
+| 요청 | `RecruitmentClient.backfillList(from, page)`: `pbancBgngYmd=from&numOfRows=1000&pageNo=n`만 보낸다. `pbancEndYmd`는 없앴다 |
+| 흐름 | 월 반복 대신 scan 하나: 명령 `command/{slot}` → scan `{slot}/scan` → 페이지 `{slot}/scan/{n}`. raw 수신이 원격 `totalCount`에 이를 때까지 읽는다. 첫 페이지에 반영할 행이 0건이어도 계속 읽는다 |
+| 검사 순서 | `parsePage` 한 번으로 **모든 raw 행**(반영하지 않을 행 포함)의 식별자·날짜·페이지 안 중복을 검증한다. 이어서 총수 불변, 페이지 크기, raw SN 페이지 간 중복, 하한(`beginsWithin(from, MAX)`)을 본다. 그다음 같은 파싱 결과에서 `startingOnOrBefore(to)`만 `upsertPage`한다. 하나라도 어긋나면 그 페이지는 DB를 바꾸지 않는다 |
+| V4 | `collect_run`에 열만 추가: `strategy`(`START_SCAN`, 기존 행 null), `scan_generation`, `applied_count`, `applied_sns`. 기존 `total_count`·`received`·`unique_count`·`received_sns`는 raw 의미로 쓴다. V1~V3는 그대로이고 M2는 V5부터다 |
+| 세대 | 새 scan은 자기 id를 세대로 쓴다. 새 슬롯은 같은 기간의 **가장 최근 scan**을 본다. COMPLETE면 **그 행의 두 집합만** 재사용하고 HTTP는 0회다. 아니면 그 세대의 1페이지부터 **연속 완료 페이지만** 재사용하고, 그 뒤로는 끝까지 새로 받는다. `restart-pages`는 완료 여부와 상관없이 새 세대다. 페이지 조회 조건은 `strategy='START_SCAN' AND scan_generation=:g`라서 다른 세대나 월별 행을 섞지 않는다 |
+| 집계 | scan 행과 명령 행: raw total/received/unique와 applied. 받아들인 페이지만 세고, 실패해도 그때까지 남긴다. 페이지 행: raw 두 수와 SN, applied SN, 반영 행의 inserted/changed/closed |
+| 계약 | `ParsedPage.startingOnOrBefore(LocalDate)` 추가(#3 계약 v4). `BackfillRange.months()` 삭제 |
+| 보존 | 기존 공고·`collect_run`·`api_budget`/`api_attempt`를 지우거나 고치는 코드는 없다. V4 이전 월별 COMPLETE는 새 전략의 skip 근거가 되지 않는다 |
+| fixture | `fixtures/alio-official-list-lower-bound-sample.json`. agy의 ignored 보관본 `probe2-lower-only-p1.json`을 바꾸지 않고 복사했다. 4,442,918 bytes(agy 보고의 2,329,935는 문자 수), SHA-256 `3698d86882ed0f09584eb513bca1237cd8ab8d3933bd7555d50cd1eebb5d6b83`, `api_attempt.id=43`. 저장소 `.env`의 키 9가지 표기(원문·디코딩·인코딩·대소문자)·DB 비밀번호·사용자명이 0건임을 값 출력 없이 확인했다. `serviceKey`·`password` 문자열도 0건이다. provenance는 `fixtures/README.md`에 적었다 |
+| 문서 | `routes.md` 최초 적재 행과 날짜 조건 주, `erd.md` V4, `docs/ops/collector.md` 운영 순서·최초 적재 절, #3 계약 v4, ADR-0016 슬롯 형식, `implementation-status.md` FR-C1 |
+
+### 회귀 테스트 (실제 API 0회, Testcontainers + Mockito 대역)
+`BackfillRuntimeTest`는 11건에서 14건이 됐다. 월 경계 이동 1건은 단일 scan에서 의미가 없어 지웠고, 새 사례 4건을 넣었다.
+
+| codex 지정 사례 | 테스트 |
+|---|---|
+| 월 걸침·목표 뒤 마감·미래 시작·양끝 경계 | `monthCrossingLateDeadlineAndBoundaryStartsAreSelectedByStartDateOnly`: from 시작, 월 걸침, 마감이 to 뒤, to 시작은 반영하고 to+1 시작은 미반영. raw `6|6|6`, applied 5. 정기 수집 공고(`from_backfill=false`, 상세 DONE)는 출처와 상세가 그대로다 |
+| raw 1001 중 목표 1 | `rawRowsOutsideTheTargetAreReadToTheEndButNotApplied`: 1페이지는 1000건이 모두 목표 밖(applied 0)이지만 체크포인트하고 2페이지까지 읽는다. `1001|1001|1001|1` |
+| 밖의 잘못된 행·중복 | `rejectedPagesCommitNoChangeToStoredPostings` 6사례. 기존 4사례(하한, 총수 변경, 중복, 짧은 페이지)에 두 사례를 더했다: 목표 밖 행의 페이지 간 중복(`DUPLICATE_SN`, 함께 온 새 목표 행 미반영), 목표 밖 행의 날짜 형식 오류(`INVALID_ROW`). 모두 기존 공고 내용과 `posting_change`가 그대로이고, scan·명령 행 합계는 받아들인 페이지까지다 |
+| legacy 같은 기간 | `legacyMonthlyRowsForTheSamePeriodAreNeverReused`: V3 방식 COMPLETE 명령·월·페이지 행(월 행 범위 = 새 기간)이 있어도 HTTP를 하고 둘 다 반영한다. legacy 행은 바뀌지 않는다. 완료 뒤 새 슬롯은 HTTP 0회, `restart-pages`는 새 세대로 다시 읽는다 |
+| 같은 T 세대 혼합 | `explicitRestartStartsANewGenerationAndPagesWithTheSameTotalAreNeverMixed`: 세대 A는 1·2페이지 완료 후 3페이지 실패, 세대 B(restart)는 1페이지 완료 후 2페이지 실패, T는 둘 다 3000이다. 이어 받기는 B의 1페이지만 쓰고 2·3페이지를 새로 받는다. 결과 SN에 A의 SN이 0건이다 |
+| 반영·체크포인트 crash | `resumesAfterProcessExitBeforeOrAfterPageCheckpoint…`: 체크포인트 전 종료 → 다시 받아 멱등 반영. 체크포인트 후 종료 → 재사용. 변경 기록 0 |
+| 완료 재실행 0 HTTP | `resumesAFailedPageInTheSameGenerationAndKeepsExactUniqueIds`(`all-skipped`), `completedScanIsReusedOnlyThroughItsOwnSetsAfterUpstreamShrankAndARestart`(옛 세대 2000 SN을 합치지 않고 unique 1), legacy 사례 |
+| 실제 모양 | `officialLowerBoundPageKeepsItsRealShapeThroughSelection`: 원본 그대로 파싱하면 T 36,772, 1000행, 하한 통과, 선택 996(미래 시작 4건 제외)이다. 이어서 `totalCount`만 1,000으로 바꾼 단일 페이지 scan → 반영 996건, 그중 월 걸침 374, 2026-11-15 이후 마감 377, 미래 시작 0 |
+
+함께 고친 테스트:
+- `RecruitmentClientTest.backfillSendsOnlyTheStartLowerBound…`: 실제 HTTP 대역에서 `pbancEndYmd`·`ongoingYn`가 없음을 확인한다.
+- `RuntimeDatabaseTest.completedPageCheckpoint…`: 세대 조회와 두 집합을 확인하고, `strategy` null인 같은 범위 행은 찾지 않음을 확인한다.
+- `BackfillCommandIntegrationTest`, `BackfillRangeTest`(월 분할 1건 삭제), `PostingIngestorIntegrationTest`(`startingOnOrBefore` 단언)도 고쳤다.
+- Sol 통합 테스트 3번(`OfficialFixtureIntegrationTest`): 대역 조건을 "`pbancEndYmd` 없음"으로 바꾸고, 0건 행 3개를 명령·scan·페이지로 고쳤다.
+
+**변이 확인** (일부러 고장 낸 뒤 대상 테스트만 실행, 끝나고 백업에서 복원하고 `cmp`로 같음을 확인):
+
+| 고장 낸 것 | 결과 |
+|---|---|
+| 페이지 조회를 세대 대신 기간+페이지로 | 세대 혼합 테스트 실패(1/1) |
+| scan 조회에서 `strategy` 조건 제거 | legacy 테스트 실패(1/1) |
+| 선택 없이 raw 전체 반영 | 14건 중 4건 실패: 실제 모양 `1000` vs `996`, 월 걸침 사례에 sn 5 포함, 목표 밖 중복 사례에 sn 5000 반영, raw 1001 사례 1페이지 applied 1000 |
+| `pbancEndYmd` 다시 전송 | `RecruitmentClientTest` 실패(1/10) |
+
+### 검증
+- 로컬: Windows x64, Java 21.0.13, Gradle 9.9.1, Testcontainers PostgreSQL 17. 셸에 `COLLECTOR_ENABLED=false COLLECTOR_BACKFILL=false`를 주고 `gradlew check bootJar`를 1회 실행해 **BUILD SUCCESSFUL**을 얻었다. 결과는 **96 tests / 0 failures / 0 errors / 0 skipped**다.
+  - 건수 변화: c76의 91에 Sol 3건을 더하면 94다. 여기서 `BackfillRuntimeTest`는 +3(11→14), `BackfillRangeTest`는 −1이다.
+  - 클래스별: BackfillRuntime 14, RuntimeDatabase 18, PostingIngestorIntegration 20, RecruitmentClient 10, ListResponseParser 8, Catalog 6+6, Foundation 4, CollectorProperties 3, OfficialFixtureIntegration 3, CollectorWiring 2, BackfillCommand 1, BackfillRange 1.
+- Gitleaks 8.30.1(`2d9e263`): 전체 48커밋, PR 범위 `origin/main..HEAD` 24커밋 **no leaks found**.
+- 원격 CI: `2d9e263` → [43710407513](https://github.com/Lcjam/gongchae-bell/actions/runs/43710407513) `test`(ubuntu-24.04-arm)·`secrets` 성공. `cdd778e`는 같은 push라 별도 실행이 없다
+- 실제 API 호출 0회. 영속 dev DB와 컨테이너는 건드리지 않았다. agy 보관 파일은 읽고 복사만 했다.
+
+### 하지 않은 것
+- 새 방식의 실제 전체 조회(약 37페이지)는 하지 않았다(지시대로 보류).
+- 원격 머지는 하지 않았다. PR #11은 초안이며 두 독립 리뷰 전이다.
+- root 작업 경로의 `collab/2026-11-15-backfill/` 기록을 이 브랜치로 옮기지 않았다. 문서에서는 경로만 적었다.
+- 원본 사용자 변경·agy 운영 파일·Sol 브랜치에는 쓰지 않았다.
+
+### 한계와 바뀐 동작
+- **같은 총수 안의 교체**: 원천에 스냅숏 토큰이 없다. 실행 중 `totalCount`를 그대로 둔 채 한 행이 빠지고 다른 행이 들어오면 감지하지 못할 수 있다. 총수 변경·중복·페이지 크기 이상은 감지해 멈춘다.
+- **원격 총수 변동**: 하한만 둔 조회에는 새로 등록되는 공고가 들어간다. 그래서 실행 중이나 재개 사이에 `BACKFILL_COUNT_CHANGED`가 날 수 있다. 이때는 새 슬롯과 `restart-pages`로 다시 읽는다. 실패 한 번은 최대 페이지 수만큼 호출을 쓴다.
+- **바뀐 동작**: `restart-pages`는 이제 완료된 scan이 있어도 새 세대로 다시 읽는다(전에는 완료 달을 건너뜀). 실패한 명령 행의 합계는 "완료한 달"에서 "받아들인 페이지"로 바뀌었다. scan이 하나뿐이기 때문이다.
+- **반영하지 않는 행**: 목표 종료일 뒤에 시작하는 행과, `from` 전에 시작해 아직 진행 중인 공고는 최초 적재 대상이 아니다. 이후 정기 수집이 `from_backfill=false`로 넣고 상세 대상이 된다.
+- **fixture 사용 범위**: 빈 응답 fixture는 월별 요청(`pbancEndYmd` 포함)으로 받은 본문이다. 여기서는 "원격 총수 0인 scan"의 본문 모양으로만 쓴다. 하한 fixture 테스트는 `totalCount`만 바꿨고 행은 원본 그대로다.
+- 실DB에 V4가 적용되는 것은 다음 앱 실행 때다. 열 추가뿐이며, 기존 22,733건과 76행은 그대로 남는다.
