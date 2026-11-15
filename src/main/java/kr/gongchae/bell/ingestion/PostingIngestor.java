@@ -14,7 +14,6 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -23,7 +22,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
-import java.util.TreeSet;
 import java.util.regex.Pattern;
 import kr.gongchae.bell.ingestion.ListResponseParser.Page;
 import kr.gongchae.bell.ingestion.ListResponseParser.PostingRow;
@@ -94,13 +92,15 @@ public class PostingIngestor {
         }
     }
 
-    public PageResult upsertPage(String body, Instant observedAt) {
+    /** Parses and validates a backfill page without touching the database. Throws {@link IngestionException}. */
+    public ParsedPage parsePage(String body) {
+        return new ParsedPage(parser.parse(body));
+    }
+
+    /** Applies a page the caller has accepted, in one transaction. Absent postings are not judged. */
+    public Counts upsertPage(ParsedPage page, Instant observedAt) {
         requireNoTransaction();
-        Page page = parser.parse(body);
-        Counts counts = tx.execute(status -> write(page, true, false, observedAt));
-        var sns = new TreeSet<Long>();
-        page.rows().forEach(row -> sns.add(row.sn()));
-        return new PageResult(counts, Collections.unmodifiableSortedSet(sns));
+        return tx.execute(status -> write(page.page(), true, false, observedAt));
     }
 
     private RunResult fail(long runId, IngestionException e, Counts counts) {

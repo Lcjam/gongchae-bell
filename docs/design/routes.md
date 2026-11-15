@@ -42,9 +42,9 @@
 | 채용 `list` 최초 적재 | `serviceKey`, `resultType=json`, `pbancBgngYmd`/`pbancEndYmd`(YYYY-MM-DD, 월 단위), `numOfRows=1000`, `pageNo` | 1회. 3년치 약 36회(추정). 실제 건수와 페이지를 `collect_run`에 기록. 완료된 달은 다시 실행할 때 건너뛴다 |
 | 채용 `list` 정기 | `ongoingYn=Y`, `numOfRows=1000`, `pageNo=1` | 매시 7분, 하루 24회. `totalCount` ≠ 받은 건수면 INCOMPLETE (추가 페이지를 자동으로 호출하지 않는다) |
 | 채용 `detail` | `sn` | 새 진행 공고만 (Should) |
-
-`list` 응답에서 쓰는 필드와 저장 규칙은 [erd.md 공고 응답 매핑](erd.md#공고-응답-매핑-3-계약)에 있다. 응답을 반영하는 메서드 계약(완결성, 실패 코드, 최초 적재 페이지 실패 처리)은 [수집 반영 계약](../../collab/2026-11-15-implementation/claude-ingestion-contract.md)이다.
 | 호출 예산 | 모든 시도를 `api_budget`에 먼저 반영 | 500 경고, 900 자동 중단 |
 | 디스코드 웹훅 | `POST /api/webhooks/{id}/{token}?wait=true`, `allowed_mentions: {"parse": []}` | 새 공고: 수집 회차마다 / 마감 임박: 매일 09:00. 404 → 비활성, 429 → `retry_after` 대기 |
 | Resend | `POST https://api.resend.com/emails`, `Idempotency-Key` 헤더([공식](https://resend.com/docs/dashboard/emails/idempotency-keys)) | 확인 메일 + 매일 08:00 묶음. 무료 한도는 하루 100, 월 3,000이다([공식](https://resend.com/pricing)) → 전체 발송 상한을 그 아래로 둔다 |
 | Healthchecks.io | 성공 시 GET 핑 | 수집, 묶음, 백업, NAS 가져오기 |
+
+`list` 응답에서 쓰는 필드와 저장 규칙은 [erd.md 공고 응답 매핑](erd.md#공고-응답-매핑-3-계약)에 있다. 응답을 반영하는 메서드 계약(완결성, 실패 코드, 최초 적재 페이지 실패 처리)은 [수집 반영 계약](../../collab/2026-11-15-implementation/claude-ingestion-contract.md)이다.

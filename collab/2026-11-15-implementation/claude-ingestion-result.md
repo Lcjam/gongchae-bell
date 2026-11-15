@@ -1,7 +1,7 @@
 # #3 구현 결과 · claude
 
 > 2026-11-15 · 구현: claude · 검수: codex · 브랜치 `feat/#3-ingestion-core` (main `9402015` 기반) · 초안 PR [#9](https://github.com/Lcjam/gongchae-bell/pull/9)
-> 계약: [claude-ingestion-contract.md](claude-ingestion-contract.md) (**v2**) · 검수 03 대응: [claude-ingestion-review-response.md](claude-ingestion-review-response.md) · 준비안: [claude-ingestion-ready.md](../2026-11-14-resume/claude-ingestion-ready.md)
+> 계약: [claude-ingestion-contract.md](claude-ingestion-contract.md) (**v3**) · 검수 03 대응: [claude-ingestion-review-response.md](claude-ingestion-review-response.md) · 준비안: [claude-ingestion-ready.md](../2026-11-14-resume/claude-ingestion-ready.md)
 
 ## 커밋
 | SHA | 내용 |
@@ -11,7 +11,8 @@
 | `4cca391` | 1차 결과 기록 |
 | `67ed7dc` | **계약 v2와 검수 대응 파일**. 검수 03을 받고 구현보다 먼저 푸시(Sol #4 전달용) |
 | `ef7dd4cb074a48406c7883e093f5ec9abf767629` | 검수 03 수정 5건의 구현과 테스트, erd.md |
-| (이 문서) | 결과 갱신 |
+| `925aa18` | 검수 03 결과와 CI 기록 |
+| (이 커밋) | **계약 v3**: 최초 적재 파싱·반영 분리, null 본문 `NON_JSON`, routes 표 정리 |
 
 머지하지 않았다. PR은 초안이다.
 
@@ -72,6 +73,17 @@
 
 준비안의 D-C(마감 연장 시 OPEN 복귀), D-D(마감 당일 누락은 CHECK), D-G(비교 대상 외 값은 기록 없이 덮어쓰기), D-H(`item` 래퍼 허용), D-I(텍스트 정규화 없음)는 권장대로 구현하고 erd.md와 계약에 적었다.
 
+## 계약 v3 수정 (codex 11 결정 1번, agy PR #9 리뷰 3-1·3-2)
+| 지시 | 처리 | 테스트 |
+|---|---|---|
+| 최초 적재의 의미 검사를 반영 전에. 단일 파싱 유지, 호환 래퍼 없음 | `PostingIngestor.parsePage(body) → ParsedPage`(DB 접근 없음, `totalCount()`·`sns()`·`beginsWithin(from,to)`)와 `upsertPage(ParsedPage, observedAt) → Counts`로 나눴다. `PageResult`와 `upsertPage(String, Instant)`는 지웠다 | `parsedPageWritesNothingSoTheCallerCanRejectItBeforeAnyChange`: 저장된 공고의 제목 변경과 기간 밖 새 공고가 섞인 페이지를 파싱만 하면 5개 공고 테이블 덤프가 그대로이고, `sns`·`totalCount`·기간 경계(시작일 당일 포함, 하루 전 제외)를 반영 전에 알 수 있다. 기존 적재 테스트 6개를 새 API로 옮겼다 |
+| null 본문 → `NON_JSON` | `ListResponseParser.parse` 맨 앞에서 거부 | `ListResponseParserTest.rejectsUnreadableEnvelopes`(null), `unusableResponsesChangeNoPostingDataAndKeepTheLastCompleteTime`의 "no body": 정기 회차가 `FAILED`/`NON_JSON`으로 마감되고 공고 테이블과 마지막 완전 수집 시각이 그대로 |
+| `routes.md` 외부 API 표 끊김 | 표 중간 문단을 표 아래로 옮겼다 | 문서 |
+
+agy 리뷰 3-3(`loadCodes` 정렬의 DB collation 의존, 비교 외 필드 단독 테스트)은 선택 사항이라 이번에 고치지 않았다. 지금 코드 값(`R600001` 같은 대문자·숫자)에서는 두 정렬이 같다.
+
+로컬: Windows x64, Temurin 21.0.13, Docker Desktop, PostgreSQL 17 Testcontainers에서 `gradlew check` **32 tests / 0 failures / 0 skipped**(전 31 + 새 1). 커밋과 원격 CI는 아래 "커밋" 표에 추가한다.
+
 ## 한계와 미확인
 - **공식 API 봉투**: 실제 `apis.data.go.kr` 응답을 아직 본 적이 없다. 파서는 swagger 문서의 `{"item": …}` 래퍼와 평평한 원소를 모두 받는다. #4가 실응답을 받으면 안 쓰는 쪽을 지워야 한다. 빈 달이 `200 + []`인지 `resultCode 3`인지도 #4가 확인할 일이다(지금은 3이면 `RESULT_CODE_NOT_OK`).
 - **게이트웨이 오류 본문**: 실물을 확보하지 못해 테스트에서 합성 XML 문자열을 쓴다(테스트 주석과 fixtures README에 표시).
@@ -85,6 +97,6 @@
 - **로그**: 반영하지 않은 응답은 WARN 로그에 실패 코드, 필드 이름, `sn`, 정수일 때의 `resultCode`를 남긴다. 본문과 URL은 남기지 않는다. `collect_run.error`에는 상수만 들어간다.
 
 ## 다음 담당에게
-- **#4 (Sol)**: 계약 v2 §2~§3. 트랜잭션 밖에서 호출한다. `upsertPage`가 예외를 던지면 그 달을 INCOMPLETE/FAILED로 남긴다. 월 고유 수와 페이지 간 중복은 `PageResult.sns`로 계산하고 `counts.inserted`는 쓰지 않는다. 본문을 다시 파싱하지 않는다. 공식 봉투를 확인하면 `ListResponseParser.parse`의 `item` 분기와 테스트 하나를 정리한다. V3를 추가해도 `FoundationIntegrationTest`는 그대로 통과해야 한다.
+- **#4**: 계약 v3 §2~§3. `parsePage` → 반영 전 검사 → `upsertPage` 순서로 부르고, `upsertPage`는 트랜잭션 밖에서 호출한다. `parsePage`가 예외를 던지거나 검사에서 거부하면 그 달을 INCOMPLETE/FAILED로 남긴다. 월 고유 수와 페이지 간 중복은 `ParsedPage.sns()`로 계산하고 `counts.inserted`는 쓰지 않는다. 본문을 다시 파싱하지 않는다. 공식 봉투를 확인하면 `ListResponseParser.parse`의 `item` 분기와 테스트 하나를 정리한다. V3를 추가해도 `FoundationIntegrationTest`는 그대로 통과해야 한다.
 - **#5 (agy)**: `pref`는 그대로 출력하되 줄바꿈을 살린다(`th:text` + `white-space: pre-line` 등). 나눌 필요 없다. `src_url_generic`이 false여도 `src_url`이 무효면 잡알리오 링크를 보여 줘야 한다(스킴 없는 값 19/497건). `broken_text` 배지 문구는 "의심"으로 쓴다.
 - **M2**: "새 공고"는 첫 COMPLETE 정기 회차 이후의 `first_seen_at`이고 `from_backfill = false`인 행이다. 시작일이 3년보다 오래된 진행 공고도 있으므로(스냅숏에서 1건, 2020년 시작) 첫 회차를 기준선으로 봐야 한다.
