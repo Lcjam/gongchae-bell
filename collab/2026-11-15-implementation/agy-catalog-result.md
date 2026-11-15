@@ -5,11 +5,13 @@
 - **기반 커밋**: `94020156e983a9e1c8617290f32b63275157ce33` (`main`)
 - **PR URL**: https://github.com/Lcjam/gongchae-bell/pull/10 (Draft PR, Issue `#5` 연결, 미머지)
 - **커밋 이력**:
+  - `origin/main` (PR `#9`, `0bf3d40edf20d4948c919a977acccc47f668baee`) 병합 커밋: `d6ddf774da58d49ea54b36cde80d89dc119cfa51` (`merge: origin/main (#3 ingestion, PR #9) 병합 및 implementation-status 충돌 해소 (#5)`)
+  - PR #10 리뷰(M1/M2/L1~L3) 문서·최종 반영 커밋: `4334af809e3d8ce97205e29dcf9a22d28fcddaa6`
   - PR #10 리뷰(M1/M2/L1~L3) 반영 코드 커밋: `e2f0bef8eab140a6e292c9905fe36a7731bc4f55` (`fix: PR #10 리뷰 M1/M2 및 L1~L3 반영 (#5)`)
   - 1차 결과 기록 커밋: `4ef78be3708e4810bc1f857cf0548aad1d28af37` (`docs: #5 공고 웹 화면 준비안 및 구현·검증 결과 기록 (#5)`)
   - 1차 검수 수정 커밋: `bab38a7f5a95bcc7d966902db4de5f8ddae5c2cf` (`fix: 오류 화면 기준 시각·2시간 지연 안내·수용 기준 테스트 보강 (#5)`)
   - 1차 구현 커밋: `13daeacc1c395af7374b33ea05ac82489c22e68a` (`feat: 공고 웹 화면(catalog)과 3년 기관 이력 구현 (#5)`)
-- **상태**: `origin feat/#5-catalog-web` 푸시 및 원격 CI 검증 완료 (머지 대기 — 재검수 및 `#3`/`#4` 합본 테스트 대기)
+- **상태**: `origin/main` 병합 충돌 해소 및 `origin feat/#5-catalog-web` 푸시·원격 CI 검증 완료 (PR `#10` `MERGEABLE` / `CLEAN`, 두 검수 확인 전 원격 머지 금지 유지)
 
 ---
 
@@ -97,3 +99,29 @@
 - `collab/2026-11-14-resume/agy-catalog-ready.md` 보존
 - Flyway 마이그레이션(`V1`, `V2`) 수정·추가 없음
 - 수집(`ingestion`), 구독·알림(`subscription`), 배포 코드 미변경
+
+---
+
+## 6. `origin/main` (PR `#9`) 병합 및 최신 CI 검증
+
+- **병합 대상**: `origin/main` `0bf3d40edf20d4948c919a977acccc47f668baee` (PR `#9` 머지 커밋)
+- **병합 커밋**: `d6ddf774da58d49ea54b36cde80d89dc119cfa51` (`merge: origin/main (#3 ingestion, PR #9) 병합 및 implementation-status 충돌 해소 (#5)`) — 기존 커밋 이력 보존 (`rebase`/`force-push` 미사용)
+- **충돌 범위 및 해소**:
+  - `docs/implementation-status.md` 1개 파일만 충돌 발생 (`+1/-7` 최소 정리: `#3` `FR-C7~C8` 완료 상태와 `#5` `FR-W1~W8` 완료 상태 양쪽 보존, `#4` 상세 수집기 미완료 경계 유지)
+  - 앱 코드·테스트·Flyway 충돌 없음
+  - Sol 격리 브랜치 `fc752ad7e78c776ac14448c42662dd1b8fffa1cd`의 테스트 기반 `collector.enabled=false`/`backfill=false` 보완은 별도 후속 테스트 PR 반영 방침에 따라 본 병합에 중복 cherry-pick하지 않음
+- **최종 diff 요약 (`git diff --stat origin/main..d6ddf77`)**: `25 files changed, 3291 insertions(+), 48 deletions(-)` (`#5` 공고 웹·문서·설정 범위만 유지)
+- **로컬 통합 검증 (`COLLECTOR_ENABLED=false`, `COLLECTOR_BACKFILL=false`, `.\gradlew.bat --no-daemon check bootJar --rerun-tasks`)**:
+  - 결과: `BUILD SUCCESSFUL in 28s` (실제 API/수집 미호출)
+  - 총 **44 tests, 0 failures, 0 errors, 0 skipped**:
+    - `CatalogIntegrationTest`: 6건 통과 (`3.232s`)
+    - `CatalogUnitTest`: 6건 통과 (`0.299s`)
+    - `FoundationIntegrationTest`: 4건 통과 (`9.159s`)
+    - `ListResponseParserTest`: 8건 통과 (`0.173s`)
+    - `PostingIngestorIntegrationTest`: 20건 통과 (`2.435s`)
+- **비밀 스캔**:
+  - `gitleaks dir --redact`: 1.57 MB 스캔, `no leaks found`
+  - `gitleaks git --redact`: 42 commits (8.28 MB) 스캔, `no leaks found`
+- **원격 CI 및 PR 상태**:
+  - 병합 커밋 `d6ddf774da58d49ea54b36cde80d89dc119cfa51` CI: [43686364439](https://github.com/Lcjam/gongchae-bell/actions/runs/43686364439) — `test` (`59s`) `pass`, `secrets` (`9s`) `pass`
+  - PR `#10` 상태: `MERGEABLE` / `CLEAN` (원격 머지 금지 유지, 본 결과 기록 커밋으로 최종 HEAD 및 CI 갱신)
