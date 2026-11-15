@@ -4,13 +4,14 @@
 
 ## 운영 순서와 남은 게이트
 
-1. **최초 적재를 먼저 끝낸다.** `COLLECTOR_ENABLED=false`인 상태에서 아래 "최초 적재" 명령으로 최근 3년을 적재하고, 명령 행이 `COMPLETE`인지 확인한다.
+1. **최초 적재를 먼저 끝낸다.** `COLLECTOR_ENABLED=false`인 상태에서 아래 "최초 적재" 명령으로 최근 3년을 적재하고, `strategy='START_SCAN'`인 명령 행이 `COMPLETE`인지 확인한다. V4 이전 월별 방식으로 끝난 명령(2026-11-15 `initial-001`·`initial-002`, 22,733건)은 시작월과 마감월이 같은 공고만 받았으므로 완료 근거가 아니다. 그 행과 공고는 지우지 않는다.
 2. 그다음에 `COLLECTOR_ENABLED=true`로 정기 수집을 켠다. 순서를 바꾸면 그때 진행 중인 공고가 모두 `from_backfill=false`가 되어 상세 대상이 된다(2026-11-14 22:22 KST 공개 경로 1회 수집 기준 진행 공고 497건). 상세는 sweep당 30건 상한과 정기 몫 덕분에 예산은 지키지만, 그만큼 상세 수집이 밀린다(497건이면 시간당 30건씩 약 17시간).
 
 공식 응답은 2026-11-15 14:41~14:46 KST에 agy가 1회씩 받아 보관했다([검증 기록](../../collab/2026-11-15-api-verification/agy-result.md), `fixtures/alio-official-*.json`, 영속 예산 4회: 실패 1·성공 3, Sol 독립 확인). 이 표본으로 확인한 것:
 - 목록 봉투는 최상위 `{resultCode, resultMsg, totalCount, result[]}`이고 원소에 `item` 래퍼가 없다(진행 공고 497건).
 - 상세는 `result` 단일 객체이고 `steps`·`files` 원소에 `step`·`file` 래퍼가 없다(sn 307032, steps 4·files 3).
-- 빈 기간(2010-01-01~2010-01-31)은 `200` + `totalCount 0` + 빈 배열이다. `resultCode` 3이 아니므로 빈 달도 완료된다.
+- 빈 기간(2010-01-01~2010-01-31)은 `200` + `totalCount 0` + 빈 배열이다. `resultCode` 3이 아니므로 결과가 0건이어도 완료된다.
+- `pbancEndYmd`는 마감일 상한처럼 동작한다. 그래서 최초 적재는 시작일 하한만 보낸다([routes.md](../design/routes.md) 주, 2026-11-15 20:11 KST 추가 검증 2회).
 - 표본 하나씩이다. 다른 공고의 단계 의미·순서(`sortNo`가 0부터, 같은 번호가 여러 행)는 일반화하지 않는다.
 
 다음은 아직 닫지 않은 **별도 게이트**다. 정기 수집을 운영에서 켜기 전에 각각 기록한다.
@@ -42,19 +43,36 @@ KST 날짜별 `api_budget.count`를 HTTP **직전 REQUIRES_NEW 트랜잭션**으
 
 ## 최초 적재
 
-환경변수로 DB와 API 키를 주입한 로컬 운영 셸에서 실행한다. 아래 값은 예시이며 실측 적재 기록이 아니다.
+환경변수로 DB와 API 키를 주입한 로컬 운영 셸에서 실행한다. 아래 값은 예시이며 실측 적재 기록이 아니다. 이미 쓴 슬롯(`initial-001`, `initial-002`)은 다시 쓸 수 없다.
 
 ```powershell
-java -jar build/libs/gongchae-bell.jar --spring.main.web-application-type=none --collector.enabled=false --collector.backfill=true --collector.backfill-slot=initial-001 --collector.backfill-from=2023-11-15 --collector.backfill-to=2026-11-15
+java -jar build/libs/gongchae-bell.jar --spring.main.web-application-type=none --collector.enabled=false --collector.backfill=true --collector.backfill-slot=initial-003 --collector.backfill-from=2023-11-15 --collector.backfill-to=2026-11-15
 ```
 
-기간을 생략하면 실행 KST 날짜부터 3년 전 날짜까지를 포함한다. 첫/마지막 달은 부분 월이다. 재개 시에는 처음 기록한 기간을 명시하고 새 슬롯(예: initial-002)을 쓴다. 슬롯은 영문/숫자/밑줄/하이픈 1~40자다. 이미 사용한 슬롯은 외부 요청 없이 종료한다. 완료한 달은 건너뛰며 미완료 달은 완료 페이지 다음부터 이어 간다. 월의 totalCount와 받은 건수 합·고유 SN 수가 모두 같아야 완료한다. 페이지 날짜 오류 한 건도 페이지 전체 실패다. 실패 페이지를 건너뛰고 달을 완료하지 않는다. 과거 공고 상세는 호출하지 않는다.
+**조회 (START_SCAN)**: `list?pbancBgngYmd=<from>&numOfRows=1000&pageNo=n`을 1페이지부터 원격 `totalCount`를 다 받을 때까지 읽는다. `pbancEndYmd`는 보내지 않는다. 결과에는 목표 종료일 이후 시작하는 공고도 들어 있다. 이 행은 받고 검사하지만 반영하지 않으며, 이후 정기 수집이 `from_backfill=false`로 넣는다. 첫 페이지에 반영할 행이 하나도 없어도 끝까지 읽는다. 기간을 생략하면 실행 KST 날짜부터 3년 전 날짜까지다. 과거 공고 상세는 호출하지 않는다. 호출 수는 `ceil(totalCount/1000)`이다(2026-11-15 기준 37).
 
-페이지 검사는 **모두 반영 전에** 한다([#3 계약 v3](../../collab/2026-11-15-implementation/claude-ingestion-contract.md)): 본문을 한 번 파싱(`parsePage`)한 뒤 월 총수 변경, 기대 페이지 크기, 앞 페이지와의 SN 중복, 요청 기간 밖 시작일을 확인하고, 통과한 페이지만 `upsertPage`로 반영한다. 거부된 페이지는 이미 저장된 공고의 내용도 바꾸지 않는다. 완료된 달을 건너뛸 때는 그 **월 행이 완료 당시 검증한 SN 집합**(`received_sns`)을 쓴다. 예전 시도의 페이지 행을 다시 합치지 않는다.
+**페이지 검사는 모두 반영 전에 한다**([#3 계약](../../collab/2026-11-15-implementation/claude-ingestion-contract.md)). 본문을 한 번 파싱(`parsePage`)하며 반영하지 않을 행까지 **모든 raw 행**을 검사한다. 이어서 다음을 확인한다:
 
-미완료 달의 upstream totalCount가 바뀌어 기존 페이지와 합칠 수 없으면 멈춘다. 기간과 새 슬롯을 지정하고 `--collector.backfill-restart-pages=true`로 **미완료 달의 페이지**를 처음부터 다시 읽는다. 완료 달은 이 옵션에서도 건너뛴다. 중복 반영은 #3 코어가 멱등 처리한다.
+1. 앞 페이지와 같은 `totalCount`
+2. 기대 페이지 크기(`min(1000, T-(n-1)·1000)`)
+3. 앞 페이지들과의 raw SN 중복
+4. 시작일이 `from` 이상
 
-명령/월/페이지의 기간·페이지·원격 totalCount·받은 건수·고유 SN 집합과 고유 건수를 `collect_run`에 남긴다. 집계 범위: **명령 행**은 완료한 달만 합친다(실패로 끝나도 앞서 완료한 달의 합계를 남긴다). **월 행**은 받아들인 페이지(검사·반영·체크포인트를 마친 페이지)만 센다. 거부된 페이지는 월 합계와 SN 집합에 들어가지 않는다. 실패 중인 달의 내역은 그 월 행과 페이지 행에서 본다. 전체 기간 고유 수는 월별 수신 SN의 실제 합집합이다. 재개한 명령/월 요약의 received는 저장된 완료 페이지까지 포함한 해당 범위의 수신 합계이며, 해당 명령에서 새로 발생한 HTTP 시도 수는 api_attempt로 구분한다. null 결과의 종료된 기존 실행은 이력으로 보존한다. 세션 잠금의 범위와 한계는 [ADR-0016](../adr/0016-supplemental-session-lock.md)에 있다. 잠금은 Hikari 풀 밖의 전용 물리 연결을 쓰고, 해제가 실패해도 그 연결을 닫아 세션과 함께 잠금을 끝낸다. 잠금마다 DB 연결이 하나 더 필요하다(풀 최대 크기에 포함되지 않음).
+하나라도 어긋나면 그 페이지 전체를 거부하고, 이미 저장된 공고의 내용도 바꾸지 않는다. 통과하면 같은 파싱 결과에서 시작일이 `to` 이하인 행만 골라(`startingOnOrBefore`) `upsertPage`로 반영한다. 끝에서 raw 고유 SN 수가 `totalCount`와 같아야 완료한다.
+
+**재개와 세대**: scan 행과 페이지 행에는 **조회 세대**(`scan_generation`)가 있다.
+- 새 슬롯으로 다시 실행하면 같은 기간의 가장 최근 scan을 본다.
+  - 그 scan이 `COMPLETE`면 HTTP 없이 **그 scan 행 자신의 두 SN 집합**(raw, 반영)으로 끝낸다.
+  - 아니면 그 세대를 이어 간다. 1페이지부터 연속으로 완료된 페이지만 재사용하고, 첫 빈 페이지부터는 끝까지 새로 받는다.
+- `--collector.backfill-restart-pages=true`는 완료 여부와 상관없이 **새 세대**로 1페이지부터 다시 읽는다. 다른 세대의 페이지는 `totalCount`가 같아도 섞지 않는다.
+- 원격 `totalCount`에는 새로 등록되는 공고도 들어가므로 실행 중이나 재개 사이에 바뀔 수 있다. 그러면 `BACKFILL_COUNT_CHANGED`로 멈춘다. 이때는 새 슬롯과 `restart-pages=true`로 다시 읽는다. 이미 반영한 행은 #3 코어가 멱등 처리한다. 공고 등록이 적은 시간에 실행하는 것이 낫다.
+- V4 이전 월별 행(`strategy` null)은 기간이 같아도 재개·완료 근거로 쓰지 않는다.
+
+**기록**: 명령·scan·페이지 행에 기간, 페이지, raw `totalCount`·`received`·`unique_count`·`received_sns`, 반영 `applied_count`·`applied_sns`를 남긴다. 페이지 행의 `inserted`·`changed`·`closed`는 반영한 행에 대한 값이다. scan 행과 명령 행은 받아들인 페이지(검사·반영·체크포인트를 마친 페이지)만 센다. 실패로 끝나도 그때까지의 합계를 남기고, 실패한 페이지 내역은 페이지 행에 있다. FR-C1의 "고유 공고 수"는 `applied_count`다. 새로 발생한 HTTP 시도 수는 `api_attempt`로 구분한다. null 결과의 종료된 기존 실행은 이력으로 보존한다.
+
+**보장하지 않는 것**: 원천은 스냅숏 토큰을 주지 않는다. 그래서 실행 중 `totalCount`를 그대로 둔 채 한 행이 빠지고 다른 행이 들어오는 교체는 감지하지 못할 수 있다. 감지하는 변화(`totalCount` 변경, 중복, 페이지 크기)에서는 멈춘다.
+
+세션 잠금의 범위와 한계는 [ADR-0016](../adr/0016-supplemental-session-lock.md)에 있다. 잠금은 Hikari 풀 밖의 전용 물리 연결을 쓰고, 해제가 실패해도 그 연결을 닫아 세션과 함께 잠금을 끝낸다. 잠금마다 DB 연결이 하나 더 필요하다(풀 최대 크기에 포함되지 않음).
 
 ## 운영 지표
 

@@ -39,12 +39,14 @@
 ## 외부 API
 | 연동 | 요청 | 주기와 호출량 |
 |---|---|---|
-| 채용 `list` 최초 적재 | `serviceKey`, `resultType=json`, `pbancBgngYmd`/`pbancEndYmd`(YYYY-MM-DD, 월 단위), `numOfRows=1000`, `pageNo` | 1회. 3년치 약 36회(추정). 실제 건수와 페이지를 `collect_run`에 기록. 완료된 달은 다시 실행할 때 건너뛴다 |
+| 채용 `list` 최초 적재 | `serviceKey`, `resultType=json`, `pbancBgngYmd`(YYYY-MM-DD, 목표 시작일), `numOfRows=1000`, `pageNo`. **`pbancEndYmd`는 보내지 않는다**(아래 주) | 1회. `ceil(totalCount/1000)`회로 끝 페이지까지 읽는다. 2026-11-15 `pbancBgngYmd=2023-11-15` 1페이지의 totalCount는 36,772이므로 37회다. 시작일이 목표 종료일 이후인 행은 받되 반영하지 않는다. raw 수신과 반영 집합을 `collect_run`에 따로 기록한다 |
 | 채용 `list` 정기 | `ongoingYn=Y`, `numOfRows=1000`, `pageNo=1` | 매시 7분, 하루 24회. `totalCount` ≠ 받은 건수면 INCOMPLETE (추가 페이지를 자동으로 호출하지 않는다) |
 | 채용 `detail` | `sn` | 새 진행 공고만 (Should) |
 | 호출 예산 | 모든 시도를 `api_budget`에 먼저 반영 | 500 경고, 900 자동 중단 |
 | 디스코드 웹훅 | `POST /api/webhooks/{id}/{token}?wait=true`, `allowed_mentions: {"parse": []}` | 새 공고: 수집 회차마다 / 마감 임박: 매일 09:00. 404 → 비활성, 429 → `retry_after` 대기 |
 | Resend | `POST https://api.resend.com/emails`, `Idempotency-Key` 헤더([공식](https://resend.com/docs/dashboard/emails/idempotency-keys)) | 확인 메일 + 매일 08:00 묶음. 무료 한도는 하루 100, 월 3,000이다([공식](https://resend.com/pricing)) → 전체 발송 상한을 그 아래로 둔다 |
 | Healthchecks.io | 성공 시 GET 핑 | 수집, 묶음, 백업, NAS 가져오기 |
+
+**최초 적재 날짜 조건 (2026-11-15 실측)**: [공식 명세](https://www.data.go.kr/data/15125273/openapi.do)는 `pbancBgngYmd`·`pbancEndYmd`를 모두 선택 항목이자 "채용공시 시작일 기준" 조회 범위로 적는다. 실제 응답은 `pbancEndYmd`를 **마감일 상한**처럼 적용했다. 월별로 `pbancEndYmd=월말`을 보낸 37개월 22,733건에는 시작월과 마감월이 다른 공고가 0건이었다. `pbancBgngYmd=2023-11-15&pbancEndYmd=2026-11-15` 1페이지는 totalCount 36,277에 2026-11-15 이후 마감이 0건이었다. `pbancEndYmd`를 뺀 1페이지는 totalCount 36,772에 그런 공고가 381건, 오늘 이후 시작 공고가 4건이었다(agy 검증, 영속 예산 2회. 기록은 root 작업 경로의 `collab/2026-11-15-backfill/agy-query-contract.md`). 그래서 최초 적재는 시작일 하한만 보내 전체를 끝까지 읽고, 시작일 상한은 앱이 적용한다. 서버 쪽 동작의 원인은 확인하지 않았다. 실제 1페이지 본문은 [`fixtures/alio-official-list-lower-bound-sample.json`](../../fixtures/README.md)이다.
 
 `list` 응답에서 쓰는 필드와 저장 규칙은 [erd.md 공고 응답 매핑](erd.md#공고-응답-매핑-3-계약)에 있다. 응답을 반영하는 메서드 계약(완결성, 실패 코드, 최초 적재 페이지 실패 처리)은 [수집 반영 계약](../../collab/2026-11-15-implementation/claude-ingestion-contract.md)이다.

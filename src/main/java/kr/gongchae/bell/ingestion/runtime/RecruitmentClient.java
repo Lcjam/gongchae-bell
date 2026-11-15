@@ -40,9 +40,9 @@ public class RecruitmentClient {
         this.sleeper=sleeper; this.clock=clock; this.timeout=timeout;
     }
     public String regularList() { return get("list", "REGULAR", Map.of("ongoingYn","Y","numOfRows","1000","pageNo","1")); }
-    public String backfillList(LocalDate from, LocalDate to, int page) {
-        return get("list", "BACKFILL", Map.of("pbancBgngYmd",from.toString(),"pbancEndYmd",to.toString(),
-                "numOfRows","1000","pageNo",Integer.toString(page)));
+    /** Start-date lower bound only: the service applies pbancEndYmd to the deadline and would drop postings (routes.md). */
+    public String backfillList(LocalDate from, int page) {
+        return get("list", "BACKFILL", Map.of("pbancBgngYmd",from.toString(),"numOfRows","1000","pageNo",Integer.toString(page)));
     }
     public String detail(long sn) { return get("detail","DETAIL", Map.of("sn",Long.toString(sn))); }
     private String get(String endpoint, String kind, Map<String,String> params) {

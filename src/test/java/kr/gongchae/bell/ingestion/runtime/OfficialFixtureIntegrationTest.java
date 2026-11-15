@@ -168,7 +168,7 @@ class OfficialFixtureIntegrationTest extends IntegrationTestSupport {
         assertThat(backfill.collect("official-empty", new BackfillRange(LocalDate.of(2010, 1, 1), LocalDate.of(2010, 1, 31)), false))
                 .isEqualTo(BackfillCollector.Outcome.COMPLETE);
         assertThat(count("collect_run WHERE kind='BACKFILL' AND result='COMPLETE' AND total_count=0 AND received=0 AND unique_count=0"))
-                .isEqualTo(3); // command, month and page each record a successful zero-row receipt.
+                .isEqualTo(3); // command, scan and page each record a successful zero-row receipt.
         assertThat(jdbc.sql("SELECT * FROM posting WHERE sn=307032").query().singleRow()).isEqualTo(before);
         assertThat(lastComplete()).isEqualTo(completeAt);
         assertThat(count("api_attempt WHERE kind='BACKFILL' AND outcome='SUCCESS'")).isEqualTo(1);
@@ -214,8 +214,9 @@ class OfficialFixtureIntegrationTest extends IntegrationTestSupport {
                 String path = exchange.getRequestURI().getPath();
                 String query = exchange.getRequestURI().getRawQuery();
                 boolean detail = path.equals("/detail") && query.contains("sn=307032");
+                // Initial load sends the start lower bound only; a pbancEndYmd would filter by deadline upstream.
                 boolean empty = path.equals("/list") && query.contains("pbancBgngYmd=2010-01-01")
-                        && query.contains("pbancEndYmd=2010-01-31") && query.contains("pageNo=1");
+                        && !query.contains("pbancEndYmd") && query.contains("pageNo=1");
                 if (!detail && !empty) UNEXPECTED_REQUEST.set(path + "?" + query);
                 byte[] bytes = (detail ? fixture("detail") : empty ? fixture("list-empty") : "{}").getBytes(StandardCharsets.UTF_8);
                 exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");

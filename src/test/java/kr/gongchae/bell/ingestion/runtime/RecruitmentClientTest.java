@@ -58,10 +58,11 @@ class RecruitmentClientTest {
             assertThat(query).as(configured).startsWith("serviceKey=fixture%2B%2F%3D+key&");
         }
     }
-    @Test void backfillUsesMonthBoundariesAndNeverRequestsDetails() {
+    @Test void backfillSendsOnlyTheStartLowerBoundAndNeverRequestsDetails() {
         responds(200,"fixture-body");
-        client(Duration.ofSeconds(1)).backfillList(LocalDate.of(2024,2,1),LocalDate.of(2024,2,29),2);
-        assertThat(query).contains("pbancBgngYmd=2024-02-01","pbancEndYmd=2024-02-29","pageNo=2").doesNotContain("ongoingYn");
+        client(Duration.ofSeconds(1)).backfillList(LocalDate.of(2023,11,15),2);
+        // pbancEndYmd would filter by deadline upstream and drop postings that end after it.
+        assertThat(query).contains("pbancBgngYmd=2023-11-15","numOfRows=1000","pageNo=2").doesNotContain("pbancEndYmd","ongoingYn");
         verify(budget).reserve("BACKFILL",1);
     }
     @Test void retriesAtMostThreeTimesAndEveryAttemptReservesBudget() {

@@ -2,7 +2,7 @@
 
 > 스키마의 원본은 Flyway 스크립트다. 이 문서는 그와 일치해야 한다. 시각은 `timestamptz`, 날짜는 `date`(KST 기준)로 저장한다.
 
-구현 현황 (2026-11-15): `V1__catalog_and_ingestion.sql`은 공고 5개 테이블과 `collect_run`, `api_budget`을 만든다. V2는 마지막 완전 수집 조회용 부분 인덱스와 코드 유형 제약을 추가한다. V3(`V3__collector_runtime_records.sql`, #4)는 `collect_run`에 최초 적재의 기간·월·페이지·고유 수·SN 집합 열과 부분 인덱스를 더하고 `api_attempt`를 만든다. 아래 `rate_limit`, 구독/발송 테이블은 아직 설계이며 후속 마이그레이션으로 구현한다.
+구현 현황 (2026-11-15): `V1__catalog_and_ingestion.sql`은 공고 5개 테이블과 `collect_run`, `api_budget`을 만든다. V2는 마지막 완전 수집 조회용 부분 인덱스와 코드 유형 제약을 추가한다. V3(`V3__collector_runtime_records.sql`, #4)는 `collect_run`에 최초 적재의 기간·월·페이지·고유 수·SN 집합 열과 부분 인덱스를 더하고 `api_attempt`를 만든다. V4(`V4__backfill_start_scan.sql`, #4)는 최초 적재를 시작일 하한 전체 조회(START_SCAN)로 바꾸면서 전략·조회 세대·반영 수와 반영 SN 집합 열을 더한다. 열 추가만 하며 V3 이전 행은 그대로다. 알림(M2)의 첫 마이그레이션은 V5다. 아래 `rate_limit`, 구독/발송 테이블은 아직 설계이며 후속 마이그레이션으로 구현한다.
 
 ```mermaid
 erDiagram
@@ -44,12 +44,12 @@ erDiagram
 ## 실행과 예산
 | 테이블 | 컬럼 | 제약·인덱스 |
 |---|---|---|
-| `collect_run` | V1: `id`, `kind`(BACKFILL/REGULAR/DETAIL/DIGEST/DEADLINE), `slot`(회차 키, 아래), `started_at`, `finished_at`, `result`(COMPLETE/INCOMPLETE/FAILED, 진행 중이면 null), `total_count`, `received`, `inserted`, `changed`, `closed`, `error`. V3: `period_from`·`period_to`(최초 적재 명령의 전체 기간), `range_from`·`range_to`(그 행이 다루는 달), `page_no`(페이지 행만, > 0), `unique_count`(≥ 0, 고유 공고 수), `received_sns`(jsonb 배열: 페이지 행은 그 페이지의 SN, 월 행은 완료 때 검증한 그 달의 SN 집합) | **UNIQUE (`kind`, `slot`)** ← 회차 선점 ([ADR-0003](../adr/0003-schedule-dedup-by-slot.md)); 부분 인덱스 (`finished_at` DESC) WHERE REGULAR·COMPLETE (V2); 부분 인덱스 (`range_from`, `range_to`, `page_no`) WHERE BACKFILL·COMPLETE (V3); CHECK `jsonb_typeof(received_sns) = 'array'` |
+| `collect_run` | V1: `id`, `kind`(BACKFILL/REGULAR/DETAIL/DIGEST/DEADLINE), `slot`(회차 키, 아래), `started_at`, `finished_at`, `result`(COMPLETE/INCOMPLETE/FAILED, 진행 중이면 null), `total_count`, `received`, `inserted`, `changed`, `closed`, `error`. V3: `period_from`·`period_to`(최초 적재 명령의 전체 기간), `range_from`·`range_to`(그 행이 다루는 달), `page_no`(페이지 행만, > 0), `unique_count`(≥ 0, 고유 공고 수), `received_sns`(jsonb 배열: 페이지 행은 그 페이지의 SN, 월 행은 완료 때 검증한 그 달의 SN 집합). V4: `strategy`(`START_SCAN`, V4 이전 월별 행은 null), `scan_generation`(scan·페이지 행: 그 페이지가 속한 조회 세대 = 세대를 시작한 scan 행의 id), `applied_count`(≥ 0)·`applied_sns`(jsonb 배열: 시작일이 목표 기간 안이라 반영한 행의 SN). START_SCAN에서 `total_count`·`received`·`unique_count`·`received_sns`는 **raw**(받은 모든 행) 기준이다 | **UNIQUE (`kind`, `slot`)** ← 회차 선점 ([ADR-0003](../adr/0003-schedule-dedup-by-slot.md)); 부분 인덱스 (`finished_at` DESC) WHERE REGULAR·COMPLETE (V2); 부분 인덱스 (`range_from`, `range_to`, `page_no`) WHERE BACKFILL·COMPLETE (V3); CHECK `jsonb_typeof(received_sns) = 'array'` |
 | `api_budget` | `day`(KST), `count` | PK `day`. 요청 직전에 별도 커밋으로 증가시킨다(예약). REGULAR는 `count < 900`, 상세·최초 적재는 `count < 900 − 72`일 때만 증가한다(정기 몫, [ADR-0014](../adr/0014-initial-settings.md)) |
 | `api_attempt` (V3) | `id`, `day`, `kind`(REGULAR/BACKFILL/DETAIL), `attempt_no`(1~3), `started_at`, `finished_at`, `outcome`(SUCCESS/HTTP_TIMEOUT/HTTP_CONNECTION/HTTP_STATUS/HTTP_RATE_LIMIT/INTERRUPTED, 결과 저장 전 종료면 null) | FK `day` → `api_budget`; 인덱스 (`day`, `kind`). 예산 예약과 같은 트랜잭션에서 넣는다. `SUCCESS`는 HTTP 200 수신이고 반영 성공이 아니다. 본문·URL·키·예외는 저장하지 않는다 |
 | `rate_limit` | `scope`(SUBSCRIBE/RESEND/WEBHOOK_TEST/TOKEN_FAIL/SEND_TOTAL), `key_hmac`, `window_start`, `count` | PK (`scope`, `key_hmac`, `window_start`). 창이 끝나면 지운다 |
 
-`collect_run.slot` 형식: REGULAR는 KST 정시(`2026-11-15T10:00+09:00`), DETAIL은 `{정기 슬롯}/{sn}`, BACKFILL은 명령 `command/{수동 슬롯}`, 월 `{수동 슬롯}/{월 시작일}`, 페이지 `{수동 슬롯}/{월 시작일}/{페이지}`. 최초 적재 명령 행의 `total_count`·`received`·`unique_count`는 **완료한 달만** 합친 값이고, 실패 중인 달의 내역은 그 달과 페이지 행에 있다. 월 행의 값은 받아들인(검증·반영·체크포인트를 마친) 페이지만 센다. 상세의 공고별 실패 횟수는 같은 sn의 DETAIL 행 중 `FAILED`(예산 소진·종료 제외)로 센다.
+`collect_run.slot` 형식: REGULAR는 KST 정시(`2026-11-15T10:00+09:00`), DETAIL은 `{정기 슬롯}/{sn}`, BACKFILL(START_SCAN)은 명령 `command/{수동 슬롯}`, scan `{수동 슬롯}/scan`, 페이지 `{수동 슬롯}/scan/{페이지}`. V4 이전 월별 방식의 `{수동 슬롯}/{월 시작일}`·`{수동 슬롯}/{월 시작일}/{페이지}` 행은 기록으로만 남고 재사용되지 않는다. scan 행과 명령 행의 raw·반영 합계는 받아들인(검증·반영·체크포인트를 마친) 페이지만 센다. 실패로 끝나도 그때까지의 합계를 남긴다. 상세의 공고별 실패 횟수는 같은 sn의 DETAIL 행 중 `FAILED`(예산 소진·종료 제외)로 센다.
 
 `collect_run.error`는 원본 예외 메시지나 요청 URL을 저장하지 않고 100자 이내 내부 오류 코드만 저장한다. API 키·개인정보 노출과 긴 오류 메시지로 결과 갱신이 실패하는 문제를 피한다. 수집 반영의 코드는 `NON_JSON`, `RESULT_CODE_NOT_OK`, `INVALID_ENVELOPE`(FAILED), `INVALID_ROW`, `DUPLICATE_SN`, `COUNT_MISMATCH`, `EMPTY_SNAPSHOT`(INCOMPLETE), `APPLY_ERROR`(FAILED)이다. 원천의 `resultCode` 값은 붙이지 않는다.
 

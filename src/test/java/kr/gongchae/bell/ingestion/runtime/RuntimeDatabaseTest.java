@@ -90,18 +90,22 @@ class RuntimeDatabaseTest {
     @Test void completedPageCheckpointKeepsExactIdsAndPeriodForResume() {
         var runs=new CollectionRuns(jdbc,clock,manager);
         var from=java.time.LocalDate.of(2024,2,1);var to=java.time.LocalDate.of(2024,2,29);
-        long page=runs.claim("BACKFILL","manual1/2024-02/page1").orElseThrow();
-        runs.metadata(page,from.minusYears(1),to,from,to,1);
-        runs.completePage(page,3,3,3,0,0,java.util.Set.of(5L,9L,12L));
-        var resumed=runs.completedPage(from,to,1).orElseThrow();
+        long scan=runs.claim("BACKFILL","manual1/scan").orElseThrow();runs.metadata(scan,from,to,from,to,null,scan);
+        long page=runs.claim("BACKFILL","manual1/scan/1").orElseThrow();runs.metadata(page,from,to,from,to,1,scan);
+        assertThat(runs.latestScan(from,to)).hasValueSatisfying(s->{assertThat(s.generation()).isEqualTo(scan);assertThat(s.completed()).isNull();});
+        runs.completePage(page,new CollectionRuns.Page(3,3,java.util.Set.of(5L,9L,12L),java.util.Set.of(5L,9L)),2,0,0);
+        var resumed=runs.completedPage(scan,1).orElseThrow();
         assertThat(resumed.total()).isEqualTo(3);assertThat(resumed.received()).isEqualTo(3);
-        assertThat(resumed.sns()).containsExactlyInAnyOrder(5L,9L,12L);
-        assertThat(runs.completedMonth(from,to)).isEmpty();
-        long month=runs.claim("BACKFILL","manual2/2024-02").orElseThrow();runs.metadata(month,from.minusYears(1),to,from,to,null);
-        runs.completeMonth(month,3,3,java.util.Set.of(5L,9L,12L));
-        assertThat(runs.completedMonth(from,to)).hasValueSatisfying(m->{
-            assertThat(m.unique()).isEqualTo(3);assertThat(m.sns()).containsExactlyInAnyOrder(5L,9L,12L);});
-        assertThat(runs.completedMonth(from,to.minusDays(1))).isEmpty();
+        assertThat(resumed.sns()).containsExactlyInAnyOrder(5L,9L,12L);assertThat(resumed.applied()).containsExactlyInAnyOrder(5L,9L);
+        assertThat(runs.completedPage(scan+1000,1)).as("another generation").isEmpty();
+        runs.completeScan(scan,resumed);
+        assertThat(runs.latestScan(from,to)).hasValueSatisfying(s->{
+            assertThat(s.unique()).isEqualTo(3);assertThat(s.applied()).isEqualTo(2);
+            assertThat(s.completed().sns()).containsExactlyInAnyOrder(5L,9L,12L);assertThat(s.completed().applied()).containsExactlyInAnyOrder(5L,9L);});
+        assertThat(runs.latestScan(from,to.minusDays(1))).isEmpty();
+        // A monthly row from before V4 with the same range is not a scan and not a page of any generation.
+        jdbc.sql("UPDATE collect_run SET strategy=NULL WHERE id IN (:ids)").param("ids",java.util.List.of(scan,page)).update();
+        assertThat(runs.latestScan(from,to)).isEmpty();assertThat(runs.completedPage(scan,1)).isEmpty();
     }
     @Test void supplementalSessionLockExcludesAnotherOwnerAndReleasesAfterCloseAndBackendDeath() {
         var leases=new AdvisoryLease(dataSource);

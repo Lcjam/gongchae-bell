@@ -17,7 +17,7 @@ class BackfillCommandIntegrationTest {
     @Container static PostgreSQLContainer postgres=new PostgreSQLContainer("postgres:17");
     @Test void localCommandAppliesRealCoreAndClosesContextWithoutStartingWebOrCallingDetails() {
         var client=mock(RecruitmentClient.class);
-        when(client.backfillList(LocalDate.of(2026,11,1),LocalDate.of(2026,11,30),1))
+        when(client.backfillList(LocalDate.of(2026,11,1),1))
                 .thenReturn("{\"resultCode\":200,\"totalCount\":0,\"result\":[]}");
         var context=new SpringApplicationBuilder(GongchaeBellApplication.class).web(WebApplicationType.NONE)
                 .initializers(application -> ((GenericApplicationContext)application).registerBean("fixtureRecruitmentClient",
@@ -27,6 +27,6 @@ class BackfillCommandIntegrationTest {
                         "--collector.service-key=fixture","--collector.backfill-slot=command-test",
                         "--collector.backfill-from=2026-11-01","--collector.backfill-to=2026-11-30");
         assertThat(context.isActive()).isFalse();
-        verify(client).backfillList(LocalDate.of(2026,11,1),LocalDate.of(2026,11,30),1);verifyNoMoreInteractions(client);
+        verify(client).backfillList(LocalDate.of(2026,11,1),1);verifyNoMoreInteractions(client);
     }
 }

@@ -5,7 +5,7 @@
 | 범위 | 검증해야 하는 근거 | 현재 상태 |
 |---|---|---|
 | 실행 기반 (#2) | Java 21 빌드, PostgreSQL 17 Flyway, CI, 홈/목록 빈 상태, 두 리뷰 | 구현·검증 완료, [PR #8](https://github.com/Lcjam/gongchae-bell/pull/8) 머지 ([검증 기록](../collab/2026-11-14-implementation/03-foundation-validation.md#원격-ci-및-후속-리뷰)) |
-| FR-C1 | 월별 3년 최초 적재, 멱등 fixture, 실제 건수/표본 기록 | 월별 최초 적재 실행기와 fixture 테스트(#4) 작성, [PR #11](https://github.com/Lcjam/gongchae-bell/pull/11) 리뷰 대기. 실제 API 3년 적재 건수·표본 기록 없음 ([결과](../collab/2026-11-15-implementation/claude-collector-fix-result.md)) |
+| FR-C1 | 월별 3년 최초 적재, 멱등 fixture, 실제 건수/표본 기록 | 시작일 하한 전체 조회(START_SCAN, V4) 최초 적재 실행기와 fixture·로컬 대역 테스트(#4) 작성, [PR #11](https://github.com/Lcjam/gongchae-bell/pull/11) 리뷰 대기. 2026-11-15 월별 방식으로 실제 적재한 22,733건은 시작월과 마감월이 같은 공고만 받은 부분 적재라서 완료가 아니다(`pbancEndYmd`가 마감일 상한처럼 동작). 새 방식의 실제 3년 적재는 아직 하지 않았다 ([결과](../collab/2026-11-15-implementation/claude-collector-fix-result.md)) |
 | FR-C2~C4 | 완결성/실패 시 무변경, KST 상태, 필드별 변경 관측 fixture | #3 반영 로직과 fixture 테스트, [PR #9](https://github.com/Lcjam/gongchae-bell/pull/9) 머지. 정기·최초 적재 실행기(#4)가 같은 반영 경로를 호출, [PR #11](https://github.com/Lcjam/gongchae-bell/pull/11) 리뷰 대기 ([결과](../collab/2026-11-15-implementation/claude-ingestion-result.md)) |
 | FR-C5~C6 | 두 앱 선점/재시작, 영속 호출 예산/재시도/경보 | 세션 잠금([ADR-0016](adr/0016-supplemental-session-lock.md))·회차 선점, 영속 호출 예산·재시도·경보 지표와 Testcontainers 테스트(#4) 작성, [PR #11](https://github.com/Lcjam/gongchae-bell/pull/11) 리뷰 대기. 두 앱 실제 동시 운영은 미검증 |
 | FR-C7~C8 | 상세 보존, 품질/개별 공고 링크 fixture | 목록 반영이 상세 컬럼을 건드리지 않음과 품질 플래그(#3) 테스트 작성·머지, 화면 표시는 #5 머지(공식 swagger 문서 계약 fixture 기준). 상세 수집(#4)과 공식 `detail` 실응답 표본 저장 테스트 작성, [PR #11](https://github.com/Lcjam/gongchae-bell/pull/11) 리뷰 대기 |

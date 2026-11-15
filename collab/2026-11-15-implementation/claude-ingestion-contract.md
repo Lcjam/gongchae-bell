@@ -9,7 +9,8 @@
 |---|---|---|
 | v1 | 2026-11-15 `497db48` | 최초 |
 | v2 | 2026-11-15 `67ed7dc` (codex 검수 03 반영) | ① `upsertPage` 반환을 `Counts` → `PageResult(Counts counts, Set<Long> sns)`로 바꾼다. ② `pref`를 U+001F 연결에서 **라벨과 줄바꿈으로 된 읽을 수 있는 텍스트**로 바꾸고, U+001F가 들어 있어도 거부하지 않는다. ③ 음수 `totalCount`는 `INVALID_ENVELOPE`. `applyRegular`의 시그니처와 동작은 그대로다 |
-| **v3** | 2026-11-15 (codex `collab/2026-11-15-review/11-review-decisions.md` 1번, 원본 작업 경로에 있음) | ① 최초 적재를 **파싱과 반영으로 나눈다**: `ParsedPage parsePage(String body)`(DB 접근 없음) → 호출자가 페이지 크기·월 총수·페이지 간 중복·요청 기간을 검사 → `Counts upsertPage(ParsedPage page, Instant observedAt)`. 검사에서 거부한 페이지는 아무것도 바꾸지 않는다. 파싱은 여전히 한 번이다. ② `PageResult`를 없앤다. `sns`는 `ParsedPage.sns()`에서 반영 전에 얻는다. 기존 `upsertPage(String, Instant)`는 남기지 않는다(호환 래퍼 없음). ③ `body == null`(빈 HTTP 본문)은 `NON_JSON`. 전에는 `IllegalArgumentException`이 새어 나가 정기 회차가 마감되지 않았다(agy PR #9 리뷰 3-1). `applyRegular`의 시그니처는 그대로다 |
+| v3 | 2026-11-15 (codex `collab/2026-11-15-review/11-review-decisions.md` 1번, 원본 작업 경로에 있음) | ① 최초 적재를 **파싱과 반영으로 나눈다**: `ParsedPage parsePage(String body)`(DB 접근 없음) → 호출자가 페이지 크기·월 총수·페이지 간 중복·요청 기간을 검사 → `Counts upsertPage(ParsedPage page, Instant observedAt)`. 검사에서 거부한 페이지는 아무것도 바꾸지 않는다. 파싱은 여전히 한 번이다. ② `PageResult`를 없앤다. `sns`는 `ParsedPage.sns()`에서 반영 전에 얻는다. 기존 `upsertPage(String, Instant)`는 남기지 않는다(호환 래퍼 없음). ③ `body == null`(빈 HTTP 본문)은 `NON_JSON`. 전에는 `IllegalArgumentException`이 새어 나가 정기 회차가 마감되지 않았다(agy PR #9 리뷰 3-1). `applyRegular`의 시그니처는 그대로다 |
+| **v4** | 2026-11-15 (codex: 최초 적재 조회 계약 검증 뒤 #4 필수 수정) | `ParsedPage.startingOnOrBefore(LocalDate to)` 추가: 같은 파싱 결과에서 시작일이 `to` 이하인 행만 담은 `ParsedPage`(`totalCount`는 원격 값 그대로). #4는 시작일 하한만 보낸 전체 조회(START_SCAN)의 모든 raw 행을 검사한 뒤 이 부분집합만 `upsertPage`에 넘긴다. 이때 반환 `Counts`의 `received`는 **반영한 행 수**다(raw 수신 수는 `ParsedPage.sns()` 크기). 다른 메서드의 시그니처와 동작은 그대로다 |
 
 ## 1. 공개 API (`kr.gongchae.bell.ingestion`)
 
@@ -28,12 +29,14 @@ public class PostingIngestor {
 
 /** 파싱·검증을 마쳤지만 아직 반영하지 않은 페이지. 생성자는 패키지 전용이라 parsePage로만 얻는다. */
 public final class ParsedPage {
-    public int totalCount();                 // 그 페이지 응답의 totalCount(월 전체 건수)
+    public int totalCount();                 // 그 페이지 응답의 totalCount(조회 전체 건수)
     /** 이 페이지의 모든 recrutPblntSn. 이미 저장된 공고도 포함한다. 수정할 수 없는 정렬된 집합이고,
      *  페이지 안 중복은 DUPLICATE_SN으로 거부되므로 sns().size()가 이 페이지의 행 수다. */
     public SortedSet<Long> sns();
     /** 모든 행의 pbancBgngYmd가 [from, to] 안에 있으면 true. 빈 페이지는 true. */
     public boolean beginsWithin(LocalDate from, LocalDate to);
+    /** v4: 같은 파싱 결과 중 pbancBgngYmd <= to인 행만. totalCount는 그대로. */
+    public ParsedPage startingOnOrBefore(LocalDate to);
 }
 
 public record Counts(int totalCount, int received, int inserted, int changed, int closed) {}
@@ -77,7 +80,8 @@ public enum Failure {          // collect_run.result   // collect_run.error에�
 - 페이지 단위라서 `COUNT_MISMATCH`, `EMPTY_SNAPSHOT`은 코어가 검사하지 않는다. 호출자가 **반영 전에** `ParsedPage`로 검사한다(v3, codex 11 결정 1번).
   - `totalCount()`: 그 페이지 응답의 `totalCount`. 앞 페이지와 다르면 월 총수가 바뀐 것이다.
   - `sns()`: 그 페이지의 고유 공고 번호. 크기가 기대 페이지 크기(`min(1000, totalCount − (pageNo − 1) × 1000)`)와 같아야 하고, 앞 페이지들의 번호와 겹치면 페이지 간 중복이다. 여러 페이지 `sns()`의 합집합 크기가 월의 고유 수다.
-  - `beginsWithin(from, to)`: 요청한 기간 밖에서 시작한 행이 있으면 false.
+  - `beginsWithin(from, to)`: 요청한 기간 밖에서 시작한 행이 있으면 false. #4는 하한 검사에 `beginsWithin(from, LocalDate.MAX)`를 쓴다.
+  - `startingOnOrBefore(to)`(v4): 검사를 모두 통과한 뒤 반영할 부분집합을 만든다. 반영하지 않을 행도 `parsePage`에서 이미 모두 검증됐다.
   - 하나라도 어긋나면 **`upsertPage`를 부르지 않는다.** 그래서 실패 페이지에 섞인 기존 공고의 변경도 커밋되지 않는다.
 - `upsertPage`: 한 트랜잭션. 반환 `Counts`의 `inserted`는 **DB에 없던 행만** 센다. 이미 저장된 공고가 다시 오면 0이 되므로 고유 수 계산에 쓰면 안 된다.
 - **같은 본문을 #4에서 다시 파싱하지 않는다.** `parsePage` 한 번, `upsertPage` 한 번이다.
