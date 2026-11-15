@@ -13,7 +13,8 @@
 | 〃 | `e7099226dd93693961ae29250131c8d2025b242b` | 아래 수정 5건, 테스트, 문서 | [43682376057](https://github.com/Lcjam/gongchae-bell/actions/runs/43682376057) test·secrets 성공 |
 | 〃 | `1a7e470`, `5f9db02` | #3 결과 문서 커밋을 merge하고 SHA·CI 기록, SHA 오타 정정 | [43682540599](https://github.com/Lcjam/gongchae-bell/actions/runs/43682540599) test·secrets 성공 |
 | 〃 | `e3b3867`, `304389c` | **2차**: agy 공식 fixture 커밋 `5b78c55`·`b95fa67`(`docs/#4-official-fixtures`, 로컬 커밋, 원격 미push)을 cherry-pick. 내용 그대로, SHA만 다르다 | — |
-| 〃 | (이 커밋) | **2차** 수정 6건, 테스트, 문서, ADR-0016 | 아래 2차 절 |
+| 〃 | `5e2950bd93dc6a8f6b5b1fb1b5aff0dbf6aae9b3` | **2차** 수정 6건, 테스트, 문서, ADR-0016 | [43684660748](https://github.com/Lcjam/gongchae-bell/actions/runs/43684660748) test·secrets 성공 |
+| 〃 | (이 문서) | 2차 SHA·CI 기록 | 문서만 |
 
 PR #11의 base는 지시대로 `feat/#3-ingestion-core`로 둔다.
 
@@ -84,7 +85,7 @@ PR #11의 base는 지시대로 `feat/#3-ingestion-core`로 둔다.
 ### 검증
 - 로컬(같은 환경): `gradlew check` **79 tests / 0 failures / 0 errors / 0 skipped**. #3 32 + #4 47(1차 39 + 2차 8: 백필 2, 상세 2, 키 4).
 - **red 확인**: 2차 코드 중 `BackfillCollector`·`DetailCollector`만 직전 커밋 판으로 되돌려 돌리면 새 테스트 3개가 실패한다: `rejectedPagesCommitNoChangeToStoredPostings`(범위 오류 월 행 `2|0|2`), `failedCommandKeepsCompletedMonthTotalsAndTheFailingMonthIsOnItsOwnRows`(명령 행 `null|null|null`), `unexpectedDetailErrorsMarkThePostingFailedAndStopAtTheCap`(공고가 `NONE`). 확인 뒤 새 코드로 되돌리고 전체를 다시 돌려 79건 통과했다. 키 정규화 테스트는 예전 코드에 정규화가 없으니 자명하게 실패하므로 따로 돌리지 않았다. 중복 사례의 월 행 오염은 범위 오류 사례에서 테스트가 먼저 멈춰 따로 관측하지 않았다.
-- 원격 CI: 아래 표에 추가한다.
+- 원격 CI: `5e2950b` → [43684660748](https://github.com/Lcjam/gongchae-bell/actions/runs/43684660748) test·secrets 성공(ARM64).
 
 ### 2차 한계
 - 상세 sweep이 DB 장애로 실패 기록(`failed`, `runs.fail`)까지 못 하면 예외가 `RegularCollector.collect` 밖으로 나간다. 그 정기 회차는 이미 `COMPLETE`로 커밋돼 있고 Spring 스케줄러가 오류를 로그로 남긴 뒤 다음 정시에 다시 돈다. 공고 상태가 `FAILED`로 안 바뀐 그 회차는 실패 횟수에도 안 들어갈 수 있다(DETAIL 행이 `result IS NULL`로 남음). 코드로 막지 않았다.
