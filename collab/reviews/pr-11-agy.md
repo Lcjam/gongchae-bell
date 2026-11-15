@@ -160,3 +160,56 @@
 
 - **필수 수정 사항**: **없음 (수용 / `#3·#4·#5` 합본 검증 단계 진행 가능)**.
 - **유지되는 기명시 한계(비차단)**: 상세 sweep 중 DB 자체 장애로 실패 기록까지 못 남기면 정기 회차는 `COMPLETE`로 남고 해당 `DETAIL` 행은 `result IS NULL`이 될 수 있는 한계, 동일 sweep 내 `429` 발생 후 잔여 공고를 계속 시도하는 정책, `497`건 공식 목록 fixture 포함 합본 검증 및 실제 3년 최초 적재는 후속 합본·운영 게이트에서 확인한다.
+
+---
+
+## 7. 3차 독립 재검수 — `START_SCAN` + V4 + Sol 합본 테스트 반영 (`007c1dd`)
+
+- **검수 대상**: `feat/#4-collector-runtime` 불변 head [`007c1dd464012446f74dfed4c79c65e00b35163b`](file:///C:/Users/lcj/orca/workspaces/my-project/issue-4-collector-runtime) (`git show` / `git diff`로만 조회)
+  - Sol 합본 테스트 병합: `cdd778e8c1e3ef5ca8505d3feb84c7a282641cf9` (`c76edad132cec9e4986eccaea1e127fdff487de2` + `fc752ad7e78c776ac14448c42662dd1b8fffa1cd`)
+  - 코드·마이그레이션·테스트·fixture: `2d9e263939f4ce9f27506e775a674d741cd17571`
+  - 최종 문서 보고: `007c1dd464012446f74dfed4c79c65e00b35163b` (`cdd778e..007c1dd` 22파일, `+516/-285`)
+- **검수 기준**: [`implementation-decision.md`](../2026-11-15-backfill/implementation-decision.md), [`codex-plan-review.md`](../2026-11-15-backfill/codex-plan-review.md), [`agy-query-contract.md`](../2026-11-15-backfill/agy-query-contract.md) (본인 초기 제안 옵션 A `slot LIKE 'bgng/%'`는 미채택, 옵션 B 성격의 명시 스키마 `V4__backfill_start_scan.sql` 채택 및 M2 `V5` 이동 확정), 해당 head의 계약·ERD·운영 문서·결과 보고
+- **원격 CI 직접 확인 (`gh run view`)**:
+  - 코드 커밋 `2d9e263939f4ce9f27506e775a674d741cd17571`: Run [`43710407513`](https://github.com/Lcjam/gongchae-bell/actions/runs/43710407513) — `completed / success` (`secrets`: `success`, `test` ARM64 `./gradlew --no-daemon check bootJar`: `success`)
+  - 최종 문서 커밋 `007c1dd464012446f74dfed4c79c65e00b35163b`: Run [`43710583244`](https://github.com/Lcjam/gongchae-bell/actions/runs/43710583244) — `completed / success` (`secrets`: `success`, `test`: `success`)
+- **작성자 보고 검증 수치**: 로컬 Windows x64 (`COLLECTOR_ENABLED=false COLLECTOR_BACKFILL=false`) `check bootJar` **96 tests / 0 failures / 0 errors / 0 skipped** (`c76` 91 + Sol 3 + `BackfillRuntimeTest` +3 - `BackfillRangeTest` -1 = 96), 변이 red 확인 4경로, Gitleaks 8.30.1 `no leaks found`, 실 API 추가 호출 0회.
+
+### 7-1. 핵심 계약·코드 대조 결과 (전 항목 충족)
+
+1. **요청 파라미터와 월 분할 제거**:
+   - `RecruitmentClient.backfillList(LocalDate from, int page)`는 `pbancBgngYmd=<from>&numOfRows=1000&pageNo=<page>`만 전송하고 `pbancEndYmd`·`ongoingYn`를 보내지 않는다. `BackfillRange.months()`는 제거되었고 `src/` 내 `completedMonth`·`months(` 잔여 참조 0건 확인.
+   - `BackfillCommandIntegrationTest`도 `backfillList(2026-11-01, 1)` 단일 호출로 갱신됐다.
+2. **Legacy(V3 월별 37개월) 미사용 및 보존**:
+   - `V4__backfill_start_scan.sql`은 `collect_run`에 `strategy varchar(20) CHECK (strategy IN ('START_SCAN'))`, `scan_generation bigint`, `applied_count integer CHECK (applied_count >= 0)`, `applied_sns jsonb CHECK (jsonb_typeof(applied_sns) = 'array')` 4개 컬럼만 additive 추가했다(`V1~V3` 무변경, `erd.md`에 M2 `V5` 명시).
+   - `CollectionRuns.latestScan(from, to)`와 `completedPage(generation, page)` 모두 `kind='BACKFILL' AND strategy='START_SCAN'`을 요구하므로 V4 이전 `strategy IS NULL` 37개월 행은 기간(`[from, to]`)이 같더라도 절대 재사용·skip 근거가 되지 않는다.
+   - 기존 `posting`·`collect_run`·`api_budget`·`api_attempt` 삭제/변경 코드가 없으며, `legacyMonthlyRowsForTheSamePeriodAreNeverReused`와 `RuntimeDatabaseTest.completedPageCheckpointKeepsExactIdsAndPeriodForResume`가 이를 직접 잡는다.
+3. **같은 `T` 세대 혼합 방지 / `restartPages` / 연속 완료 페이지 (`live`)**:
+   - `restartPages=false`일 때 `latestScan(from, to)`는 결과(`result`) 무관하게 해당 기간의 최신 scan 행(`page_no IS NULL ORDER BY id DESC LIMIT 1`)을 가져와 그 `scan_generation`을 이어받는다.
+   - `restartPages=true`일 때 `latest`를 비워 새 scan id를 새 `scan_generation`으로 기록한다. 이후 그 scan이 일부 페이지만 마치고 실패한 뒤 다시 `restartPages=false`로 재개해도 `latestScan`이 최신 세대(B)를 선택하므로 이전 세대(A)의 완료 페이지(`T`가 동일해도)를 절대 섞지 않는다.
+   - `BackfillCollector.collect` 루프는 `live` 플래그로 1페이지부터 연속으로 `completedPage(generation, number)`가 있는 페이지만 재사용하고, 첫 미완료 페이지부터 `live=true`를 고정해 끝까지 새로 요청한다.
+   - `explicitRestartStartsANewGenerationAndPagesWithTheSameTotalAreNeverMixed`가 `T=3000` 동일 총수 조건에서 A(1·2완료/3실패) → B(`restart`, 1완료/2실패) → B-resume(B의 1만 재사용, 2·3 신규 요청, A SN 0건)을 정확히 검증한다.
+4. **자기 완료 scan 스냅숏 재사용**:
+   - `latest.isPresent() && latest.get().completed() != null`이면 HTTP 0회로 `latest.get()` 자신의 `received_sns`/`applied_sns` 크기(`unique_count`·`applied_count` 일치 검증 포함)만 사용해 `command/{slot}`을 `COMPLETE` 처리하고 `{slot}/scan`은 추가 생성하지 않는다.
+   - `completedScanIsReusedOnlyThroughItsOwnSetsAfterUpstreamShrankAndARestart`와 `resumesAFailedPageInTheSameGenerationAndKeepsExactUniqueIds`(`all-skipped`)가 옛 세대 2000 SN을 재합산하지 않음을 검증한다.
+5. **Raw 전수 선검증·하한 검사·로컬 상한 필터(`startingOnOrBefore`)**:
+   - `#3 계약 v4`: `ParsedPage.startingOnOrBefore(LocalDate to)`는 이미 `parsePage`로 전 행 검증이 끝난 결과에서 `!row.begin().isAfter(to)` 행만 추출하고 원격 `totalCount`는 유지한다.
+   - `BackfillCollector.fetch` 순서: `parsePage(body)`(모든 raw 행 필드·날짜·페이지 내 SN 중복 검증) → `validate(raw, number, progress)`(`totalCount` 일치, 기대 페이지 크기 `min(1000, max(0, total-(n-1)*1000))`, raw SN 페이지 간 중복) → `parsed.beginsWithin(period.from(), LocalDate.MAX)`(하한 검사, 위반 시 `BACKFILL_RANGE_MISMATCH`) → `parsed.startingOnOrBefore(period.to())` → `ingestor.upsertPage(target, clock.instant())` → `completePage`.
+   - 1페이지의 모든 행이 목표 이후 시작(`applied=0`)이어도 `PostingIngestor.write`가 `rows.isEmpty()`에서 `Counts(totalCount, 0, 0, 0, 0)`으로 정상 반환해 체크포인트 후 2페이지 이후를 끝까지 읽는다(`rawRowsOutsideTheTargetAreReadToTheEndButNotApplied`).
+   - 반대로 목표 이후 시작 행에 `INVALID_ROW`나 페이지 간 중복 SN이 있으면 `upsertPage`가 호출되지 않고 기존 공고와 `posting_change`가 무변경으로 보존된다(`rejectedPagesCommitNoChangeToStoredPostings` 6사례).
+6. **실패 카운터·집계·문서 정합성**:
+   - 페이지 단위는 반영·체크포인트까지 완료된(`accepted`) 뒤에만 `progress.expected`·`received`·`seen`·`applied`에 합산되며, 실패 시 `Progress.finish`가 `scan`·`command` 양쪽에 그 시점까지 받아들인 합계를 남기고 실패 페이지는 `null|null|null|null`로 기록한다(`failedScanKeepsAcceptedPageTotalsOnItsCommandAndScanRows`).
+   - `docs/design/erd.md`, `docs/design/routes.md`, `docs/ops/collector.md`, `docs/adr/0016-supplemental-session-lock.md`, `docs/implementation-status.md`, `collab/2026-11-15-implementation/claude-ingestion-contract.md` 모두 `START_SCAN`·`V4`·M2 `V5`·`pbancEndYmd` 미전송 사유와 일치한다.
+7. **Sol 합본 통합(`cdd778e`) 및 실제 하한 fixture 검증**:
+   - `git diff fc752ad7..cdd778e -- src/` 출력 없음: Sol의 `IntegrationTestSupport`·`CatalogIntegrationTest` (`collector.enabled=false`, `collector.backfill=false` 고정)과 `OfficialFixtureIntegrationTest` 3건이 손실 없이 머지되었고, `2d9e263`에서는 `OfficialFixtureIntegrationTest` 3번 테스트의 mock matcher만 `!query.contains("pbancEndYmd")`로 새 계약에 맞게 최소 수정됐다(`command, scan and page` 3행 `0|0|0` 검증 유지).
+   - `007c1dd:fixtures/alio-official-list-lower-bound-sample.json` 직접 점검 결과: `4,442,918` bytes (`2,329,935` chars), SHA-256 `3698d86882ed0f09584eb513bca1237cd8ab8d3933bd7555d50cd1eebb5d6b83`, `totalCount=36772`, `result` `1,000`건, `"serviceKey"`·`"password"` 리터럴 및 `.env` 키/DB 비밀번호 변형(원문·디코딩·인코딩) **0건** 확인. `fixtures/README.md` provenance(`api_attempt.id=43`, 취득 시각·건수)와 정확히 일치한다.
+   - `officialLowerBoundPageKeepsItsRealShapeThroughSelection` 테스트는 원본을 그대로 `parsePage`해 `T=36772`, `1000`행, 하한 통과, 선택 `996`건(미래 시작 `4`건 제외)을 먼저 확인한 뒤, 단일 페이지 완결 scan 테스트 목적상 `totalCount`만 `1000`으로 재작성해 DB 반영(`996`건, 월 걸침 `374`건, `2026-11-15` 이후 마감 `377`건, 미래 시작 `0`건)을 검증하므로 변형 범위가 적절하고 투명하다.
+
+### 7-2. 비차단 관찰 사항 및 최종 결론
+
+- **비차단 관찰 사항 (코드 수정 불필요)**:
+  1. `latestScan`(`WHERE kind='BACKFILL' AND strategy='START_SCAN' AND range_from=:f AND range_to=:t AND page_no IS NULL`)과 `completedPage`(`AND scan_generation=:generation`)에는 별도 전용 인덱스를 추가하지 않았으나, `collect_run` 내 `BACKFILL` 행 규모(수십 행)상 성능 영향이 없고, 필요 시 후속 단계에서 간단히 보완 가능하다.
+  2. 완료된 scan 스냅숏 재사용 경로로 생성된 `command/{slot}` 행에는 `received_sns`·`applied_sns`가 복사되지 않고(스냅숏 집합은 `{slot}/scan` 행에 보존), `command/{slot}`은 `range_from IS NULL`이라 `latestScan` 대상에 섞이지 않는다(`erd.md` 기술과 일치).
+  3. 실 DB의 새 방식 전체 `START_SCAN` 실행(약 37페이지 적재 및 `V4` 마이그레이션 적용)은 이번 PR 머지 후 별도 운영 단계에서 수행한다.
+- **최종 결론 (`007c1dd`)**: **수용 (필수 수정 없음)**. PR `#11`의 `START_SCAN` 수정(`2d9e263`)·Sol 합본 통합(`cdd778e`)·문서(`007c1dd`)는 설계 계약과 회귀 경계를 빠짐없이 충족하며 원격 ARM64 CI(`43710407513`, `43710583244`)까지 모두 통과했다.
+

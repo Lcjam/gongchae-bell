@@ -4,7 +4,7 @@
 
 ## 운영 순서와 남은 게이트
 
-1. **최초 적재를 먼저 끝낸다.** `COLLECTOR_ENABLED=false`인 상태에서 아래 "최초 적재" 명령으로 최근 3년을 적재하고, `strategy='START_SCAN'`인 명령 행이 `COMPLETE`인지 확인한다. V4 이전 월별 방식으로 끝난 명령(2026-11-15 `initial-001`·`initial-002`, 22,733건)은 시작월과 마감월이 같은 공고만 받았으므로 완료 근거가 아니다. 그 행과 공고는 지우지 않는다.
+1. **최초 적재를 먼저 끝낸다.** `COLLECTOR_ENABLED=false`인 상태에서 아래 "최초 적재" 명령으로 최근 3년을 적재하고, `strategy='START_SCAN'`인 명령 행이 `COMPLETE`인지 확인한다. V4 이전 월별 방식으로 끝난 명령(2026-11-15 `initial-001`·`initial-002`, 22,733건)은 시작월과 마감월이 같은 공고만 받았으므로 완료 근거가 아니다. 그 행과 공고는 지우지 않는다. 같은 개발 DB에서 `initial-003`(START_SCAN)이 2026-11-15 21:20~21:25 KST에 완료됐고, `initial-004` 재실행은 HTTP 0회였다([실행 기록](../../collab/2026-11-15-backfill/agy-start-scan-result.md), [root DB 검수](../../collab/2026-11-15-backfill/codex-start-scan-review.md)).
 2. 그다음에 `COLLECTOR_ENABLED=true`로 정기 수집을 켠다. 순서를 바꾸면 그때 진행 중인 공고가 모두 `from_backfill=false`가 되어 상세 대상이 된다(2026-11-14 22:22 KST 공개 경로 1회 수집 기준 진행 공고 497건). 상세는 sweep당 30건 상한과 정기 몫 덕분에 예산은 지키지만, 그만큼 상세 수집이 밀린다(497건이면 시간당 30건씩 약 17시간).
 
 공식 응답은 2026-11-15 14:41~14:46 KST에 agy가 1회씩 받아 보관했다([검증 기록](../../collab/2026-11-15-api-verification/agy-result.md), `fixtures/alio-official-*.json`, 영속 예산 4회: 실패 1·성공 3, Sol 독립 확인). 이 표본으로 확인한 것:
@@ -15,7 +15,7 @@
 - 표본 하나씩이다. 다른 공고의 단계 의미·순서(`sortNo`가 0부터, 같은 번호가 여러 행)는 일반화하지 않는다.
 
 다음은 아직 닫지 않은 **별도 게이트**다. 정기 수집을 운영에서 켜기 전에 각각 기록한다.
-- 3년 최초 적재 실측(건수, 페이지 수, 오래된 코드·품질 표본).
+- ~~3년 최초 적재 실측(건수, 페이지 수, 오래된 코드·품질 표본)~~: 로컬 개발 DB에서 닫았다(위 기록). 운영 서버 DB에 적재할 때 다시 기록한다.
 - 일 예산 500 경고와 연속 미완료 경보가 운영 디스코드로 실제 수신되는지(M3).
 
 ## 설정과 정기 수집
@@ -43,7 +43,7 @@ KST 날짜별 `api_budget.count`를 HTTP **직전 REQUIRES_NEW 트랜잭션**으
 
 ## 최초 적재
 
-환경변수로 DB와 API 키를 주입한 로컬 운영 셸에서 실행한다. 아래 값은 예시이며 실측 적재 기록이 아니다. 이미 쓴 슬롯(`initial-001`, `initial-002`)은 다시 쓸 수 없다.
+환경변수로 DB와 API 키를 주입한 로컬 운영 셸에서 실행한다. 아래 명령은 2026-11-15 개발 DB 실측(`initial-003`)에 쓴 것과 같다. 슬롯은 DB마다 새로 고른다. 그 개발 DB에서는 `initial-001`~`initial-004`를 이미 썼다.
 
 ```powershell
 java -jar build/libs/gongchae-bell.jar --spring.main.web-application-type=none --collector.enabled=false --collector.backfill=true --collector.backfill-slot=initial-003 --collector.backfill-from=2023-11-15 --collector.backfill-to=2026-11-15
