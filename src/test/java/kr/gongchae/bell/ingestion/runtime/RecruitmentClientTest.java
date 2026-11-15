@@ -8,6 +8,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
@@ -31,9 +32,10 @@ class RecruitmentClientTest {
         delays=new ArrayList<>();
     }
     @AfterEach void stop() { server.stop(0); http.close(); }
-    RecruitmentClient client(Duration timeout) {
+    RecruitmentClient client(Duration timeout) {return client(timeout,Clock.systemUTC());}
+    RecruitmentClient client(Duration timeout,Clock clock) {
         return new RecruitmentClient(http,budget,"fixture+/= key",URI.create("http://127.0.0.1:"+server.getAddress().getPort()+"/"),
-                delays::add,Clock.systemUTC(),timeout);
+                delays::add,clock,timeout);
     }
     void responds(int status,String body) {
         server.createContext("/",e->{ requests.incrementAndGet(); query=e.getRequestURI().getRawQuery();
@@ -67,6 +69,32 @@ class RecruitmentClientTest {
         assertThatThrownBy(()->client(Duration.ofSeconds(1)).detail(42)).hasMessage("HTTP_RATE_LIMIT");
         assertThat(delays).containsExactly(Duration.ofSeconds(7),Duration.ofSeconds(7));
         verify(budget,times(3)).reserve(eq("DETAIL"),anyInt());
+    }
+    @Test void rateLimitWaitsOnlyForShortReadableDelaysAndNeverRetriesEarlierThanAsked() {
+        var now=Instant.parse("2026-11-15T06:00:00Z");
+        var header=new java.util.concurrent.atomic.AtomicReference<String>();
+        server.createContext("/",e->{ requests.incrementAndGet(); if(header.get()!=null) e.getResponseHeaders().add("Retry-After",header.get());
+            e.sendResponseHeaders(429,-1);e.close(); });
+        java.util.function.Function<Long,String> date=s->java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME.format(now.plusSeconds(s).atOffset(java.time.ZoneOffset.UTC));
+        var waits=new java.util.LinkedHashMap<String,Duration>();
+        waits.put("60",Duration.ofSeconds(60));
+        waits.put(date.apply(30L),Duration.ofSeconds(30));
+        waits.put(date.apply(-30L),Duration.ZERO);
+        waits.put(null,null);
+        for(var c:waits.entrySet()) {
+            header.set(c.getKey()); requests.set(0); delays.clear();
+            assertThatThrownBy(()->client(Duration.ofSeconds(1),Clock.fixed(now,java.time.ZoneOffset.UTC)).detail(42)).hasMessage("HTTP_RATE_LIMIT");
+            assertThat(requests).as(c.getKey()).hasValue(3);
+            if(c.getValue()==null) assertThat(delays).as("no header: normal backoff").containsExactly(Duration.ofSeconds(2),Duration.ofSeconds(4));
+            else assertThat(delays).as(c.getKey()).containsExactly(c.getValue(),c.getValue());
+        }
+        for(String tooLongOrUnreadable:new String[]{"61","86400","99999999999999999999",date.apply(61L),"-5","+5","soon",""}) {
+            header.set(tooLongOrUnreadable); requests.set(0); delays.clear();
+            assertThatThrownBy(()->client(Duration.ofSeconds(1),Clock.fixed(now,java.time.ZoneOffset.UTC)).detail(42))
+                    .as(tooLongOrUnreadable).hasMessage("HTTP_RATE_LIMIT");
+            assertThat(requests).as(tooLongOrUnreadable).hasValue(1);
+            assertThat(delays).as(tooLongOrUnreadable).isEmpty();
+        }
     }
     @Test void redirectsAndOtherClientErrorsAreNeverRetriedOrFollowed() {
         server.createContext("/",e->{ requests.incrementAndGet(); e.getResponseHeaders().add("Location","/stolen");

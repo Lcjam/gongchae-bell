@@ -15,11 +15,14 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 import org.springframework.stereotype.Component;
 
 @Component
 public class RecruitmentClient {
     private static final URI OFFICIAL = URI.create("https://apis.data.go.kr/1051000/recruitment/");
+    /** Longest Retry-After we sleep through; a longer one ends the run so the next one retries (never earlier). */
+    static final Duration MAX_INLINE_WAIT = Duration.ofSeconds(60);
     private final HttpClient http;
     private final ApiBudget budget;
     private final String serviceKey;
@@ -58,7 +61,8 @@ public class RecruitmentClient {
                 if (code==200) { budget.finish(id,"SUCCESS"); return response.body(); }
                 last=code==429 ? CollectionFailure.Code.HTTP_RATE_LIMIT : CollectionFailure.Code.HTTP_STATUS;
                 budget.finish(id,last.name());
-                if (code==429) delay=retryAfter(response.headers().firstValue("Retry-After").orElse(""),delay);
+                if (code==429) delay=retryAfter(response.headers().firstValue("Retry-After"),delay)
+                        .orElseThrow(() -> new CollectionFailure(CollectionFailure.Code.HTTP_RATE_LIMIT));
                 else if (code<500 || code>599) throw new CollectionFailure(last);
             } catch (HttpTimeoutException e) {
                 last=CollectionFailure.Code.HTTP_TIMEOUT; budget.finish(id,last.name());
@@ -89,12 +93,17 @@ public class RecruitmentClient {
             response.cancel(true);throw interrupted;
         }
     }
-    private Duration retryAfter(String value, Duration fallback) {
-        try { return Duration.ofSeconds(Math.max(0,Long.parseLong(value.trim()))); }
-        catch (RuntimeException ignored) {
-            try { return Duration.ofMillis(Math.max(0,Duration.between(clock.instant(),ZonedDateTime.parse(value,DateTimeFormatter.RFC_1123_DATE_TIME).toInstant()).toMillis())); }
-            catch (RuntimeException invalid) { return fallback; }
-        }
+    /** Empty when the server asks for more than MAX_INLINE_WAIT or says something unreadable: we cannot honour it inline. */
+    Optional<Duration> retryAfter(Optional<String> header, Duration fallback) {
+        if (header.isEmpty()) return Optional.of(fallback);
+        String value=header.get().trim();
+        Duration wait;
+        try {
+            wait = value.matches("\\d+") ? Duration.ofSeconds(Long.parseLong(value))
+                    : Duration.between(clock.instant(),ZonedDateTime.parse(value,DateTimeFormatter.RFC_1123_DATE_TIME).toInstant());
+        } catch (RuntimeException unreadable) { return Optional.empty(); }
+        if (wait.isNegative()) return Optional.of(Duration.ZERO);
+        return wait.compareTo(MAX_INLINE_WAIT) > 0 ? Optional.empty() : Optional.of(wait);
     }
     private static String encode(String value) { return URLEncoder.encode(value,StandardCharsets.UTF_8); }
     @FunctionalInterface interface Sleeper { void sleep(Duration duration) throws InterruptedException; }

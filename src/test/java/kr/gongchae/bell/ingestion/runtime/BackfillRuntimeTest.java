@@ -50,7 +50,55 @@ class BackfillRuntimeTest {
         }
         return json.writeValueAsString(root);
     }
+    String page(int total,ObjectNode... rows) {
+        var root=json.createObjectNode();root.put("resultCode",200).put("totalCount",total);root.putArray("result").addAll(java.util.List.of(rows));
+        return json.writeValueAsString(root);
+    }
+    ObjectNode row(long sn,String begin,String title) {
+        var row=source.deepCopy();row.put("recrutPblntSn",sn).put("pbancBgngYmd",begin).put("pbancEndYmd","20261231").put("recrutPbancTtl",title);
+        return row;
+    }
     BackfillCollector collector() {return new BackfillCollector(runs,client,ingestor,leases,clock);}
+    @Test void completedMonthIsSkippedByItsOwnSnSnapshotAfterUpstreamShrankAndPagesRestarted() {
+        var from=LocalDate.of(2026,11,1);var to=LocalDate.of(2026,11,30);var period=new BackfillRange(from,to);
+        when(client.backfillList(from,to,1)).thenReturn(page(2001,1000,100,"20261101")).thenReturn(page(1,1,100,"20261101"));
+        when(client.backfillList(from,to,2)).thenReturn(page(2001,1000,1100,"20261101"));
+        when(client.backfillList(from,to,3)).thenReturn(page(2001,1,2100,"20261131"));
+        assertThatThrownBy(()->collector().collect("shrink-1",period,false)).isInstanceOf(IngestionException.class);
+        // Upstream now reports one posting for the month: the operator restarts the incomplete month's pages.
+        assertThat(collector().collect("shrink-2",period,true)).isEqualTo(BackfillCollector.Outcome.COMPLETE);
+        // Pages 1 and 2 of the first attempt stay COMPLETE; a re-union of them would give 2000 SNs against unique=1.
+        assertThat(collector().collect("shrink-3",period,false)).isEqualTo(BackfillCollector.Outcome.COMPLETE);
+        assertThat(jdbc.sql("SELECT received_sns::text FROM collect_run WHERE slot='shrink-2/2026-11-01'").query(String.class).single()).isEqualTo("[100]");
+        assertThat(jdbc.sql("SELECT unique_count FROM collect_run WHERE slot='command/shrink-3'").query(Integer.class).single()).isEqualTo(1);
+        verify(client,times(2)).backfillList(from,to,1);verify(client).backfillList(from,to,2);verify(client).backfillList(from,to,3);
+        verifyNoMoreInteractions(client);
+    }
+    @Test void rejectedPagesCommitNoChangeToStoredPostings() {
+        var from=LocalDate.of(2026,11,1);var to=LocalDate.of(2026,11,30);var period=new BackfillRange(from,to);
+        var first=page(1001,1000,100,"20261101");
+        var cases=new java.util.LinkedHashMap<String,Runnable>();
+        cases.put("BACKFILL_RANGE_MISMATCH",()->when(client.backfillList(from,to,1))
+                .thenReturn(page(2,row(100,"20261101","바뀐 제목"),row(5000,"20261031","기간 밖"))));
+        cases.put("BACKFILL_COUNT_CHANGED",()->{when(client.backfillList(from,to,1)).thenReturn(first);
+                when(client.backfillList(from,to,2)).thenReturn(page(1002,row(100,"20261101","바뀐 제목"),row(5000,"20261101","새 공고")));});
+        cases.put("BACKFILL_DUPLICATE_SN",()->{when(client.backfillList(from,to,1)).thenReturn(first);
+                when(client.backfillList(from,to,2)).thenReturn(page(1001,row(100,"20261101","바뀐 제목")));});
+        cases.put("BACKFILL_PAGE_MISMATCH",()->when(client.backfillList(from,to,1))
+                .thenReturn(page(3,row(100,"20261101","바뀐 제목"),row(5000,"20261101","새 공고"))));
+        cases.forEach((expected,stub)->{
+            jdbc.sql("TRUNCATE institution,collect_run RESTART IDENTITY CASCADE").update();
+            ingestor.upsertPage(ingestor.parsePage(page(1,1,100,"20261101")),clock.instant());
+            reset(client);stub.run();
+            var stored="SELECT sn::text||'|'||title||'|'||content_hash FROM posting WHERE sn=100";
+            String before=jdbc.sql(stored).query(String.class).single();
+            assertThatThrownBy(()->collector().collect("rejected",period,false)).as(expected).hasMessage(expected);
+            assertThat(jdbc.sql(stored).query(String.class).single()).as(expected).isEqualTo(before);
+            assertThat(jdbc.sql("SELECT count(*) FROM posting WHERE sn=5000").query(Integer.class).single()).as(expected).isZero();
+            assertThat(jdbc.sql("SELECT count(*) FROM posting_change").query(Integer.class).single()).as(expected).isZero();
+            assertThat(jdbc.sql("SELECT result FROM collect_run WHERE slot='rejected/2026-11-01'").query(String.class).single()).as(expected).isEqualTo("FAILED");
+        });
+    }
     @Test void resumesFailedPageSkipsCompletedMonthAndPreservesExactUniqueIdsWithAlreadyStoredRows() {
         var from=LocalDate.of(2026,10,1);var to=LocalDate.of(2026,11,30);var period=new BackfillRange(from,to);
         when(client.backfillList(from,LocalDate.of(2026,10,31),1)).thenReturn(page(1,1,10,"20261001"));
@@ -99,7 +147,7 @@ class BackfillRuntimeTest {
     @Test void explicitPageRestartReappliesExistingRowsAndCanFinishChangedIncompleteMonth() {
         var from=LocalDate.of(2026,11,1);var to=LocalDate.of(2026,11,30);var period=new BackfillRange(from,to);
         long saved=runs.claim("BACKFILL","older/page1").orElseThrow();runs.metadata(saved,from,to,from,to,1);
-        ingestor.upsertPage(page(1,1,100,"20261101"),clock.instant());
+        ingestor.upsertPage(ingestor.parsePage(page(1,1,100,"20261101")),clock.instant());
         runs.completePage(saved,1001,1000,1000,0,0,java.util.stream.LongStream.range(100,1100).boxed().collect(java.util.stream.Collectors.toSet()));
         when(client.backfillList(from,to,1)).thenReturn(page(1,1,100,"20261101"));
         assertThat(collector().collect("restart",period,true)).isEqualTo(BackfillCollector.Outcome.COMPLETE);

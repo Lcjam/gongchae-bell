@@ -96,10 +96,12 @@ class RuntimeDatabaseTest {
         var resumed=runs.completedPage(from,to,1).orElseThrow();
         assertThat(resumed.total()).isEqualTo(3);assertThat(resumed.received()).isEqualTo(3);
         assertThat(resumed.sns()).containsExactlyInAnyOrder(5L,9L,12L);
-        assertThat(runs.completedMonthSummary(from,to)).isEmpty();
+        assertThat(runs.completedMonth(from,to)).isEmpty();
         long month=runs.claim("BACKFILL","manual2/2024-02").orElseThrow();runs.metadata(month,from.minusYears(1),to,from,to,null);
-        runs.finish(month,"COMPLETE",null,3,3,3);
-        assertThat(runs.completedMonthSummary(from,to)).isPresent();assertThat(runs.completedMonthSummary(from,to.minusDays(1))).isEmpty();
+        runs.completeMonth(month,3,3,java.util.Set.of(5L,9L,12L));
+        assertThat(runs.completedMonth(from,to)).hasValueSatisfying(m->{
+            assertThat(m.unique()).isEqualTo(3);assertThat(m.sns()).containsExactlyInAnyOrder(5L,9L,12L);});
+        assertThat(runs.completedMonth(from,to.minusDays(1))).isEmpty();
     }
     @Test void supplementalSessionLockExcludesAnotherOwnerAndReleasesAfterCloseAndBackendDeath() {
         var leases=new AdvisoryLease(dataSource);
@@ -113,6 +115,103 @@ class RuntimeDatabaseTest {
         try(var resumed=leases.acquire(AdvisoryLease.BACKFILL).orElseThrow()) {
             assertThat(leases.acquire(AdvisoryLease.BACKFILL)).isEmpty();
         }
+    }
+    @Test void leaseClosesItsPhysicalConnectionWhenUnlockFailsOnALiveSessionSoAnotherOwnerAcquires() throws Exception {
+        // Double: the session stays alive but the unlock statement fails (e.g. statement timeout or cancel).
+        javax.sql.DataSource failingUnlock=new org.springframework.jdbc.datasource.DelegatingDataSource(dataSource) {
+            @Override public java.sql.Connection getConnection() throws java.sql.SQLException {
+                var real=super.getConnection();
+                return (java.sql.Connection)java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(),
+                        new Class<?>[]{java.sql.Connection.class},(proxy,method,args)->{
+                            if(method.getName().equals("prepareStatement") && ((String)args[0]).contains("unlock"))
+                                throw new java.sql.SQLException("canceling statement due to statement timeout","57014");
+                            try {return method.invoke(real,args);} catch(java.lang.reflect.InvocationTargetException e) {throw e.getCause();}
+                        });
+            }
+        };
+        var lease=new AdvisoryLease(failingUnlock).acquire(AdvisoryLease.DETAILS).orElseThrow();
+        int owner=jdbc.sql("SELECT pid FROM pg_locks WHERE locktype='advisory' AND objid=:key AND granted")
+                .param("key",AdvisoryLease.DETAILS).query(Integer.class).single();
+        var others=new AdvisoryLease(dataSource);
+        assertThat(others.acquire(AdvisoryLease.DETAILS)).isEmpty();
+        assertThatThrownBy(lease::close).hasMessage("DATABASE_FAILURE");
+        // The owner's backend ends with the closed connection; PostgreSQL then drops its lock.
+        for(int i=0;i<50 && jdbc.sql("SELECT count(*) FROM pg_stat_activity WHERE pid=:pid").param("pid",owner).query(Integer.class).single()>0;i++)
+            Thread.sleep(100);
+        assertThat(jdbc.sql("SELECT count(*) FROM pg_stat_activity WHERE pid=:pid").param("pid",owner).query(Integer.class).single()).isZero();
+        try(var next=others.acquire(AdvisoryLease.DETAILS).orElseThrow()) {
+            assertThat(others.acquire(AdvisoryLease.DETAILS)).isEmpty();
+        }
+    }
+    @Test void nonRegularKindsStopShortOfTheRegularDailyShare() {
+        jdbc.sql("INSERT INTO api_budget(day,count) VALUES ('2026-11-16',827)").update();
+        first.reserve("DETAIL");
+        assertThatThrownBy(()->first.reserve("DETAIL")).hasMessage("BUDGET_EXHAUSTED");
+        assertThatThrownBy(()->second.reserve("BACKFILL",2)).hasMessage("BUDGET_EXHAUSTED");
+        for(int i=0;i<ApiBudget.REGULAR_SHARE;i++) first.reserve("REGULAR");
+        assertThat(jdbc.sql("SELECT count FROM api_budget").query(Integer.class).single()).isEqualTo(900);
+        assertThatThrownBy(()->second.reserve("REGULAR")).hasMessage("BUDGET_EXHAUSTED");
+        assertThat(jdbc.sql("SELECT count(*) FROM api_attempt").query(Integer.class).single()).isEqualTo(1+ApiBudget.REGULAR_SHARE);
+    }
+    void postings(int count) {
+        jdbc.sql("TRUNCATE institution CASCADE").update();
+        jdbc.sql("INSERT INTO institution(code,name) VALUES ('TEST','fixture')").update();
+        jdbc.sql("""
+                INSERT INTO posting(sn,inst_code,title,bgng_date,end_date,status,from_backfill,content_hash,first_seen_at,last_seen_at)
+                SELECT sn,'TEST','fixture','2026-11-01','2026-12-01','OPEN',false,'fixture',now(),now() FROM generate_series(1,:n) sn
+                """).param("n",count).update();
+    }
+    static final String INVALID_DETAIL="{\"resultCode\":200,\"result\":{\"recrutPblntSn\":42}}";
+    @Test void detailRetriesStopAfterThreeFailedRunsAndTheGapStaysVisible() {
+        posting(); var client=org.mockito.Mockito.mock(RecruitmentClient.class);
+        org.mockito.Mockito.when(client.detail(42)).thenThrow(new CollectionFailure(CollectionFailure.Code.BUDGET_EXHAUSTED))
+                .thenReturn(INVALID_DETAIL);
+        var collector=new DetailCollector(jdbc,client,new CollectionRuns(jdbc,clock,manager),new AdvisoryLease(dataSource),clock);
+        for(int slot=1;slot<=6;slot++) collector.collect("slot"+slot);
+        // The budget stop is not the posting's failure; then three INVALID_DETAIL runs, then no more requests.
+        org.mockito.Mockito.verify(client,org.mockito.Mockito.times(4)).detail(42);
+        assertThat(jdbc.sql("SELECT detail_status FROM posting WHERE sn=42").query(String.class).single()).isEqualTo("FAILED");
+        var registry=new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        try {
+            new CollectorMetrics(registry,jdbc,clock);
+            assertThat(registry.get("collector.detail.gave.up").gauge().value()).isEqualTo(1);
+        } finally {registry.close();}
+    }
+    @Test void oneSweepStopsAtThirtyPostingsOrTenMinutes() {
+        postings(40); var client=org.mockito.Mockito.mock(RecruitmentClient.class);
+        org.mockito.Mockito.when(client.detail(org.mockito.ArgumentMatchers.anyLong())).thenReturn(INVALID_DETAIL);
+        var runs=new CollectionRuns(jdbc,clock,manager);
+        new DetailCollector(jdbc,client,runs,new AdvisoryLease(dataSource),clock).collect("count");
+        org.mockito.Mockito.verify(client,org.mockito.Mockito.times(DetailCollector.MAX_PER_SWEEP)).detail(org.mockito.ArgumentMatchers.anyLong());
+        org.mockito.Mockito.clearInvocations(client);
+        // Each clock read moves four minutes: 4 and 8 fit before the 10-minute deadline, 12 does not.
+        var start=clock.instant();var reads=new java.util.concurrent.atomic.AtomicInteger();
+        var ticking=new Clock() {
+            @Override public java.time.ZoneId getZone() {return ZoneOffset.UTC;}
+            @Override public Clock withZone(java.time.ZoneId zone) {return this;}
+            @Override public Instant instant() {return start.plus(java.time.Duration.ofMinutes(4L*reads.getAndIncrement()));}
+        };
+        new DetailCollector(jdbc,client,runs,new AdvisoryLease(dataSource),ticking).collect("time");
+        org.mockito.Mockito.verify(client,org.mockito.Mockito.times(2)).detail(org.mockito.ArgumentMatchers.anyLong());
+    }
+    @Test void alwaysInvalidDetailsAcrossManySlotsLeaveTheRegularShare() throws Exception {
+        postings(40);
+        var budget=new ApiBudget(jdbc,manager,clock,new CollectorProperties(false,null,50,100,false,null,null,null,false));
+        var server=com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1",0),0);
+        var requests=new java.util.concurrent.atomic.AtomicInteger();
+        server.createContext("/",e->{requests.incrementAndGet();byte[] bytes=INVALID_DETAIL.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            e.sendResponseHeaders(200,bytes.length);e.getResponseBody().write(bytes);e.close();});server.start();
+        try(var http=java.net.http.HttpClient.newHttpClient()) {
+            var client=new RecruitmentClient(http,budget,"fixture",java.net.URI.create("http://127.0.0.1:"+server.getAddress().getPort()+"/"),
+                    d->{},clock,java.time.Duration.ofSeconds(2));
+            var collector=new DetailCollector(jdbc,client,new CollectionRuns(jdbc,clock,manager),new AdvisoryLease(dataSource),clock);
+            for(int slot=1;slot<=24;slot++) collector.collect("slot"+slot);
+        } finally {server.stop(0);}
+        int share=ApiBudget.REGULAR_SHARE;
+        assertThat(requests).hasValue(100-share);
+        assertThat(jdbc.sql("SELECT count FROM api_budget").query(Integer.class).single()).isEqualTo(100-share);
+        for(int i=0;i<share;i++) budget.reserve("REGULAR");
+        assertThatThrownBy(()->budget.reserve("REGULAR")).hasMessage("BUDGET_EXHAUSTED");
     }
     void posting() {
         jdbc.sql("TRUNCATE institution CASCADE").update();

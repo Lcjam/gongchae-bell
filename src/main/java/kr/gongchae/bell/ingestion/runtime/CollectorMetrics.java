@@ -35,6 +35,10 @@ public class CollectorMetrics {
                     .param("day",LocalDate.now(clock.withZone(ApiBudget.KST))).param("kind",kind).query(Integer.class).single())
                     .tag("kind",kind).register(registry);
         }
+        // Postings whose detail is still missing after the retry cap: shown, not hidden (FAILED stays on the posting).
+        Gauge.builder("collector.detail.gave.up",jdbc,j -> j.sql("SELECT count(*) FROM posting p WHERE "+DetailCollector.MISSING
+                + " AND "+DetailCollector.FAILURES+" >= :max").param("max",DetailCollector.MAX_FAILURES).query(Integer.class).single())
+                .register(registry);
         Gauge.builder("collector.runs.unfinished",jdbc,j -> j.sql("SELECT count(*) FROM collect_run WHERE result IS NULL")
                 .query(Integer.class).single()).register(registry);
     }

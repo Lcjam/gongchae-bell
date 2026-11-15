@@ -31,11 +31,12 @@ public class BackfillCollector {
             try {
                 for(BackfillRange month:period.months()) {
                     lease.verify();
-                    var completed=runs.completedMonthSummary(month.from(),month.to());
+                    var completed=runs.completedMonth(month.from(),month.to());
                     if(completed.isPresent()) {
-                        Set<Long> sns=runs.completedMonthSns(month.from(),month.to());
-                        if(sns.size()!=completed.get().unique()) throw new CollectionFailure(CollectionFailure.Code.BACKFILL_PAGE_MISMATCH);
-                        total+=completed.get().total();received+=completed.get().received();periodSns.addAll(sns);
+                        // The month row's own SN snapshot, not a re-union of page rows from older attempts.
+                        var done=completed.get();
+                        if(done.sns().size()!=done.unique()) throw new CollectionFailure(CollectionFailure.Code.BACKFILL_PAGE_MISMATCH);
+                        total+=done.total();received+=done.received();periodSns.addAll(done.sns());
                         continue;
                     }
                     var receipt=month(slot,period,month,restartPages,lease);
@@ -68,12 +69,12 @@ public class BackfillCollector {
                     long page=runs.claim("BACKFILL",slot+"/"+month.from()+"/"+number).orElseThrow();
                     runs.metadata(page,period.from(),period.to(),month.from(),month.to(),number);
                     try {
-                        var result=ingestor.upsertPage(client.backfillList(month.from(),month.to(),number),clock.instant());
-                        var counts=result.counts();
-                        var receipt=new CollectionRuns.Page(counts.totalCount(),counts.received(),result.sns());
-                        expected=validate(receipt,number,expected,seen);
-                        if(!runs.withinRange(result.sns(),month.from(),month.to())) throw new CollectionFailure(CollectionFailure.Code.BACKFILL_RANGE_MISMATCH);
-                        runs.completePage(page,counts.totalCount(),counts.received(),counts.inserted(),counts.changed(),counts.closed(),result.sns());
+                        // Every check runs before upsertPage, so a rejected page changes no posting (contract v3).
+                        var parsed=ingestor.parsePage(client.backfillList(month.from(),month.to(),number));
+                        expected=validate(new CollectionRuns.Page(parsed.totalCount(),parsed.sns().size(),parsed.sns()),number,expected,seen);
+                        if(!parsed.beginsWithin(month.from(),month.to())) throw new CollectionFailure(CollectionFailure.Code.BACKFILL_RANGE_MISMATCH);
+                        var counts=ingestor.upsertPage(parsed,clock.instant());
+                        runs.completePage(page,counts.totalCount(),counts.received(),counts.inserted(),counts.changed(),counts.closed(),parsed.sns());
                         received+=counts.received();
                     } catch(IngestionException failure) {
                         runs.finish(page,failure.failure().result(),failure.failure().name(),null,null,null);throw failure;
@@ -86,7 +87,7 @@ public class BackfillCollector {
                 if(received==expected) break;
             }
             if(seen.size()!=expected) throw new CollectionFailure(CollectionFailure.Code.BACKFILL_DUPLICATE_SN);
-            runs.finish(run,"COMPLETE",null,expected,received,seen.size());return new CollectionRuns.Page(expected,received,Set.copyOf(seen));
+            runs.completeMonth(run,expected,received,seen);return new CollectionRuns.Page(expected,received,Set.copyOf(seen));
         } catch(IngestionException failure) {
             runs.finish(run,failure.failure().result(),failure.failure().name(),expected<0?null:expected,received,seen.size());throw failure;
         } catch(CollectionFailure failure) {
