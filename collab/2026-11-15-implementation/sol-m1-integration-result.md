@@ -2,9 +2,9 @@
 
 2026-11-15. 작업 경로: `C:/Users/lcj/orca/workspaces/my-project/m1-integration`, 로컬 브랜치: `test/#4-m1-integration`. Orca로 생성했고 writer는 Sol 한 명이다. 원본 사용자 변경, 다른 구현자의 워킹트리, 원본 `.env`는 가져오지 않았다. 새 워크트리에도 `.env`가 없음을 확인했다.
 
-**최종 결과: 전체 86 tests, failures/errors/skipped 모두 0. `check bootJar` 통과.** 새로운 검증은 공식 fixture 연결 테스트 3건이다. 이 결과는 아래 고정 #4 코드 기준이며 이후 Claude 수정분이나 원격 CI의 결과를 대신하지 않는다.
+**최종 결과: 최신 #4 `56faf051`을 포함한 합본 94 tests, failures/errors/skipped 모두 0. `check bootJar` 통과.** 공식 fixture 연결 테스트 3건도 수정 없이 통과했다. 아래 1차 기록의 86건은 e709922 기반 결과이며, 최신 부모·검증 head와 결과는 마지막 2차 기록에 명시한다. 원격 CI를 대신하는 결과는 아니다.
 
-## 고정 입력과 로컬 통합 이력
+## 1차 고정 입력과 로컬 통합 이력
 
 - #4 기반: `e7099226dd93693961ae29250131c8d2025b242b` (공개 계약 v3의 #3 `aab6d5b` 포함).
 - #5 대상: `4334af809e3d8ce97205e29dcf9a22d28fcddaa6`까지의 5개 커밋을 순서대로 로컬 cherry-pick했다. 로컬 대응 커밋은 `6998ea3`, `98d3382`, `ff75a41`, `832eb94`, `11c09e2`다.
@@ -30,7 +30,7 @@ Spring 빈 경로를 검증했지만 정상 전체 497건에 대해 `RegularColl
 
 관측된 현행 표시: 실제 상세의 4행은 DB에 모두 보존된다. 웹은 경쟁률 0.0이 있는 두 행만 전형 정보 0/1로 표시하고, 표시 가능한 숫자 필드가 모두 null인 두 행에 대해서는 일부 정보 형식 확인 안내를 낸다. 본 테스트는 새로운 단계 이름/그룹핑/라벨 정책을 만들지 않았다. 이 표시가 제품에 충분한지와 `recrutPbancTtl`의 일반적 의미는 원천 계약 검토 대상이다.
 
-## 실행 조건과 결과
+## 1차 실행 조건과 결과
 
 - 로컬 Windows x64, Docker Desktop의 Testcontainers 임시 `postgres:17` DB. 영속 개발 DB를 사용하지 않았다.
 - Gradle Wrapper 9.9.1. 셸의 Java는 17.0.12이며 빌드/테스트 toolchain은 Temurin 21.0.13+9다.
@@ -57,8 +57,36 @@ Spring 빈 경로를 검증했지만 정상 전체 497건에 대해 `RegularColl
 
 `git diff --cached --check` 통과. `gitleaks dir --redact .`는 약 3.95MB 검사에서 no leaks found였다. 새 워크트리에 원본 `.env`가 없으며 `.tools/CaptureOfficialFixtures.java`나 실제 키를 가져오지 않았다.
 
-## 제출과 남은 검증
+## 1차 제출 기록
 
 테스트와 이 문서를 이 격리 로컬 브랜치에 커밋해 제출한다. push, PR 생성, 원격 머지, 배포, 실제 API 추가 호출은 하지 않았다. 원본 사용자 변경과 Claude/agy 담당 브랜치를 수정하지 않았다.
 
-Claude가 수정 중인 e709922 이후 최신 #4는 조율자가 불변 커밋을 지정하기 전까지 반영하지 않는다. 이 제출의 통과 결과는 e709922 기반 합본에만 유효하다. 최신 #4 적용 후 영향 검증과 해당 최신 head CI는 별도로 필요하다. 브라우저 재관측, 실제 API 재검증, 3년 전체 적재, 상세 전체 공고 수집 및 새로운 단계 의미 해석은 수행하지 않았다.
+1차 제출 시점에는 e709922 이후 최신 #4를 반영하지 않았으며, 당시 결과는 그 기반에만 유효했다. 이후 조율자가 지정한 최신 #4의 통합·재검증은 아래 2차 기록으로 갱신한다. 브라우저 재관측, 실제 API 재검증, 3년 전체 적재, 상세 전체 공고 수집 및 새로운 단계 의미 해석은 수행하지 않았다.
+## 2차: 검수된 최신 #4 통합 및 최종 재검증
+
+조율자가 지정한 불변 `56faf0510c30d2b7cecc00a40e2757c2d509128e`만 기존 격리 브랜치에 로컬 merge했다. #4의 코드 커밋은 `5e2950bd93dc6a8f6b5b1fb1b5aff0dbf6aae9b3`이고 56faf051은 결과 문서 후속이다. 다른 구현자의 이후 워킹트리를 가져오지 않았다.
+
+- **검증한 merge head**: `f5474a8c8132a6d5ff1c83f6a9f47a0833a8167a`.
+- **첫 부모(기존 합본)**: `03e2c4ccaf48185f2f2fadc32bef3b4f18eb8b35`.
+- **둘째 부모(최신 #4)**: `56faf0510c30d2b7cecc00a40e2757c2d509128e`.
+- 이 결과 문서 갱신은 위 merge head 위의 문서 전용 커밋으로 제출한다. 최종 제출 head는 완료 응답에 남기며, 코드·테스트·fixture는 검증한 merge head와 같다.
+
+유일한 충돌은 `collab/2026-11-15-api-verification/agy-result.md`의 add/add였다. 지시대로 최신 #4의 검수된 내용을 선택해 공식 fixture의 로컬 커밋 기록 정정을 보존했다. 공식 fixture JSON 3개는 기존 합본과 동일하다. `application.yml`의 scheduler 종료 설정+app.base-url 및 `.env.example`의 빈 키 이름 목록도 기존 합본 대비 diff 0으로 보존됐다.
+
+`DetailCollector.save`의 실패 상태 기록 책임이 collect로 옮겨진 최신 구현을 그대로 사용했다. 신규 OfficialFixtureIntegrationTest는 실제 collect 빈 경로를 사용하므로 테스트 기대나 공용 기반을 바꿀 필요가 없었다. 새 프로덕션 로직, 테스트 조정, 환경파일 변경은 하지 않았다.
+
+### 실행 결과
+
+동일한 로컬 Windows x64 / Temurin 21.0.13+9 toolchain / Gradle 9.9.1 / Testcontainers postgres:17 환경에서 **`./gradlew.bat --no-daemon check bootJar`를 한 번** 실행했다.
+
+- **BUILD SUCCESSFUL in 1m 20s**. test와 bootJar 작업 모두 실행돼 성공했다.
+- 최종 JUnit XML 합계: **94 tests / 0 failures / 0 errors / 0 skipped**.
+- 공식 fixture 합본 3건은 모두 통과했다. 1차 이후 #4에서 추가된 8건도 함께 실행됐다: BackfillRuntimeTest 9→11, RecruitmentClientTest 9→10, RuntimeDatabaseTest 16→18, CollectorPropertiesTest 신규 3건. 다른 클래스 건수는 1차 표와 같다.
+- `git diff --cached --check` 통과. 최신 통합 트리에서 `gitleaks dir --redact .`는 약 4.01MB 검사에 no leaks found였다.
+- 앱 결함으로 인한 실패는 없었다. 이번 후속 검증에서는 앱·테스트 코드를 직접 고치지 않았다.
+
+### 최종 한계와 경계
+
+새 fixture 테스트가 통과한 실제 빈 경로와 단일행 발췌 범위는 위와 같다. 전체 497건의 core 반영, 단일 실제 상세의 빈→DB→HTML, 빈 달의 backfill 빈 경로를 검증했으며 전체 497건의 상세 fanout E2E라고 주장하지 않는다. 상세의 null 행 표시/단계 의미 일반화, 브라우저 재관측, 실제 API 추가 호출, 3년 전체 적재는 수행하지 않았다.
+
+새 합본 브랜치는 로컬만 사용했다. 실제 API 키·원본 env를 읽거나 복사하지 않았고, 영속 개발 DB·다른 담당자 브랜치·원본 사용자 변경을 수정하지 않았다. push/PR 생성/원격 머지/배포는 하지 않았다. 이 로컬 합본 head의 원격 CI와 agy의 최신 #4 독립 검수 완료 여부는 이 실행으로 대신하지 않는다.
