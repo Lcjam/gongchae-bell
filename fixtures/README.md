@@ -8,6 +8,9 @@
 |---|---|---|---|
 | [`alio-public-list-sample.json`](alio-public-list-sample.json) | `https://opendata.alio.go.kr/new/odaApiMng/recrutInquiryAjaxList.do?ongoingYn=Y&pageNo=1&numOfRows=10` | 2026-11-14 17:17:18+09:00 | 인증키 없이 접근 가능한 ALIO 공식 공개 채용조회 엔드포인트에서 1회 취득한 원본 JSON 응답 (`resultCode=200`, `totalCount=497`, 표본 10건) |
 | [`alio-public-list-quality-sample.json`](alio-public-list-quality-sample.json) | 같은 경로, `ongoingYn=Y&pageNo=1&numOfRows=1000` | 2026-11-14 22:22:25+09:00 | 1회 받은 497건 응답에서 **깨짐 의심 행 2건(`307009`, `306968`)만 원문 그대로 발췌**했다. 봉투의 `resultCode`, `resultMsg`, `totalCount=497`도 원본 값이다(행 수와 다르다). 두 행은 `「」`가 `?`로 바뀐 형태(`?병역법?` 등)이고, `306968`의 `srcUrl`은 스킴 없는 `www.kohom.or.kr`이다 |
+| [`alio-official-list-sample.json`](alio-official-list-sample.json) | `https://apis.data.go.kr/1051000/recruitment/list?serviceKey=[REDACTED]&resultType=json&ongoingYn=Y&numOfRows=1000&pageNo=1` | 2026-11-15 14:41:45+09:00 | 공공데이터포털 공식 OpenAPI에서 1회 취득한 실제 전체 응답 본문 (`resultCode=200`, `totalCount=497`, `result` 497건, `2,019,335` bytes). 공개 AJAX 경로와 달리 `"data"`/`"pathParam"` 래퍼가 최상위에 없고 `result` 원소도 `"item"` 래퍼 없이 객체 직접 배열이다. 비밀값 0건 점검 완료 |
+| [`alio-official-detail-sample.json`](alio-official-detail-sample.json) | `https://apis.data.go.kr/1051000/recruitment/detail?serviceKey=[REDACTED]&resultType=json&sn=307032` | 2026-11-15 14:41:45+09:00 | 공식 OpenAPI `detail` 1회 실제 응답 본문 (`resultCode=200`, `sn=307032`, `2,583` bytes). `result`는 단일 객체이며 `steps`(4건)·`files`(3건) 원소에 `"step"`/`"file"` 래퍼가 없다. 비밀값 0건 점검 완료 |
+| [`alio-official-list-empty-sample.json`](alio-official-list-empty-sample.json) | `https://apis.data.go.kr/1051000/recruitment/list?serviceKey=[REDACTED]&resultType=json&pbancBgngYmd=2010-01-01&pbancEndYmd=2010-01-31&numOfRows=1000&pageNo=1` | 2026-11-15 14:41:46+09:00 | 공식 OpenAPI 빈 기간 조회 1회 실제 응답 본문 (`resultCode=200`, `totalCount=0`, `result=[]`, `79` bytes). 비밀값 0건 점검 완료 |
 
 같은 497건 응답의 실측(분석만 하고 전체는 저장하지 않음, Python `urlsplit`으로 계산해서 Java `URI`와 경계 사례가 다를 수 있음): 필수 필드 누락과 날짜 형식 오류 0건, `sn` 중복 0건, `broken_text` 규칙에 걸리는 공고 10건(U+FFFD는 0건), `srcUrl`이 http(s)로 파싱되지 않는 값 19건. http(s) 478건 중 같은 기관 안에서 URL을 공유하는 공고 210건, 루트 경로 142건, 둘 중 하나에 해당해 `src_url_generic`이 되는 공고 249건(497건 중 50%).
 
@@ -17,8 +20,8 @@
 
 1. **래퍼(Wrapper) 구조 차이**
    - 공개 AJAX 경로(`opendata.alio.go.kr/.../recrutInquiryAjaxList.do`): 최상위에 `{"data": {"result": [...], "resultCode": 200, "totalCount": 497, "resultMsg": "성공했습니다."}, "pathParam": "recrut"}` 형태로 `"data"` 래퍼가 있다.
-   - 공공데이터포털 OpenAPI(`apis.data.go.kr/1051000/recruitment/list`)의 봉투 구조는 저장된 실제 원본이 없어 아직 검증하지 못했다. 이전 문서의 필드 일치 기록만으로 래퍼 유무까지 확정하지 않는다.
-   - 단위 테스트에서 `"data"` 내부 객체를 추출한 파생 fixture는 변환 사실을 명시한다. 공식 API 봉투 검증은 키가 설정된 뒤 1회 응답 확보로 별도 수행한다.
+   - 공공데이터포털 OpenAPI(`apis.data.go.kr/1051000/recruitment/list`, `detail`): 2026-11-15 실제 응답 확보 결과, **`"data"`·`"pathParam"` 래퍼 없이** 최상위에 `{"resultCode": 200, "resultMsg": "성공했습니다.", "totalCount": ..., "result": ...}` 형태로 내려온다. `list`의 `result` 배열 원소와 `detail`의 `steps`/`files` 원소 모두 `"item"`/`"step"`/`"file"` 래퍼가 없다.
+   - 빈 기간 조회(`2010-01-01~2010-01-31`)는 `{"resultCode":200,"resultMsg":"성공했습니다.","totalCount":0,"result":[]}`를 반환한다.
 
 2. **설명 필드 매핑 (`result[*]` 내부 30개 필드)**
    - 자격: `aplyQlfcCn` (결격사유 `disqlfcRsn` 별도 존재)
@@ -29,3 +32,9 @@
 3. **원문 링크(`srcUrl`) 실제 사례**
    - 비표준 HTTPS 포트를 사용하는 정상 공고 존재: `recrutPblntSn=307028` (`https://www.knuch.kr:442/content/04info/11_01.asp?...`)
    - 기관 채용 메인/목록으로만 연결되는 공고 존재: `recrutPblntSn=307027` (`https://foodinfo.career.co.kr/`), `307032`·`307022` (`https://www.knuh.kr/content/04information/02_01.asp`)
+
+## 공식 OpenAPI 검증 상태 (`2026-11-15`)
+
+- **1차 시도 (`14:35:22 KST`)**: `.env` 원문 그대로 호출 시 `LIST_FAILURE=HTTP_STATUS` (`api_attempt.id=1`, `outcome=HTTP_STATUS`)로 종료되었다.
+- **2차 시도 (`14:41:41~14:41:46 KST`)**: 원본 `.env` 수정 없이 메모리에서 유효 `%XX` 시퀀스만 1회 UTF-8 디코딩(평문 `+` 유지)해 `CollectorProperties`에 주입한 뒤 `RecruitmentClient` + `ApiBudget`으로 `list` (`id=2`), `detail(307032)` (`id=3`), 빈 기간 `2010-01-01~2010-01-31` (`id=4`) 모두 `HTTP 200` (`resultCode=200`, `outcome=SUCCESS`)을 확인하고 본문을 `alio-official-*.json`으로 저장했다.
+- 상세 기록 및 공개 AJAX vs 공식 OpenAPI provenance 구분: [`collab/2026-11-15-api-verification/agy-result.md`](../collab/2026-11-15-api-verification/agy-result.md).
