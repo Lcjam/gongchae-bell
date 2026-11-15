@@ -2,7 +2,7 @@
 
 공공기관 채용공고에서 기관의 최근 3년 채용 이력까지 이어 보고, 관심 조건의 새 공고와 마감 임박 알림을 받는 서비스입니다.
 
-현재는 **M1 구현 중**입니다. 실행 기반, PostgreSQL 스키마, 공고 웹 화면(`/` · `/jobs` · `/jobs/{sn}` · `/institutions/{code}` · `/robots.txt` · `/sitemap.xml`)이 구현됐습니다. 수집(배치)·알림·공개 배포는 아직 제공하지 않습니다. 전체 요구사항은 [PRD](docs/prd.md), 구조는 [아키텍처](docs/design/architecture.md), 작업은 [Issues](https://github.com/Lcjam/gongchae-bell/issues)에서 확인할 수 있습니다.
+현재는 **M1 구현 중**입니다. 실행 기반, PostgreSQL 스키마, 공고 웹 화면(`/` · `/jobs` · `/jobs/{sn}` · `/institutions/{code}` · `/robots.txt` · `/sitemap.xml`)이 구현됐습니다. 수집 실행기(정기 수집·월별 최초 적재·상세 수집)는 [PR #11](https://github.com/Lcjam/gongchae-bell/pull/11)에서 리뷰 중이며 기본값은 꺼짐(`COLLECTOR_ENABLED=false`)입니다. 실제 3년 적재·알림·공개 배포는 아직 제공하지 않습니다. 전체 요구사항은 [PRD](docs/prd.md), 구조는 [아키텍처](docs/design/architecture.md), 작업은 [Issues](https://github.com/Lcjam/gongchae-bell/issues)에서 확인할 수 있습니다.
 
 ## 로컬 실행
 
@@ -22,7 +22,7 @@
 ./gradlew check bootJar
 ```
 
-Testcontainers가 PostgreSQL 17을 실행하여 Flyway 적용, 회차 키의 동시 선점 제약, 데이터 기준 시각과 화면 응답을 검증합니다. Docker가 없으면 테스트는 실패합니다. 외부 채용/발송 API는 호출하지 않습니다. 이 테스트는 전체 수집/발송 동시성 검증을 대신하지 않습니다.
+Testcontainers가 PostgreSQL 17을 실행하여 Flyway 적용, 회차 키의 동시 선점 제약, 데이터 기준 시각과 화면 응답을 검증합니다. Docker가 없으면 테스트는 실패합니다. 외부 채용/발송 API는 호출하지 않습니다. 테스트를 실행하는 셸에 `COLLECTOR_ENABLED=true`나 `COLLECTOR_BACKFILL=true`를 두지 마세요. 일부 테스트 컨텍스트는 아직 이 값을 고정하지 않습니다. 이 테스트는 전체 수집/발송 동시성 검증을 대신하지 않습니다.
 
 JAR: `build/libs/gongchae-bell.jar`. CI는 ARM64에서 같은 명령을 실행합니다.
 
