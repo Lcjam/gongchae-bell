@@ -12,7 +12,8 @@
 | `67ed7dc` | **계약 v2와 검수 대응 파일**. 검수 03을 받고 구현보다 먼저 푸시(Sol #4 전달용) |
 | `ef7dd4cb074a48406c7883e093f5ec9abf767629` | 검수 03 수정 5건의 구현과 테스트, erd.md |
 | `925aa18` | 검수 03 결과와 CI 기록 |
-| (이 커밋) | **계약 v3**: 최초 적재 파싱·반영 분리, null 본문 `NON_JSON`, routes 표 정리 |
+| `aab6d5b2a9b64fe4b767f8deb415c77417e4dd86` | **계약 v3**: 최초 적재 파싱·반영 분리, null 본문 `NON_JSON`, routes 표 정리. CI [43681733201](https://github.com/Lcjam/gongchae-bell/actions/runs/43681733201) test·secrets 성공 |
+| (이 문서) | v3 결과와 CI 기록 |
 
 머지하지 않았다. PR은 초안이다.
 
@@ -82,7 +83,7 @@
 
 agy 리뷰 3-3(`loadCodes` 정렬의 DB collation 의존, 비교 외 필드 단독 테스트)은 선택 사항이라 이번에 고치지 않았다. 지금 코드 값(`R600001` 같은 대문자·숫자)에서는 두 정렬이 같다.
 
-로컬: Windows x64, Temurin 21.0.13, Docker Desktop, PostgreSQL 17 Testcontainers에서 `gradlew check` **32 tests / 0 failures / 0 skipped**(전 31 + 새 1). 커밋과 원격 CI는 아래 "커밋" 표에 추가한다.
+로컬: Windows x64, Temurin 21.0.13, Docker Desktop, PostgreSQL 17 Testcontainers에서 `gradlew check` **32 tests / 0 failures / 0 skipped**(전 31 + 새 1). 커밋과 원격 CI는 위 "커밋" 표에 있다. #4 쪽 연결은 #4 브랜치의 `claude-collector-fix-result.md`에 있다.
 
 ## 한계와 미확인
 - **공식 API 봉투**: 실제 `apis.data.go.kr` 응답을 아직 본 적이 없다. 파서는 swagger 문서의 `{"item": …}` 래퍼와 평평한 원소를 모두 받는다. #4가 실응답을 받으면 안 쓰는 쪽을 지워야 한다. 빈 달이 `200 + []`인지 `resultCode 3`인지도 #4가 확인할 일이다(지금은 3이면 `RESULT_CODE_NOT_OK`).
