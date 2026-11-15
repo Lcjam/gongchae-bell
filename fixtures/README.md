@@ -7,6 +7,11 @@
 | 파일 | 출처 | 취득일시 (KST) | 설명 |
 |---|---|---|---|
 | [`alio-public-list-sample.json`](alio-public-list-sample.json) | `https://opendata.alio.go.kr/new/odaApiMng/recrutInquiryAjaxList.do?ongoingYn=Y&pageNo=1&numOfRows=10` | 2026-11-14 17:17:18+09:00 | 인증키 없이 접근 가능한 ALIO 공식 공개 채용조회 엔드포인트에서 1회 취득한 원본 JSON 응답 (`resultCode=200`, `totalCount=497`, 표본 10건) |
+| [`alio-public-list-quality-sample.json`](alio-public-list-quality-sample.json) | 같은 경로, `ongoingYn=Y&pageNo=1&numOfRows=1000` | 2026-11-14 22:22:25+09:00 | 1회 받은 497건 응답에서 **깨짐 의심 행 2건(`307009`, `306968`)만 원문 그대로 발췌**했다. 봉투의 `resultCode`, `resultMsg`, `totalCount=497`도 원본 값이다(행 수와 다르다). 두 행은 `「」`가 `?`로 바뀐 형태(`?병역법?` 등)이고, `306968`의 `srcUrl`은 스킴 없는 `www.kohom.or.kr`이다 |
+
+같은 497건 응답의 실측(분석만 하고 전체는 저장하지 않음, Python `urlsplit`으로 계산해서 Java `URI`와 경계 사례가 다를 수 있음): 필수 필드 누락과 날짜 형식 오류 0건, `sn` 중복 0건, `broken_text` 규칙에 걸리는 공고 10건(U+FFFD는 0건), `srcUrl`이 http(s)로 파싱되지 않는 값 19건. http(s) 478건 중 같은 기관 안에서 URL을 공유하는 공고 210건, 루트 경로 142건, 둘 중 하나에 해당해 `src_url_generic`이 되는 공고 249건(497건 중 50%).
+
+수집 테스트(`ListFixture`)는 이 두 파일을 읽어 `"data"` 래퍼만 벗기고, 마감일·코드 순서·`totalCount` 같은 값을 코드에서 바꿔 사례를 만든다. 손으로 쓴 응답 파일은 두지 않는다. 예외: 게이트웨이 오류 응답(비 JSON)은 실물을 확보하지 못해 테스트 안의 합성 문자열로 둔다.
 
 ## 스키마 및 파싱 주의사항 (실측 확인)
 
