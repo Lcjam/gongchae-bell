@@ -46,3 +46,5 @@
 | 디스코드 웹훅 | `POST /api/webhooks/{id}/{token}?wait=true`, `allowed_mentions: {"parse": []}` | 새 공고: 수집 회차마다 / 마감 임박: 매일 09:00. 404 → 비활성, 429 → `retry_after` 대기 |
 | Resend | `POST https://api.resend.com/emails`, `Idempotency-Key` 헤더([공식](https://resend.com/docs/dashboard/emails/idempotency-keys)) | 확인 메일 + 매일 08:00 묶음. 무료 한도는 하루 100, 월 3,000이다([공식](https://resend.com/pricing)) → 전체 발송 상한을 그 아래로 둔다 |
 | Healthchecks.io | 성공 시 GET 핑 | 수집, 묶음, 백업, NAS 가져오기 |
+
+`list` 응답에서 쓰는 필드와 저장 규칙은 [erd.md 공고 응답 매핑](erd.md#공고-응답-매핑-3-계약)에 있다. 응답을 반영하는 메서드 계약(완결성, 실패 코드, 최초 적재 페이지 실패 처리)은 [수집 반영 계약](../../collab/2026-11-15-implementation/claude-ingestion-contract.md)이다.

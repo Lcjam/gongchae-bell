@@ -15,31 +15,10 @@ import java.net.http.HttpResponse;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.jdbc.core.simple.JdbcClient;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.postgresql.PostgreSQLContainer;
 
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-        properties = "management.server.port=0")
-@AutoConfigureMockMvc
-@Testcontainers
-class FoundationIntegrationTest {
-    @Container
-    static PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:17");
-
-    @DynamicPropertySource
-    static void database(DynamicPropertyRegistry registry) {
-        registry.add("spring.datasource.url", postgres::getJdbcUrl);
-        registry.add("spring.datasource.username", postgres::getUsername);
-        registry.add("spring.datasource.password", postgres::getPassword);
-    }
-
+class FoundationIntegrationTest extends IntegrationTestSupport {
     @Autowired MockMvc mvc;
     @Autowired JdbcClient jdbc;
     @Value("${local.server.port}") int appPort;
@@ -65,7 +44,10 @@ class FoundationIntegrationTest {
 
     @Test
     void migrationAndEmptyPagesWorkWithoutExternalServices() throws Exception {
-        assertThat(jdbc.sql("SELECT count(*) FROM flyway_schema_history WHERE success").query(Long.class).single()).isEqualTo(2);
+        // Later migrations (V3+) must not break this test; it only guards that V1 and V2 applied and nothing failed.
+        assertThat(jdbc.sql("SELECT version FROM flyway_schema_history WHERE success AND version IN ('1', '2') ORDER BY version")
+                .query(String.class).list()).containsExactly("1", "2");
+        assertThat(jdbc.sql("SELECT count(*) FROM flyway_schema_history WHERE NOT success").query(Long.class).single()).isZero();
         mvc.perform(get("/")).andExpect(status().isOk())
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("아직 완전 수집 기록이 없습니다")));
         mvc.perform(get("/jobs")).andExpect(status().isOk())

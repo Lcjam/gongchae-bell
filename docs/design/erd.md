@@ -27,6 +27,20 @@ erDiagram
 - 해시와 변경 비교 대상: 제목, 시작일, 마감일, 채용구분, 고용형태, NCS, 지역, 모집 인원, 원문 링크, 자격, 우대, 전형 설명. `decimalDay`, 관측 시각, 배열 순서는 제외한다 (PRD FR-C4)
 - 목록의 빈 `steps`/`files`는 저장된 상세를 덮어쓰지 않는다
 
+### 공고 응답 매핑 (#3, [계약](../../collab/2026-11-15-implementation/claude-ingestion-contract.md))
+| 응답 필드 | 컬럼 | 규칙 |
+|---|---|---|
+| `recrutPblntSn`, `pblntInstCd`, `instNm`, `recrutPbancTtl`, `pbancBgngYmd`, `pbancEndYmd` | `sn`, `inst_code`, `institution.name`, `title`, `bgng_date`, `end_date` | 필수. 하나라도 없거나 형식이 틀리면 응답 전체를 반영하지 않는다(`INVALID_ROW`) |
+| `recrutNope` | `recrut_nope_raw`, `recrut_nope` | raw는 원문 문자열. 정수이거나 숫자만 있는 문자열일 때만 `recrut_nope` |
+| `aplyQlfcCn`, `scrnprcdrMthdExpln`, `srcUrl` | `aply_qlfc`, `scrnprcdr`, `src_url` | 원문 그대로(공백 정리와 URL 정규화 없음) |
+| `prefCondCn`, `prefCn` | `pref` | 읽을 수 있는 라벨 단락: `[우대조건]\n<prefCondCn>` + `\n\n` + `[우대내용]\n<prefCn>`. 없는 쪽 단락은 빼고, 둘 다 없으면 null. 원문(줄바꿈, 제어 문자)은 그대로. 화면은 나누지 않고 줄바꿈만 살려 출력한다 |
+| `ncsCdLst`·`workRgnLst`·`hireTypeLst`·`acbgCondLst` (+ `*NmLst`) | `posting_code`(NCS/REGION/HIRE/EDU), `code_name` | 쉼표로 나누고 정렬한다. 이름은 개수가 같을 때만 위치로 짝짓는다 |
+| `ongoingYn` | `ongoing_yn` | 상태 판정에 쓴다 |
+
+- `src_url_generic`: http(s) URL 중 경로가 비거나 `/`이고 쿼리가 없을 때, 또는 같은 응답에서 같은 기관의 다른 공고가 같은 URL 문자열을 쓸 때 true. 한 번 true면 URL이 바뀌기 전까지 유지한다. 스킴이 없거나 파싱이 안 되는 URL은 판별하지 않는다(화면이 무효 링크로 처리)
+- `broken_text`: 제목, 기관명, 자격, 우대, 전형 설명에 U+FFFD가 있거나 `?` 바로 뒤에 한글 음절이 오면 true. **깨짐 의심 표시이고 복구하지 않는다**
+- 비교 대상이 아닌 값(EDU 코드, `ongoing_yn`, 기관명, 품질 플래그)은 바뀌면 덮어쓰기만 하고 `posting_change`를 남기지 않는다
+
 ## 실행과 예산
 | 테이블 | 컬럼 | 제약·인덱스 |
 |---|---|---|
@@ -34,7 +48,7 @@ erDiagram
 | `api_budget` | `day`(KST), `count` | PK `day`. 요청 직전에 별도 커밋으로 증가시킨다(예약) |
 | `rate_limit` | `scope`(SUBSCRIBE/RESEND/WEBHOOK_TEST/TOKEN_FAIL/SEND_TOTAL), `key_hmac`, `window_start`, `count` | PK (`scope`, `key_hmac`, `window_start`). 창이 끝나면 지운다 |
 
-`collect_run.error`는 원본 예외 메시지나 요청 URL을 저장하지 않고 100자 이내 내부 오류 코드만 저장한다. API 키·개인정보 노출과 긴 오류 메시지로 결과 갱신이 실패하는 문제를 피한다.
+`collect_run.error`는 원본 예외 메시지나 요청 URL을 저장하지 않고 100자 이내 내부 오류 코드만 저장한다. API 키·개인정보 노출과 긴 오류 메시지로 결과 갱신이 실패하는 문제를 피한다. 수집 반영의 코드는 `NON_JSON`, `RESULT_CODE_NOT_OK`, `INVALID_ENVELOPE`(FAILED), `INVALID_ROW`, `DUPLICATE_SN`, `COUNT_MISMATCH`, `EMPTY_SNAPSHOT`(INCOMPLETE), `APPLY_ERROR`(FAILED)이다. 원천의 `resultCode` 값은 붙이지 않는다.
 
 ## 구독과 발송
 | 테이블 | 컬럼 | 제약·인덱스 |
@@ -44,7 +58,7 @@ erDiagram
 | `notification_item` | `subscription_id`, `sn`, `kind`(NEW/DEADLINE), `notification_id` | **PK (`subscription_id`, `sn`, `kind`)** ← 공고당 한 번; FK `subscription_id` ON DELETE CASCADE; FK `notification_id` ON DELETE SET NULL |
 
 ## 상태 전이
-- **공고**: `OPEN → CLOSED`(마감일 경과 또는 `ongoingYn=N`) · `OPEN → CHECK`(완전 수집에서 빠짐) · `CHECK → OPEN`(다시 나타남) · `CHECK → CLOSED`(마감일 경과). 불완전 수집은 상태를 바꾸지 않는다
+- **공고**: `OPEN → CLOSED`(마감일 경과 또는 `ongoingYn=N`) · `OPEN → CHECK`(완전 수집에서 빠짐) · `CHECK → OPEN`(다시 나타남) · `CHECK → CLOSED`(마감일 경과) · `CLOSED → OPEN`(마감일이 오늘 이후로 바뀌고 `ongoingYn=Y`로 다시 나타남, 마감 연장). 마감일 경과는 KST 날짜로 `end_date < 오늘`이다(D-0은 진행 중). 불완전 수집과 최초 적재 페이지는 누락 판정을 하지 않는다
 - **구독**: `PENDING → ACTIVE`(확인 POST, 디스코드는 테스트 메시지 성공) · `ACTIVE → DISABLED`(수신자 단위 영구 거부) · 해지와 미확인 만료는 **행 삭제**
 - **발송**: `PENDING → SENDING`(선점) → `SENT` / `RETRY`(일시 실패, `next_attempt_at`) / `FAILED`(재시도 소진) · 대상이 아니게 되면 `CANCELLED` · 회수 시간이 지난 `SENDING`은 `UNCERTAIN`으로 기록하고 다시 `RETRY`
 

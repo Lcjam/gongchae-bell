@@ -6,9 +6,9 @@
 |---|---|---|
 | 실행 기반 (#2) | Java 21 빌드, PostgreSQL 17 Flyway, CI, 홈/목록 빈 상태, 두 리뷰 | 구현·검증 완료, [PR #8](https://github.com/Lcjam/gongchae-bell/pull/8) 머지 대기 ([검증 기록](../collab/2026-11-14-implementation/03-foundation-validation.md#원격-ci-및-후속-리뷰)) |
 | FR-C1 | 월별 3년 최초 적재, 멱등 fixture, 실제 건수/표본 기록 | 미구현 |
-| FR-C2~C4 | 완결성/실패 시 무변경, KST 상태, 필드별 변경 관측 fixture | 미구현 |
+| FR-C2~C4 | 완결성/실패 시 무변경, KST 상태, 필드별 변경 관측 fixture | #3 반영 로직과 fixture 테스트 작성, PR 리뷰 대기. 실제 API 호출 경로(#4)와는 아직 연결되지 않음 ([결과](../collab/2026-11-15-implementation/claude-ingestion-result.md)) |
 | FR-C5~C6 | 두 앱 선점/재시작, 영속 호출 예산/재시도/경보 | 스키마만 작성 |
-| FR-C7~C8 | 상세 보존, 품질/개별 공고 링크 fixture | 미구현 |
+| FR-C7~C8 | 상세 보존, 품질/개별 공고 링크 fixture | 목록 반영이 상세 컬럼을 건드리지 않음과 품질 플래그(#3) 테스트 작성·머지, 화면 표시는 #5 구현 완료(공식 swagger 문서 계약 fixture 기준). 상세 수집(#4)은 별도 PR |
 | FR-W1~W4 | 필터/정렬/페이징, 홈, 상세, 3년 기관 통계, 원문 이동 | 구현 완료 (`#5` / `catalog`, 단 `detail` 단계·첨부 표시는 공식 swagger 문서 계약 fixture 기준이며 실제 `detail` API 실응답은 미수신) |
 | FR-W5~W8 | 기준 시각, escaping/URL 검사, 메타데이터/robots, 360px 조작 | 구현 완료 (`#5` / `catalog`) |
 | FR-A1~A3 | 이메일 확인, Discord SSRF/암호화, 목적별 토큰, 수정/해지/복구 | 미구현 |
