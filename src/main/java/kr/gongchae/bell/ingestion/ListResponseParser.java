@@ -40,6 +40,9 @@ final class ListResponseParser {
     }
 
     Page parse(String body) {
+        if (body == null) { // an empty HTTP body; Jackson would throw IllegalArgumentException
+            throw new IngestionException(Failure.NON_JSON, null);
+        }
         JsonNode root;
         try {
             root = JSON.readTree(body);

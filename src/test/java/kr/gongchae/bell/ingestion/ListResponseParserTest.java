@@ -87,6 +87,7 @@ class ListResponseParserTest {
         String body = ListFixture.sample().body();
         assertFailure(body.substring(0, body.length() / 2), Failure.NON_JSON);
         assertFailure("[]", Failure.NON_JSON);
+        assertFailure(null, Failure.NON_JSON);
         assertFailure(ListFixture.sample().envelope(e -> e.put("resultCode", 3)).body(), Failure.RESULT_CODE_NOT_OK);
         assertFailure(ListFixture.sample().envelope(e -> e.remove("resultCode")).body(), Failure.RESULT_CODE_NOT_OK);
         assertFailure(ListFixture.sample().envelope(e -> e.put("totalCount", "497")).body(), Failure.INVALID_ENVELOPE);

@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -177,6 +178,7 @@ class PostingIngestorIntegrationTest extends IntegrationTestSupport {
         // Synthetic: gateway-level errors may not be JSON; no real one has been captured yet.
         cases.put("gateway xml", new Object[]{"<OpenAPI_ServiceResponse><cmmMsgHeader/></OpenAPI_ServiceResponse>", Failure.NON_JSON});
         cases.put("cut body", new Object[]{body.substring(0, body.length() / 2), Failure.NON_JSON});
+        cases.put("no body", new Object[]{null, Failure.NON_JSON});
         cases.put("error code", new Object[]{ListFixture.sample().complete().envelope(e -> e.put("resultCode", 22)).body(),
                 Failure.RESULT_CODE_NOT_OK});
         cases.put("bad envelope", new Object[]{ListFixture.sample().envelope(e -> e.put("totalCount", "10")).body(),
@@ -266,7 +268,7 @@ class PostingIngestorIntegrationTest extends IntegrationTestSupport {
     @Test
     void suspectedBrokenTextIsFlaggedWithoutRewritingIt() {
         var quality = ListFixture.quality();
-        ingestor.upsertPage(quality.body(), T0);
+        upsert(quality.body(), T0);
 
         assertThat(posting(307009).get("broken_text")).isEqualTo(true);
         assertThat(posting(306968).get("broken_text")).isEqualTo(true);
@@ -292,18 +294,40 @@ class PostingIngestorIntegrationTest extends IntegrationTestSupport {
         regular(ListFixture.sample().complete(), T0);
         var page = ListFixture.sample().only(307032, 307021).edit(307021, r -> r.put("recrutPblntSn", 999001));
 
-        PageResult result = ingestor.upsertPage(page.body(), T1);
-        assertThat(result.counts()).isEqualTo(new Counts(497, 2, 1, 0, 0));
-        assertThat(result.sns()).containsExactly(307032L, 999001L);
+        ParsedPage parsed = ingestor.parsePage(page.body());
+        assertThat(ingestor.upsertPage(parsed, T1)).isEqualTo(new Counts(497, 2, 1, 0, 0));
+        assertThat(parsed.sns()).containsExactly(307032L, 999001L);
         assertThat(posting(999001)).containsEntry("from_backfill", true).containsEntry("status", "OPEN");
         assertThat(posting(307032).get("from_backfill")).isEqualTo(false);
         assertThat(count("posting WHERE status <> 'OPEN'")).isZero();
-        PageResult empty = ingestor.upsertPage(ListFixture.sample().envelope(e -> {
+        ParsedPage empty = ingestor.parsePage(ListFixture.sample().envelope(e -> {
             e.putArray("result");
             e.put("totalCount", 0);
-        }).body(), T1);
-        assertThat(empty.counts()).isEqualTo(new Counts(0, 0, 0, 0, 0));
+        }).body());
         assertThat(empty.sns()).isEmpty();
+        assertThat(empty.beginsWithin(LocalDate.of(2026, 11, 1), LocalDate.of(2026, 11, 1))).isTrue();
+        assertThat(ingestor.upsertPage(empty, T1)).isEqualTo(new Counts(0, 0, 0, 0, 0));
+    }
+
+    @Test
+    void parsedPageWritesNothingSoTheCallerCanRejectItBeforeAnyChange() {
+        regular(ListFixture.sample().complete(), T0);
+        List<List<Map<String, Object>>> before = dump();
+        // A stored posting changed in the page, plus a new one that started before the requested month.
+        ParsedPage page = ingestor.parsePage(ListFixture.sample().only(307032, 307021)
+                .edit(307032, r -> r.put("recrutPbancTtl", "바뀐 제목"))
+                .edit(307021, r -> {
+                    r.put("recrutPblntSn", 999004);
+                    r.put("pbancBgngYmd", "20261031");
+                }).body());
+
+        assertThat(page.totalCount()).isEqualTo(497);
+        assertThat(page.sns()).containsExactly(307032L, 999004L);
+        assertThat(page.beginsWithin(LocalDate.of(2026, 11, 1), LocalDate.of(2026, 11, 30))).isFalse();
+        assertThat(page.beginsWithin(LocalDate.of(2026, 10, 31), LocalDate.of(2026, 11, 13))).isTrue();
+        assertThat(page.beginsWithin(LocalDate.of(2026, 10, 31), LocalDate.of(2026, 11, 12))).as("307032 starts 11-13").isFalse();
+        assertThat(dump()).as("parsing alone writes nothing").isEqualTo(before);
+        assertThatThrownBy(() -> page.sns().add(1L)).isInstanceOf(UnsupportedOperationException.class);
     }
 
     @Test
@@ -311,25 +335,26 @@ class PostingIngestorIntegrationTest extends IntegrationTestSupport {
         regular(ListFixture.sample().complete(), T0);
         String body = ListFixture.sample().only(307032, 307021, 307027).edit(307027, r -> r.put("recrutPblntSn", 999003)).body();
 
-        PageResult first = ingestor.upsertPage(body, T1);
-        PageResult again = ingestor.upsertPage(body, T2);
+        ParsedPage first = ingestor.parsePage(body);
+        Counts firstCounts = ingestor.upsertPage(first, T1);
+        ParsedPage again = ingestor.parsePage(body);
+        Counts againCounts = ingestor.upsertPage(again, T2);
 
         assertThat(first.sns()).containsExactly(307021L, 307032L, 999003L);
-        assertThat(first.counts().received()).isEqualTo(first.sns().size());
-        assertThat(first.counts().inserted()).as("only the new one").isEqualTo(1);
+        assertThat(firstCounts.received()).isEqualTo(first.sns().size());
+        assertThat(firstCounts.inserted()).as("only the new one").isEqualTo(1);
         assertThat(again.sns()).isEqualTo(first.sns());
-        assertThat(again.counts().inserted()).as("all stored now, yet the set is unchanged").isZero();
-        assertThatThrownBy(() -> first.sns().add(1L)).isInstanceOf(UnsupportedOperationException.class);
+        assertThat(againCounts.inserted()).as("all stored now, yet the set is unchanged").isZero();
     }
 
     @Test
     void backfillPageWithOneInvalidRowOrNegativeTotalAppliesNothing() {
         var page = ListFixture.sample().edit(307032, r -> r.put("pbancEndYmd", "2026-11-20"));
-        assertThatThrownBy(() -> ingestor.upsertPage(page.body(), T0))
+        assertThatThrownBy(() -> ingestor.parsePage(page.body()))
                 .isInstanceOfSatisfying(IngestionException.class, e -> assertThat(e.failure()).isEqualTo(Failure.INVALID_ROW));
 
         var negative = ListFixture.sample().envelope(e -> e.put("totalCount", -1));
-        assertThatThrownBy(() -> ingestor.upsertPage(negative.body(), T0))
+        assertThatThrownBy(() -> ingestor.parsePage(negative.body()))
                 .isInstanceOfSatisfying(IngestionException.class, e -> assertThat(e.failure()).isEqualTo(Failure.INVALID_ENVELOPE));
 
         assertThat(count("posting")).isZero();
@@ -341,10 +366,11 @@ class PostingIngestorIntegrationTest extends IntegrationTestSupport {
         long id = run();
         jdbc.sql("UPDATE collect_run SET result = 'FAILED', finished_at = now() WHERE id = :id").param("id", id).update();
         String body = ListFixture.sample().complete().body();
+        ParsedPage page = ingestor.parsePage(body);
 
         assertThatThrownBy(() -> ingestor.applyRegular(id, body, T0)).isInstanceOf(IllegalStateException.class);
         assertThatThrownBy(() -> new TransactionTemplate(transactionManager)
-                .executeWithoutResult(s -> ingestor.upsertPage(body, T0))).isInstanceOf(IllegalStateException.class);
+                .executeWithoutResult(s -> ingestor.upsertPage(page, T0))).isInstanceOf(IllegalStateException.class);
         assertThat(count("posting")).isZero();
     }
 
@@ -364,14 +390,14 @@ class PostingIngestorIntegrationTest extends IntegrationTestSupport {
                 await(release);
             }));
             assertThat(inserted.await(10, TimeUnit.SECONDS)).isTrue();
-            var page = executor.submit(() -> ingestor.upsertPage(ListFixture.sample().body(), T0));
+            ParsedPage parsed = ingestor.parsePage(ListFixture.sample().body());
+            var page = executor.submit(() -> ingestor.upsertPage(parsed, T0));
             waitForLockWaiter();
             release.countDown();
             other.get(10, TimeUnit.SECONDS);
 
-            PageResult result = page.get(30, TimeUnit.SECONDS);
-            assertThat(result.counts()).isEqualTo(new Counts(497, 10, 9, 1, 0));
-            assertThat(result.sns()).hasSize(10).contains(307032L);
+            assertThat(page.get(30, TimeUnit.SECONDS)).isEqualTo(new Counts(497, 10, 9, 1, 0));
+            assertThat(parsed.sns()).hasSize(10).contains(307032L);
         }
         assertThat(posting(307032)).containsEntry("title", "2026년 의료요원(진료교수, 진료의사) 28차 초빙(긴급) 공고")
                 .containsEntry("from_backfill", false);
@@ -392,12 +418,12 @@ class PostingIngestorIntegrationTest extends IntegrationTestSupport {
             });
             var backfill = executor.submit(() -> {
                 start.await();
-                return ingestor.upsertPage(ListFixture.sample()
+                return upsert(ListFixture.sample()
                         .edit(307032, r -> r.put("pbancEndYmd", "20261206"))
                         .edit(307027, r -> r.put("recrutPblntSn", 999002)).body(), T1);
             });
             assertThat(regular.get(30, TimeUnit.SECONDS).result()).isEqualTo("COMPLETE");
-            assertThat(backfill.get(30, TimeUnit.SECONDS).counts().received()).isEqualTo(10);
+            assertThat(backfill.get(30, TimeUnit.SECONDS).received()).isEqualTo(10);
         }
         assertThat(count("posting")).isEqualTo(11);
     }
@@ -405,6 +431,10 @@ class PostingIngestorIntegrationTest extends IntegrationTestSupport {
     private long run() {
         return jdbc.sql("INSERT INTO collect_run(kind, slot, started_at) VALUES ('REGULAR', :slot, now()) RETURNING id")
                 .param("slot", "test-" + UUID.randomUUID()).query(Long.class).single();
+    }
+
+    private Counts upsert(String body, Instant at) {
+        return ingestor.upsertPage(ingestor.parsePage(body), at);
     }
 
     private RunResult regular(ListFixture fixture, Instant at) {

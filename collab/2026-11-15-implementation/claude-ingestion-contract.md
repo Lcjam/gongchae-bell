@@ -1,6 +1,6 @@
 # #3 → #4 수집 반영 계약 · claude
 
-> 2026-11-15 · 구현: claude · 검수: codex · 읽는 사람: Sol(#4 수집 클라이언트·선점·예산·최초 적재)
+> 2026-11-15 · 구현: claude · 검수: codex · 읽는 사람: #4 수집 실행기 담당(Sol → 2026-11-15부터 claude)
 > 브랜치 `feat/#3-ingestion-core` (main `9402015` 기반). 근거: [준비안](../2026-11-14-resume/claude-ingestion-ready.md)과 codex 검수 지시.
 > **이 계약을 바꿀 때는 이 파일을 먼저 고치고 #4 담당에게 알린다.**
 
@@ -8,7 +8,8 @@
 | 판 | 날짜 | 바뀐 점 |
 |---|---|---|
 | v1 | 2026-11-15 `497db48` | 최초 |
-| **v2** | 2026-11-15 (codex 검수 `collab/2026-11-15-review/03-codex-ingestion-review.md` 반영, 원본 작업 경로에 있음) | ① `upsertPage` 반환을 `Counts` → **`PageResult(Counts counts, Set<Long> sns)`**로 바꾼다. ② `pref`를 U+001F 연결에서 **라벨과 줄바꿈으로 된 읽을 수 있는 텍스트**로 바꾸고, U+001F가 들어 있어도 거부하지 않는다. ③ 음수 `totalCount`는 `INVALID_ENVELOPE`. `applyRegular`의 시그니처와 동작은 그대로다 |
+| v2 | 2026-11-15 `67ed7dc` (codex 검수 03 반영) | ① `upsertPage` 반환을 `Counts` → `PageResult(Counts counts, Set<Long> sns)`로 바꾼다. ② `pref`를 U+001F 연결에서 **라벨과 줄바꿈으로 된 읽을 수 있는 텍스트**로 바꾸고, U+001F가 들어 있어도 거부하지 않는다. ③ 음수 `totalCount`는 `INVALID_ENVELOPE`. `applyRegular`의 시그니처와 동작은 그대로다 |
+| **v3** | 2026-11-15 (codex `collab/2026-11-15-review/11-review-decisions.md` 1번, 원본 작업 경로에 있음) | ① 최초 적재를 **파싱과 반영으로 나눈다**: `ParsedPage parsePage(String body)`(DB 접근 없음) → 호출자가 페이지 크기·월 총수·페이지 간 중복·요청 기간을 검사 → `Counts upsertPage(ParsedPage page, Instant observedAt)`. 검사에서 거부한 페이지는 아무것도 바꾸지 않는다. 파싱은 여전히 한 번이다. ② `PageResult`를 없앤다. `sns`는 `ParsedPage.sns()`에서 반영 전에 얻는다. 기존 `upsertPage(String, Instant)`는 남기지 않는다(호환 래퍼 없음). ③ `body == null`(빈 HTTP 본문)은 `NON_JSON`. 전에는 `IllegalArgumentException`이 새어 나가 정기 회차가 마감되지 않았다(agy PR #9 리뷰 3-1). `applyRegular`의 시그니처는 그대로다 |
 
 ## 1. 공개 API (`kr.gongchae.bell.ingestion`)
 
@@ -18,14 +19,24 @@ public class PostingIngestor {
     /** 정기 수집 1회분. 파싱 → 완결성 → 반영 → collect_run 마감까지 한다. */
     public RunResult applyRegular(long runId, String body, Instant observedAt);
 
-    /** 최초 적재 한 페이지. 반영만 한다. 실패하면 IngestionException, 아무것도 반영하지 않는다. */
-    public PageResult upsertPage(String body, Instant observedAt);
+    /** 최초 적재 한 페이지를 파싱·검증만 한다. DB에 접근하지 않는다. 실패하면 IngestionException. */
+    public ParsedPage parsePage(String body);
+
+    /** 호출자가 받아들인 페이지를 한 트랜잭션으로 반영한다. */
+    public Counts upsertPage(ParsedPage page, Instant observedAt);
+}
+
+/** 파싱·검증을 마쳤지만 아직 반영하지 않은 페이지. 생성자는 패키지 전용이라 parsePage로만 얻는다. */
+public final class ParsedPage {
+    public int totalCount();                 // 그 페이지 응답의 totalCount(월 전체 건수)
+    /** 이 페이지의 모든 recrutPblntSn. 이미 저장된 공고도 포함한다. 수정할 수 없는 정렬된 집합이고,
+     *  페이지 안 중복은 DUPLICATE_SN으로 거부되므로 sns().size()가 이 페이지의 행 수다. */
+    public SortedSet<Long> sns();
+    /** 모든 행의 pbancBgngYmd가 [from, to] 안에 있으면 true. 빈 페이지는 true. */
+    public boolean beginsWithin(LocalDate from, LocalDate to);
 }
 
 public record Counts(int totalCount, int received, int inserted, int changed, int closed) {}
-/** sns: 이 페이지에서 검증하고 반영한 모든 recrutPblntSn. 새로 넣은 것과 이미 있던 것을 모두 포함한다.
- *  수정할 수 없는 정렬된 집합이고, 페이지 안 중복은 DUPLICATE_SN으로 거부되므로 sns.size() == counts.received()다. */
-public record PageResult(Counts counts, SortedSet<Long> sns) {}
 public record RunResult(String result, Failure failure, Counts counts) {}   // result: COMPLETE | INCOMPLETE | FAILED
 public class IngestionException extends RuntimeException { public Failure failure(); }
 
@@ -43,8 +54,8 @@ public enum Failure {          // collect_run.result   // collect_run.error에�
 ```
 
 ## 2. 호출 조건 (호출자 = #4)
-- **트랜잭션 밖에서** 부른다. 안에서 부르면 `IllegalStateException`. 두 메서드가 직접 트랜잭션을 연다.
-- `body`: `list` 응답 본문 문자열 그대로. `applyRegular`은 `ongoingYn=Y&numOfRows=1000&pageNo=1` 응답을 기대한다.
+- `applyRegular`과 `upsertPage`는 **트랜잭션 밖에서** 부른다. 안에서 부르면 `IllegalStateException`. 두 메서드가 직접 트랜잭션을 연다. `parsePage`는 DB에 접근하지 않으므로 어디서 불러도 된다.
+- `body`: `list` 응답 본문 문자열 그대로. `null`(빈 본문)이면 `NON_JSON`이다. `applyRegular`은 `ongoingYn=Y&numOfRows=1000&pageNo=1` 응답을 기대한다.
 - `observedAt`: 호출자의 `clock.instant()`. 마감 판정의 "오늘"은 `observedAt`을 `Clock` 빈의 시간대(Asia/Seoul)로 바꾼 날짜다. 공고의 `first_seen_at`, `last_seen_at`, `last_changed_at`, `posting_change.observed_at`이 이 값이다.
 - `runId`: #4가 선점(ADR-0003 INSERT)해서 얻은 `collect_run.id`. 그 행은 `result IS NULL`이어야 한다.
 
@@ -61,13 +72,16 @@ public enum Failure {          // collect_run.result   // collect_run.error에�
 마지막 완전 수집 시각(`max(finished_at) WHERE kind='REGULAR' AND result='COMPLETE'`)은 COMPLETE일 때만 바뀐다.
 
 ### `upsertPage` (최초 적재)
-- 한 트랜잭션. **행 하나라도 `Failure`에 걸리면 페이지 전체를 반영하지 않고 `IngestionException`을 던진다.** 호출자는 그 달을 `INCOMPLETE` 또는 `FAILED`로 기록하고, **건너뛰고 COMPLETE로 처리하면 안 된다**(codex 지시).
-- 페이지 단위라서 `COUNT_MISMATCH`, `EMPTY_SNAPSHOT`은 검사하지 않는다. 호출자는 반환값으로 월 단위를 검사한다.
-  - `counts.totalCount`: 그 페이지 응답의 `totalCount`(월 전체 건수).
-  - `sns`: 그 페이지의 고유 공고 번호. 여러 페이지의 `sns` 합집합 크기가 월의 고유 수이고, 페이지끼리 겹치는 번호가 페이지 간 중복이다.
-  - `counts.inserted`는 **DB에 없던 행만** 센다. 이미 저장된 공고가 다시 오면 0이 되므로 고유 수 계산에 쓰면 안 된다.
-  - **같은 본문을 #4에서 다시 파싱하지 않는다.** 한 번 파싱해서 한 번 반영하고 그 결과를 돌려준다.
-- 빈 페이지(`totalCount = 0`, `result = []`)는 `PageResult(Counts(0, 0, 0, 0, 0), {})`로 정상 반환한다.
+순서는 **`parsePage` → 호출자 검사 → `upsertPage`**다.
+- `parsePage`: **행 하나라도 `Failure`에 걸리면 `IngestionException`을 던진다.** DB에 아무것도 쓰지 않는다. 호출자는 그 달을 `INCOMPLETE` 또는 `FAILED`로 기록하고, **건너뛰고 COMPLETE로 처리하면 안 된다**(codex 지시).
+- 페이지 단위라서 `COUNT_MISMATCH`, `EMPTY_SNAPSHOT`은 코어가 검사하지 않는다. 호출자가 **반영 전에** `ParsedPage`로 검사한다(v3, codex 11 결정 1번).
+  - `totalCount()`: 그 페이지 응답의 `totalCount`. 앞 페이지와 다르면 월 총수가 바뀐 것이다.
+  - `sns()`: 그 페이지의 고유 공고 번호. 크기가 기대 페이지 크기(`min(1000, totalCount − (pageNo − 1) × 1000)`)와 같아야 하고, 앞 페이지들의 번호와 겹치면 페이지 간 중복이다. 여러 페이지 `sns()`의 합집합 크기가 월의 고유 수다.
+  - `beginsWithin(from, to)`: 요청한 기간 밖에서 시작한 행이 있으면 false.
+  - 하나라도 어긋나면 **`upsertPage`를 부르지 않는다.** 그래서 실패 페이지에 섞인 기존 공고의 변경도 커밋되지 않는다.
+- `upsertPage`: 한 트랜잭션. 반환 `Counts`의 `inserted`는 **DB에 없던 행만** 센다. 이미 저장된 공고가 다시 오면 0이 되므로 고유 수 계산에 쓰면 안 된다.
+- **같은 본문을 #4에서 다시 파싱하지 않는다.** `parsePage` 한 번, `upsertPage` 한 번이다.
+- 빈 페이지(`totalCount = 0`, `result = []`)는 `sns()`가 비어 있고 `upsertPage`가 `Counts(0, 0, 0, 0, 0)`을 돌려준다.
 - 새 행은 `from_backfill = true`. 이미 있는 행은 정기 수집과 같은 규칙으로 비교·갱신하고 `from_backfill`은 바꾸지 않는다.
 - 응답에 없는 행의 누락 판정(CHECK)은 하지 않는다. `collect_run`은 건드리지 않는다.
 - `resultCode`가 200이 아니면(공식 문서의 3번 등 의미 미확인 코드 포함) `RESULT_CODE_NOT_OK`다. 빈 달이 200 + 빈 배열로 오는지 3번으로 오는지는 #4가 실응답으로 확인한다.
