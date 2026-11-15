@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="ko" xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments/layout :: head}"></head>
+<body>
+<header th:replace="~{fragments/layout :: header}"></header>
+<main id="main" class="container py-4 py-md-5">
+  <div class="d-flex flex-column flex-md-row justify-content-between align-items-md-end gap-2 mb-4">
+    <div>
+      <p class="eyebrow mb-1">기관별 최근 3년 채용 이력</p>
+      <h1 class="fw-bold mb-1" th:text="${institution.summary.name}">기관명</h1>
+      <p class="small text-secondary mb-0"
+         th:text="${'기준 기간: 최근 3년 (' + #temporals.format(institution.summary.fromDate, 'yyyy-MM-dd') + ' ~ ' + #temporals.format(institution.summary.toDate, 'yyyy-MM-dd') + ', 오늘까지 시작한 공고 기준)'}">기준 기간</p>
+      <p class="small text-secondary mb-0 mt-1">
+        공고 시작일이 오늘 이후인 예정 공고는 목록 화면에서 먼저 볼 수 있으며, 시작일이 도래하기 전까지 이력 통계와 목록에는 포함되지 않습니다.
+      </p>
+    </div>
+    <a class="btn btn-outline-primary btn-sm flex-shrink-0"
+       href="https://job.alio.go.kr/orgcompare.do"
+       target="_blank"
+       rel="noopener noreferrer">잡알리오 기관비교 →</a>
+  </div>
+
+  <div class="row g-3 mb-4">
+    <div class="col-12 col-md-5">
+      <div class="border rounded-4 bg-white p-3 h-100">
+        <div class="small text-secondary">최근 3년 고유 공고 수</div>
+        <div class="h3 fw-bold mb-0 mt-1" th:text="${institution.summary.totalPostings + '건'}">0건</div>
+      </div>
+    </div>
+    <div class="col-12 col-md-7">
+      <div class="border rounded-4 bg-white p-3 h-100">
+        <div class="small text-secondary">최근 3년 공고상 모집 예정 인원 합계</div>
+        <div class="h3 fw-bold mb-1 mt-1" th:text="${institution.summary.totalPlannedRecruits + '명'}">0명</div>
+        <div class="small text-secondary"
+             th:text="${'숫자로 확인되지 않은 공고 ' + institution.summary.excludedRecruitCount + '건 제외'}">제외 건수</div>
+      </div>
+    </div>
+  </div>
+
+  <section class="mb-4" aria-labelledby="yearly-recruit-heading">
+    <h2 id="yearly-recruit-heading" class="h5 fw-bold mb-2">연도별 공고상 모집 예정 인원 합계</h2>
+    <div th:if="${#lists.isEmpty(institution.yearlyRecruits)}" class="empty-state">
+      최근 3년간 수집된 공고가 없습니다.
+    </div>
+    <div th:unless="${#lists.isEmpty(institution.yearlyRecruits)}" class="table-responsive bg-white border rounded-4">
+      <table class="table table-sm align-middle mb-0 small">
+        <thead class="table-light">
+        <tr>
+          <th scope="col">연도</th>
+          <th scope="col" class="text-end">고유 공고 수</th>
+          <th scope="col" class="text-end">공고상 모집 예정 인원 합계</th>
+          <th scope="col" class="text-end">비숫자 제외 건수</th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr th:each="row : ${institution.yearlyRecruits}">
+          <th scope="row" th:text="${row.year + '년'}">2026년</th>
+          <td class="text-end" th:text="${row.postingCount + '건'}">0건</td>
+          <td class="text-end fw-semibold" th:text="${row.plannedRecruits + '명'}">0명</td>
+          <td class="text-end text-secondary" th:text="${row.excludedCount + '건'}">0건</td>
+        </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="mb-4" aria-labelledby="pattern-heading">
+    <h2 id="pattern-heading" class="h5 fw-bold mb-2">시기 패턴 (연도별 월별 공고 수)</h2>
+    <div class="table-responsive bg-white border rounded-4">
+      <table class="table table-sm text-center align-middle mb-0 small">
+        <thead class="table-light">
+        <tr>
+          <th scope="col">연도</th>
+          <th scope="col" th:each="m : ${#numbers.sequence(1, 12)}" th:text="${m + '월'}">1월</th>
+          <th scope="col">합계</th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr th:each="row : ${institution.monthlyPatterns}">
+          <th scope="row" class="text-nowrap" th:text="${row.year}">2026</th>
+          <td th:each="cnt : ${row.monthCounts}"
+              th:text="${cnt}"
+              th:classappend="${cnt > 0} ? 'fw-semibold text-dark' : 'text-secondary'">0</td>
+          <td class="fw-bold" th:text="${row.yearTotal}">0</td>
+        </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="mb-4" aria-labelledby="ncs-dist-heading">
+    <h2 id="ncs-dist-heading" class="h5 fw-bold mb-1">직무(NCS) 분포</h2>
+    <p class="small text-secondary mb-2">
+      다중 직무가 지정된 공고는 각 직무에 모두 포함되므로, 직무별 건수의 합이 전체 고유 공고 수보다 클 수 있습니다.
+    </p>
+    <div th:if="${#lists.isEmpty(institution.ncsDistribution)}" class="empty-state">
+      최근 3년간 집계된 NCS 직무 정보가 없습니다.
+    </div>
+    <div th:unless="${#lists.isEmpty(institution.ncsDistribution)}" class="table-responsive bg-white border rounded-4">
+      <table class="table table-sm align-middle mb-0 small">
+        <thead class="table-light">
+        <tr>
+          <th scope="col">NCS 코드</th>
+          <th scope="col">직무명</th>
+          <th scope="col" class="text-end">공고 수</th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr th:each="row : ${institution.ncsDistribution}">
+          <td class="text-secondary text-nowrap" th:text="${row.code}">R600020</td>
+          <td th:text="${row.name}">정보통신</td>
+          <td class="text-end fw-semibold" th:text="${row.postingCount + '건'}">0건</td>
+        </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section aria-labelledby="history-heading">
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+      <h2 id="history-heading" class="h5 fw-bold mb-0">공고 이력</h2>
+      <span class="small text-secondary" th:text="${'전체 ' + institution.history.totalCount + '건'}">0건</span>
+    </div>
+    <div th:if="${#lists.isEmpty(institution.history.items)}" class="empty-state">
+      최근 3년간 공고 이력이 없습니다.
+    </div>
+    <div th:unless="${#lists.isEmpty(institution.history.items)}">
+      <div class="table-responsive d-none d-md-block bg-white border rounded-4">
+        <table class="table table-hover align-middle mb-0 small">
+          <thead class="table-light">
+          <tr>
+            <th scope="col">시작일</th>
+            <th scope="col">공고 제목</th>
+            <th scope="col">구분</th>
+            <th scope="col">마감일</th>
+            <th scope="col">상태</th>
+          </tr>
+          </thead>
+          <tbody>
+          <tr th:each="job : ${institution.history.items}">
+            <td class="text-nowrap" th:text="${job.bgngDate}">시작일</td>
+            <td>
+              <a class="fw-semibold text-dark text-decoration-none job-card-title"
+                 th:href="@{/jobs/{sn}(sn=${job.sn})}"
+                 th:text="${job.title}">제목</a>
+            </td>
+            <td class="text-nowrap" th:text="${job.recrutSeLabel}">구분</td>
+            <td class="text-nowrap" th:text="${job.endDate}">마감일</td>
+            <td class="text-nowrap">
+              <span class="badge"
+                    th:classappend="${job.effectiveStatus == 'OPEN'} ? 'text-bg-success' : (${job.effectiveStatus == 'CHECK'} ? 'text-bg-warning' : 'text-bg-secondary')"
+                    th:text="${job.statusLabel}">상태</span>
+            </td>
+          </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="d-md-none d-flex flex-column gap-2">
+        <article class="card border-secondary-subtle" th:each="job : ${institution.history.items}">
+          <div class="card-body py-3">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-1 small">
+              <span class="text-secondary" th:text="${#temporals.format(job.bgngDate, 'yyyy-MM-dd') + ' ~ ' + #temporals.format(job.endDate, 'yyyy-MM-dd')}">기간</span>
+              <span class="badge"
+                    th:classappend="${job.effectiveStatus == 'OPEN'} ? 'text-bg-success' : (${job.effectiveStatus == 'CHECK'} ? 'text-bg-warning' : 'text-bg-secondary')"
+                    th:text="${job.statusLabel}">상태</span>
+            </div>
+            <a class="fw-semibold text-dark text-decoration-none job-card-title d-block"
+               th:href="@{/jobs/{sn}(sn=${job.sn})}"
+               th:text="${job.title}">제목</a>
+            <span class="badge text-bg-light mt-1" th:text="${job.recrutSeLabel}">구분</span>
+          </div>
+        </article>
+      </div>
+
+      <nav th:if="${institution.history.totalPages > 1}" aria-label="기관 공고 이력 페이지" class="mt-3">
+        <ul class="pagination pagination-sm justify-content-center flex-wrap">
+          <li class="page-item" th:classappend="${!institution.history.hasPrev()} ? 'disabled'">
+            <a class="page-link"
+               th:href="@{/institutions/{code}(code=${institution.summary.code}, page=${institution.history.page - 1 > 1 ? institution.history.page - 1 : null})}">이전</a>
+          </li>
+          <li class="page-item"
+              th:each="p : ${pageNumbers}"
+              th:classappend="${p == institution.history.page} ? 'active'">
+            <a class="page-link"
+               th:href="@{/institutions/{code}(code=${institution.summary.code}, page=${p > 1 ? p : null})}"
+               th:text="${p}">1</a>
+          </li>
+          <li class="page-item" th:classappend="${!institution.history.hasNext()} ? 'disabled'">
+            <a class="page-link"
+               th:href="@{/institutions/{code}(code=${institution.summary.code}, page=${institution.history.page + 1})}">다음</a>
+          </li>
+        </ul>
+      </nav>
+    </div>
+  </section>
+</main>
+<footer th:replace="~{fragments/layout :: footer}"></footer>
+</body>
+</html>
