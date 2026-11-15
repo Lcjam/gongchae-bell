@@ -49,6 +49,15 @@ class RecruitmentClientTest {
         assertThat(query).contains("serviceKey=fixture%2B%2F%3D+key","resultType=json","ongoingYn=Y","pageNo=1","numOfRows=1000");
         verify(budget).reserve("REGULAR",1); verify(budget).finish(1,"SUCCESS");
     }
+    @Test void encodingOrDecodingFormOfTheKeyGoesOnTheWireEncodedExactlyOnce() {
+        responds(200,"fixture-body");
+        for(String configured:new String[]{"fixture+/= key","fixture%2B%2F%3D%20key","fixture%2b%2f%3d%20key"}) {
+            var key=new CollectorProperties(true,configured,0,0,false,null,null,null,false).serviceKey();
+            new RecruitmentClient(http,budget,key,URI.create("http://127.0.0.1:"+server.getAddress().getPort()+"/"),delays::add,Clock.systemUTC(),
+                    Duration.ofSeconds(1)).regularList();
+            assertThat(query).as(configured).startsWith("serviceKey=fixture%2B%2F%3D+key&");
+        }
+    }
     @Test void backfillUsesMonthBoundariesAndNeverRequestsDetails() {
         responds(200,"fixture-body");
         client(Duration.ofSeconds(1)).backfillList(LocalDate.of(2024,2,1),LocalDate.of(2024,2,29),2);
