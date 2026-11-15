@@ -213,6 +213,33 @@ class RuntimeDatabaseTest {
         for(int i=0;i<share;i++) budget.reserve("REGULAR");
         assertThatThrownBy(()->budget.reserve("REGULAR")).hasMessage("BUDGET_EXHAUSTED");
     }
+    @Test void unexpectedDetailErrorsMarkThePostingFailedAndStopAtTheCap() {
+        posting(); var client=org.mockito.Mockito.mock(RecruitmentClient.class);
+        org.mockito.Mockito.when(client.detail(42)).thenThrow(new IllegalStateException("unexpected"));
+        var collector=new DetailCollector(jdbc,client,new CollectionRuns(jdbc,clock,manager),new AdvisoryLease(dataSource),clock);
+        collector.collect("slot1");
+        assertThat(jdbc.sql("SELECT detail_status FROM posting WHERE sn=42").query(String.class).single()).isEqualTo("FAILED");
+        for(int slot=2;slot<=5;slot++) collector.collect("slot"+slot);
+        org.mockito.Mockito.verify(client,org.mockito.Mockito.times(DetailCollector.MAX_FAILURES)).detail(42);
+        assertThat(jdbc.sql("SELECT error FROM collect_run WHERE kind='DETAIL' ORDER BY id").query(String.class).list())
+                .containsExactly("INGESTION_FAILED","INGESTION_FAILED","INGESTION_FAILED");
+        assertThat(jdbc.sql("SELECT detail_status FROM posting WHERE sn=42").query(String.class).single()).isEqualTo("FAILED");
+    }
+    @Test void officialDetailSampleIsStoredWithoutWrappers() throws Exception {
+        jdbc.sql("TRUNCATE institution CASCADE").update();
+        jdbc.sql("INSERT INTO institution(code,name) VALUES ('C0008','fixture')").update();
+        jdbc.sql("""
+                INSERT INTO posting(sn,inst_code,title,bgng_date,end_date,status,from_backfill,content_hash,first_seen_at,last_seen_at)
+                VALUES (307032,'C0008','fixture','2026-11-13','2026-11-20','OPEN',false,'fixture',now(),now())
+                """).update();
+        var collector=new DetailCollector(jdbc,org.mockito.Mockito.mock(RecruitmentClient.class),
+                new CollectionRuns(jdbc,clock,manager),new AdvisoryLease(dataSource),clock);
+        collector.save(307032,java.nio.file.Files.readString(java.nio.file.Path.of("fixtures/alio-official-detail-sample.json")));
+        assertThat(jdbc.sql("""
+                SELECT detail_status||'|'||jsonb_array_length(steps)||'|'||jsonb_array_length(files)||'|'||(steps->0->>'recrutStepSn' IS NOT NULL)
+                  ||'|'||(files->0->>'atchFileNm' IS NOT NULL) FROM posting WHERE sn=307032""").query(String.class).single())
+                .isEqualTo("DONE|4|3|true|true");
+    }
     void posting() {
         jdbc.sql("TRUNCATE institution CASCADE").update();
         jdbc.sql("INSERT INTO institution(code,name) VALUES ('TEST','fixture')").update();

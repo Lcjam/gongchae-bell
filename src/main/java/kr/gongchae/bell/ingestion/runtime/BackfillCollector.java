@@ -47,9 +47,11 @@ public class BackfillCollector {
             } catch(IngestionException failure) {
                 runs.finish(run.get(),failure.failure().result(),failure.failure().name(),total,received,periodSns.size());throw failure;
             } catch(CollectionFailure failure) {
-                runs.fail(run.get(),failure.code());throw failure;
+                // Totals cover completed months only; the failing month's detail is on its month and page rows.
+                runs.finish(run.get(),"FAILED",failure.code().name(),total,received,periodSns.size());throw failure;
             } catch(RuntimeException failure) {
-                runs.fail(run.get(),CollectionFailure.Code.INGESTION_FAILED);throw new CollectionFailure(CollectionFailure.Code.INGESTION_FAILED);
+                runs.finish(run.get(),"FAILED",CollectionFailure.Code.INGESTION_FAILED.name(),total,received,periodSns.size());
+                throw new CollectionFailure(CollectionFailure.Code.INGESTION_FAILED);
             }
         }
     }
@@ -62,20 +64,21 @@ public class BackfillCollector {
             for(int number=1;;number++) {
                 lease.verify();
                 var checkpoint=restartPages?java.util.Optional.<CollectionRuns.Page>empty():runs.completedPage(month.from(),month.to(),number);
+                CollectionRuns.Page accepted;
                 if(checkpoint.isPresent()) {
-                    var saved=checkpoint.get();
-                    expected=validate(saved,number,expected,seen);received+=saved.received();
+                    accepted=checkpoint.get();
+                    validate(accepted,number,expected,seen);
                 } else {
                     long page=runs.claim("BACKFILL",slot+"/"+month.from()+"/"+number).orElseThrow();
                     runs.metadata(page,period.from(),period.to(),month.from(),month.to(),number);
                     try {
                         // Every check runs before upsertPage, so a rejected page changes no posting (contract v3).
                         var parsed=ingestor.parsePage(client.backfillList(month.from(),month.to(),number));
-                        expected=validate(new CollectionRuns.Page(parsed.totalCount(),parsed.sns().size(),parsed.sns()),number,expected,seen);
+                        accepted=new CollectionRuns.Page(parsed.totalCount(),parsed.sns().size(),parsed.sns());
+                        validate(accepted,number,expected,seen);
                         if(!parsed.beginsWithin(month.from(),month.to())) throw new CollectionFailure(CollectionFailure.Code.BACKFILL_RANGE_MISMATCH);
                         var counts=ingestor.upsertPage(parsed,clock.instant());
                         runs.completePage(page,counts.totalCount(),counts.received(),counts.inserted(),counts.changed(),counts.closed(),parsed.sns());
-                        received+=counts.received();
                     } catch(IngestionException failure) {
                         runs.finish(page,failure.failure().result(),failure.failure().name(),null,null,null);throw failure;
                     } catch(CollectionFailure failure) {
@@ -84,6 +87,8 @@ public class BackfillCollector {
                         runs.fail(page,CollectionFailure.Code.INGESTION_FAILED);throw new CollectionFailure(CollectionFailure.Code.INGESTION_FAILED);
                     }
                 }
+                // Counted only once checked, applied and checkpointed: a rejected page leaves the month's totals as they were.
+                expected=accepted.total();received+=accepted.received();seen.addAll(accepted.sns());
                 if(received==expected) break;
             }
             if(seen.size()!=expected) throw new CollectionFailure(CollectionFailure.Code.BACKFILL_DUPLICATE_SN);
@@ -93,16 +98,17 @@ public class BackfillCollector {
         } catch(CollectionFailure failure) {
             runs.finish(run,"FAILED",failure.code().name(),expected<0?null:expected,received,seen.size());throw failure;
         } catch(RuntimeException failure) {
-            runs.fail(run,CollectionFailure.Code.INGESTION_FAILED);throw new CollectionFailure(CollectionFailure.Code.INGESTION_FAILED);
+            runs.finish(run,"FAILED",CollectionFailure.Code.INGESTION_FAILED.name(),expected<0?null:expected,received,seen.size());
+            throw new CollectionFailure(CollectionFailure.Code.INGESTION_FAILED);
         }
     }
-    private int validate(CollectionRuns.Page page,int number,int expected,Set<Long> seen) {
+    /** Checks a page against the pages accepted so far without changing them. */
+    private static void validate(CollectionRuns.Page page,int number,int expected,Set<Long> seen) {
         if(expected>=0 && expected!=page.total()) throw new CollectionFailure(CollectionFailure.Code.BACKFILL_COUNT_CHANGED);
         long remaining=(long)page.total()-(number-1L)*1000;
         int wanted=(int)Math.min(1000,Math.max(0,remaining));
         if(page.total()<0 || page.received()!=wanted || page.sns().size()!=page.received())
             throw new CollectionFailure(CollectionFailure.Code.BACKFILL_PAGE_MISMATCH);
-        for(long sn:page.sns()) if(!seen.add(sn)) throw new CollectionFailure(CollectionFailure.Code.BACKFILL_DUPLICATE_SN);
-        return page.total();
+        for(long sn:page.sns()) if(seen.contains(sn)) throw new CollectionFailure(CollectionFailure.Code.BACKFILL_DUPLICATE_SN);
     }
 }

@@ -87,5 +87,5 @@
 ## 5. 비밀값 점검 및 변경 범위 확인
 
 - Python 교차 검사: 저장한 `fixtures/alio-official-*.json` 3건에서 `.env`의 `COLLECTOR_SERVICE_KEY`(원문·디코딩·재인코딩 및 16자 접두사)·`DB_USER`·`DB_PASSWORD` 부분문자열 `secret_hits=0`.
-- `gitleaks dir --redact` 검사 통과 후 커밋·푸시 없이 로컬 `docs/#4-official-fixtures` 브랜치에만 보존한다.
+- `gitleaks dir --redact` 검사 통과 후 로컬 `docs/#4-official-fixtures` 브랜치의 **로컬 커밋 `b95fa67`**(2026-11-15 14:44:33 KST)로 보존했다. 원격에는 push하지 않았다. (2026-11-15 claude 정정: 원래 문구 "커밋·푸시 없이 보존"은 사실과 달랐다. Sol 검수 지적. `git ls-remote origin`에 이 브랜치가 없음을 확인했다. #4 브랜치에는 claude가 `5b78c55`·`b95fa67`을 cherry-pick해 옮겼다.)
 - 앱 소스(`src/`), 설정(`application.yml`), Flyway 스크립트, 원본 `.env`, Claude 수정 브랜치(`feat/#3-ingestion-core`, `feat/#4-collector-runtime`), 3년 전체 적재 모두 건드리지 않았다.

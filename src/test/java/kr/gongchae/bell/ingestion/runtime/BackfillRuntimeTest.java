@@ -76,16 +76,22 @@ class BackfillRuntimeTest {
     }
     @Test void rejectedPagesCommitNoChangeToStoredPostings() {
         var from=LocalDate.of(2026,11,1);var to=LocalDate.of(2026,11,30);var period=new BackfillRange(from,to);
-        var first=page(1001,1000,100,"20261101");
         var cases=new java.util.LinkedHashMap<String,Runnable>();
+        // Expected month row after the failure: only pages accepted before it count (total|received|unique).
+        var monthRow=new java.util.HashMap<String,String>();
         cases.put("BACKFILL_RANGE_MISMATCH",()->when(client.backfillList(from,to,1))
                 .thenReturn(page(2,row(100,"20261101","바뀐 제목"),row(5000,"20261031","기간 밖"))));
-        cases.put("BACKFILL_COUNT_CHANGED",()->{when(client.backfillList(from,to,1)).thenReturn(first);
+        monthRow.put("BACKFILL_RANGE_MISMATCH","null|0|0");
+        cases.put("BACKFILL_COUNT_CHANGED",()->{when(client.backfillList(from,to,1)).thenReturn(page(1001,1000,100,"20261101"));
                 when(client.backfillList(from,to,2)).thenReturn(page(1002,row(100,"20261101","바뀐 제목"),row(5000,"20261101","새 공고")));});
-        cases.put("BACKFILL_DUPLICATE_SN",()->{when(client.backfillList(from,to,1)).thenReturn(first);
-                when(client.backfillList(from,to,2)).thenReturn(page(1001,row(100,"20261101","바뀐 제목")));});
+        monthRow.put("BACKFILL_COUNT_CHANGED","1001|1000|1000");
+        // sn 50 is new and checked before the duplicate 100: it must not reach the month's SN set.
+        cases.put("BACKFILL_DUPLICATE_SN",()->{when(client.backfillList(from,to,1)).thenReturn(page(1002,1000,100,"20261101"));
+                when(client.backfillList(from,to,2)).thenReturn(page(1002,row(50,"20261101","새 공고"),row(100,"20261101","바뀐 제목")));});
+        monthRow.put("BACKFILL_DUPLICATE_SN","1002|1000|1000");
         cases.put("BACKFILL_PAGE_MISMATCH",()->when(client.backfillList(from,to,1))
                 .thenReturn(page(3,row(100,"20261101","바뀐 제목"),row(5000,"20261101","새 공고"))));
+        monthRow.put("BACKFILL_PAGE_MISMATCH","null|0|0");
         cases.forEach((expected,stub)->{
             jdbc.sql("TRUNCATE institution,collect_run RESTART IDENTITY CASCADE").update();
             ingestor.upsertPage(ingestor.parsePage(page(1,1,100,"20261101")),clock.instant());
@@ -94,10 +100,35 @@ class BackfillRuntimeTest {
             String before=jdbc.sql(stored).query(String.class).single();
             assertThatThrownBy(()->collector().collect("rejected",period,false)).as(expected).hasMessage(expected);
             assertThat(jdbc.sql(stored).query(String.class).single()).as(expected).isEqualTo(before);
-            assertThat(jdbc.sql("SELECT count(*) FROM posting WHERE sn=5000").query(Integer.class).single()).as(expected).isZero();
+            assertThat(jdbc.sql("SELECT count(*) FROM posting WHERE sn IN (50,5000)").query(Integer.class).single()).as(expected).isZero();
             assertThat(jdbc.sql("SELECT count(*) FROM posting_change").query(Integer.class).single()).as(expected).isZero();
             assertThat(jdbc.sql("SELECT result FROM collect_run WHERE slot='rejected/2026-11-01'").query(String.class).single()).as(expected).isEqualTo("FAILED");
+            assertThat(jdbc.sql("SELECT coalesce(total_count::text,'null')||'|'||received||'|'||unique_count FROM collect_run WHERE slot='rejected/2026-11-01'")
+                    .query(String.class).single()).as(expected).isEqualTo(monthRow.get(expected));
         });
+    }
+    @Test void failedCommandKeepsCompletedMonthTotalsAndTheFailingMonthIsOnItsOwnRows() {
+        var oct=LocalDate.of(2026,10,1);var nov=LocalDate.of(2026,11,1);var to=LocalDate.of(2026,11,30);var period=new BackfillRange(oct,to);
+        when(client.backfillList(oct,LocalDate.of(2026,10,31),1)).thenReturn(page(1,1,10,"20261001"));
+        when(client.backfillList(nov,to,1)).thenThrow(new CollectionFailure(CollectionFailure.Code.HTTP_STATUS))
+                .thenThrow(new IllegalStateException("unexpected"));
+        assertThatThrownBy(()->collector().collect("http",period,false)).hasMessage("HTTP_STATUS");
+        assertThatThrownBy(()->collector().collect("crash",period,false)).hasMessage("INGESTION_FAILED");
+        var row="SELECT result||'|'||error||'|'||coalesce(total_count::text,'null')||'|'||coalesce(received::text,'null')||'|'||coalesce(unique_count::text,'null') FROM collect_run WHERE slot=:slot";
+        java.util.function.Function<String,String> record=slot->jdbc.sql(row).param("slot",slot).query(String.class).single();
+        assertThat(record.apply("command/http")).isEqualTo("FAILED|HTTP_STATUS|1|1|1");
+        assertThat(record.apply("command/crash")).as("October is reused from its month row").isEqualTo("FAILED|INGESTION_FAILED|1|1|1");
+        assertThat(record.apply("http/2026-11-01")).isEqualTo("FAILED|HTTP_STATUS|null|0|0");
+        assertThat(record.apply("http/2026-11-01/1")).isEqualTo("FAILED|HTTP_STATUS|null|null|null");
+        assertThat(record.apply("crash/2026-11-01")).isEqualTo("FAILED|INGESTION_FAILED|null|0|0");
+        assertThat(jdbc.sql("SELECT result FROM collect_run WHERE slot='http/2026-10-01'").query(String.class).single()).isEqualTo("COMPLETE");
+    }
+    @Test void officialEmptyPeriodResponseCompletesAMonthWithZeroPostings() throws Exception {
+        var from=LocalDate.of(2010,1,1);var to=LocalDate.of(2010,1,31);
+        when(client.backfillList(from,to,1)).thenReturn(Files.readString(Path.of("fixtures/alio-official-list-empty-sample.json")));
+        assertThat(collector().collect("official-empty",new BackfillRange(from,to),false)).isEqualTo(BackfillCollector.Outcome.COMPLETE);
+        assertThat(jdbc.sql("SELECT total_count||'|'||received||'|'||unique_count||'|'||received_sns::text FROM collect_run WHERE slot='official-empty/2010-01-01'")
+                .query(String.class).single()).isEqualTo("0|0|0|[]");
     }
     @Test void resumesFailedPageSkipsCompletedMonthAndPreservesExactUniqueIdsWithAlreadyStoredRows() {
         var from=LocalDate.of(2026,10,1);var to=LocalDate.of(2026,11,30);var period=new BackfillRange(from,to);

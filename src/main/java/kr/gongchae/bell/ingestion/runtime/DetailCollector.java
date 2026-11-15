@@ -12,8 +12,9 @@ import tools.jackson.databind.json.JsonMapper;
 public class DetailCollector {
     /** Initial values (ADR-0014): a posting stops being retried after this many failed detail runs. */
     static final int MAX_FAILURES=3;
-    /** Initial values (ADR-0014): one sweep never holds the hourly schedule longer than this. */
+    /** Initial values (ADR-0014): no new detail request starts after 30 postings or 10 minutes into a sweep. */
     static final int MAX_PER_SWEEP=30;
+    /** Not a hard stop: a request already started may add up to about 150 s (3 x 10 s timeouts + two 60 s Retry-After waits). */
     static final Duration MAX_SWEEP=Duration.ofMinutes(10);
     /** Failed detail runs of posting p. A budget stop or shutdown is not the posting's failure. */
     static final String FAILURES="""
@@ -45,12 +46,14 @@ public class DetailCollector {
                 try {
                     save(sn,client.detail(sn));
                     runs.finish(run.get(),"COMPLETE",null,1,1,1);
-                } catch(CollectionFailure failure) {
-                    if(failure.code()!=CollectionFailure.Code.BUDGET_EXHAUSTED) failed(sn);
-                    runs.fail(run.get(),failure.code());
-                    if(failure.code()==CollectionFailure.Code.BUDGET_EXHAUSTED || failure.code()==CollectionFailure.Code.INTERRUPTED) return;
                 } catch(RuntimeException failure) {
-                    runs.fail(run.get(),CollectionFailure.Code.INGESTION_FAILED);
+                    // The one place a failed detail is recorded. A budget stop or shutdown ends the sweep and, like
+                    // FAILURES, is not held against the posting; anything else marks it FAILED (a DONE one stays DONE).
+                    var code=failure instanceof CollectionFailure known?known.code():CollectionFailure.Code.INGESTION_FAILED;
+                    boolean stop=code==CollectionFailure.Code.BUDGET_EXHAUSTED || code==CollectionFailure.Code.INTERRUPTED;
+                    if(!stop) failed(sn);
+                    runs.fail(run.get(),code);
+                    if(stop) return;
                 }
             }
         }
@@ -72,10 +75,8 @@ public class DetailCollector {
                       detail_collected_at=:at WHERE sn=:sn AND detail_status<>'DONE'
                     """).param("steps",json.writeValueAsString(steps)).param("files",json.writeValueAsString(files))
                     .param("at",OffsetDateTime.now(clock)).param("sn",sn).update();
-        } catch(CollectionFailure failure) {
-            failed(sn); throw failure;
         } catch(tools.jackson.core.JacksonException failure) {
-            failed(sn); throw invalid();
+            throw invalid();
         }
     }
     private void failed(long sn) {
