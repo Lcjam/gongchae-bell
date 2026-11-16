@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ko" xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments/layout :: head}"></head>
+<body>
+<header th:replace="~{fragments/layout :: header}"></header>
+<main id="main" class="container py-4 py-md-5" style="max-width: 720px;">
+  <h1 class="fw-bold mb-2">구독 관리</h1>
+  <p class="text-secondary mb-4">
+    <span th:text="${view.channel == 'EMAIL'} ? '이메일' : '디스코드'">이메일</span> ·
+    <span th:text="${view.target}">a***@example.com</span> ·
+    <span th:switch="${view.status}">
+      <span th:case="'ACTIVE'">알림 받는 중</span>
+      <span th:case="'PENDING'">확인 대기</span>
+      <span th:case="*">비활성화됨</span>
+    </span>
+  </p>
+  <div th:if="${error != null}" class="alert alert-danger py-2 small" role="alert" th:switch="${error}">
+    <span th:case="'kinds'">받을 알림을 하나 이상 고르세요.</span>
+    <span th:case="'q'">제목 검색어는 100자까지 입력할 수 있습니다.</span>
+    <span th:case="*">선택한 조건 중 사용할 수 없는 값이 있습니다. 다시 골라 주세요.</span>
+  </div>
+  <form method="post" th:action="@{/subscriptions/manage}" class="border rounded-4 bg-white p-3 p-md-4 mb-4">
+    <input type="hidden" name="t" th:value="${view.token}">
+    <input type="hidden" name="action" value="update">
+    <div th:replace="~{subscriptions/fragments :: conditions('manage')}"></div>
+    <button type="submit" class="btn btn-primary w-100" th:disabled="${view.status != 'ACTIVE'}">조건 저장</button>
+  </form>
+  <form method="post" th:action="@{/subscriptions/manage}" class="border rounded-4 bg-white p-3 p-md-4">
+    <input type="hidden" name="t" th:value="${view.token}">
+    <input type="hidden" name="action" value="unsubscribe">
+    <h2 class="h6 fw-bold">해지</h2>
+    <p class="small text-secondary">해지하면 구독 정보와 발송 기록을 바로 삭제합니다.</p>
+    <button type="submit" class="btn btn-outline-danger w-100">알림 해지</button>
+  </form>
+  <p class="small text-secondary mt-3">열람·정정·삭제 외의 요청은 <a th:href="@{/privacy}">개인정보처리방침</a>의 담당 연락처로 보내 주세요.</p>
+</main>
+<footer th:replace="~{fragments/layout :: footer}"></footer>
+</body>
+</html>

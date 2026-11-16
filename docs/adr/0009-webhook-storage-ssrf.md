@@ -8,3 +8,8 @@
   - **검증**: URL을 파싱해서 scheme `https`, 호스트가 정확히 `discord.com` 또는 `discordapp.com`, 기본 포트, 경로가 `/api/webhooks/{숫자}/{토큰}`, userinfo 없음을 확인한다
   - **전송**: JDK HttpClient(`Redirect.NEVER`). 전송 직전에 `InetAddress`로 조회한 모든 주소가 사설, 루프백, 링크로컬, 사이트로컬(IPv4/IPv6)이 아닌지 확인한다. `wait=true`, `allowed_mentions: {"parse": []}`
 - **결과**: 의존성이 없다. 남는 위험은 조회 시점과 연결 시점 사이의 DNS 변경인데, 허용 호스트가 디스코드 도메인으로 고정돼 있어서 디스코드 DNS를 공격자가 통제할 때만 생긴다. 유사 도메인, userinfo, IP 주소, 리다이렉트 입력을 테스트로 막는다. 키를 잃으면 디스코드 구독을 재등록해야 하므로 키 백업을 runbook에 둔다.
+
+## 개정 (2026-11-16, #6)
+- 호스트 `discordapp.com`도 받되 `discord.com`으로 정규화한다. 그래서 같은 웹훅의 두 표기가 `dest_hmac` 하나가 된다. 경로 토큰은 `[A-Za-z0-9._-]{1,100}`이고 쿼리·프래그먼트는 거부한다. 화면·로그·`toString`에는 토큰이 나오지 않는다.
+- 막는 주소: 루프백, any-local, 링크로컬, 사설(site-local), 멀티캐스트, 0/8, 100.64/10(CGNAT), 198.18/15, 255.x, IPv6 fc00::/7. IPv4-mapped IPv6는 IPv4로 검사한다. 조회에 실패해도 막는다. 3xx는 따르지 않고 실패로 본다.
+- 등록은 테스트를 먼저 한다. 2xx면 `ACTIVE` 행과 `DISCORD_TEST` 성공 기록을 함께 넣는다. 실패하면 웹훅에 관해 아무것도 저장하지 않는다. 이미 PENDING·ACTIVE인 웹훅에는 테스트를 보내지 않는다. 구현은 [#6 계약](../../collab/2026-11-16-implementation/claude-subscriptions-contract.md).

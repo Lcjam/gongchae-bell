@@ -2,7 +2,7 @@
 
 공공기관 채용공고에서 기관의 최근 3년 채용 이력까지 이어 보고, 관심 조건의 새 공고와 마감 임박 알림을 받는 서비스입니다.
 
-현재는 **M1 구현 중**입니다. 실행 기반, PostgreSQL 스키마, 공고 웹 화면(`/` · `/jobs` · `/jobs/{sn}` · `/institutions/{code}` · `/robots.txt` · `/sitemap.xml`)과 수집 실행기(정기 수집·시작일 기준 3년 최초 적재·상세 수집, 기본값 꺼짐 `COLLECTOR_ENABLED=false`)가 구현됐습니다. 최초 적재는 2026-11-15 로컬 개발 DB에서 2023-11-15~2026-11-15에 시작한 공고 36,768건으로 실측했습니다([실행 기록](collab/2026-11-15-backfill/agy-start-scan-result.md), [검수](collab/2026-11-15-backfill/codex-start-scan-review.md)). 알림·운영 기반·공개 배포는 아직 제공하지 않습니다. 전체 요구사항은 [PRD](docs/prd.md), 구조는 [아키텍처](docs/design/architecture.md), 작업은 [Issues](https://github.com/Lcjam/gongchae-bell/issues)에서 확인할 수 있습니다.
+현재는 **M1 구현 중**입니다. 실행 기반, PostgreSQL 스키마, 공고 웹 화면(`/` · `/jobs` · `/jobs/{sn}` · `/institutions/{code}` · `/robots.txt` · `/sitemap.xml`)과 수집 실행기(정기 수집·시작일 기준 3년 최초 적재·상세 수집, 기본값 꺼짐 `COLLECTOR_ENABLED=false`)가 구현됐습니다. 최초 적재는 2026-11-15 로컬 개발 DB에서 2023-11-15~2026-11-15에 시작한 공고 36,768건으로 실측했습니다([실행 기록](collab/2026-11-15-backfill/agy-start-scan-result.md), [검수](collab/2026-11-15-backfill/codex-start-scan-review.md)). 알림 구독(#6: 이메일·디스코드 신청, 확인, 관리, 해지, 기본 꺼짐 `ALERTS_ENABLED=false`)은 리뷰 중이고, 실제 공고 알림 발송(#7)·운영 기반·공개 배포는 아직 제공하지 않습니다. 전체 요구사항은 [PRD](docs/prd.md), 구조는 [아키텍처](docs/design/architecture.md), 작업은 [Issues](https://github.com/Lcjam/gongchae-bell/issues)에서 확인할 수 있습니다.
 
 ## 로컬 실행
 

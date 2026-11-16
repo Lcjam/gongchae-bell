@@ -121,26 +121,7 @@ public class CatalogRepository {
         Map<String, Object> params = new LinkedHashMap<>();
         params.put("today", kstToday);
 
-        if (criteria.ncs() != null) {
-            where.append(" AND EXISTS (SELECT 1 FROM posting_code pc WHERE pc.sn = p.sn AND pc.type = 'NCS' AND pc.code = :ncs)");
-            params.put("ncs", criteria.ncs());
-        }
-        if (criteria.region() != null) {
-            where.append(" AND EXISTS (SELECT 1 FROM posting_code pc WHERE pc.sn = p.sn AND pc.type = 'REGION' AND pc.code = :region)");
-            params.put("region", criteria.region());
-        }
-        if (criteria.hire() != null) {
-            where.append(" AND EXISTS (SELECT 1 FROM posting_code pc WHERE pc.sn = p.sn AND pc.type = 'HIRE' AND pc.code = :hire)");
-            params.put("hire", criteria.hire());
-        }
-        if (criteria.career() != null) {
-            switch (criteria.career()) {
-                case "newcomer" -> where.append(" AND p.recrut_se IN ('R2010', 'R2030')");
-                case "newonly" -> where.append(" AND p.recrut_se = 'R2010'");
-                case "career" -> where.append(" AND p.recrut_se = 'R2020'");
-                default -> { }
-            }
-        }
+        appendConditions(criteria, where, params);
         switch (criteria.status()) {
             case "open" -> where.append(" AND p.status IN ('OPEN', 'CHECK') AND p.end_date >= :today");
             case "check" -> where.append(" AND p.status = 'CHECK' AND p.end_date >= :today");
@@ -148,11 +129,6 @@ public class CatalogRepository {
             case "all" -> { }
             default -> where.append(" AND p.status IN ('OPEN', 'CHECK') AND p.end_date >= :today");
         }
-        if (criteria.q() != null) {
-            where.append(" AND p.title ILIKE :likePattern ESCAPE '\\'");
-            params.put("likePattern", criteria.likePattern());
-        }
-
         long totalCount = jdbc.sql("SELECT COUNT(*) FROM posting p" + where)
                 .params(params)
                 .query(Long.class)
@@ -182,6 +158,37 @@ public class CatalogRepository {
                 .list();
 
         return new JobSearchResult(attachCodes(rows, kstToday), totalCount, effectivePage, pageSize, totalPages);
+    }
+
+    /**
+     * The posting predicate shared by the list (#5) and subscription matching (#7): NCS, region, hire, career and the
+     * title query (ASCII case-insensitive literal substring). Status, sort and page are not part of it. Alias {@code p}.
+     */
+    public static void appendConditions(JobSearchCriteria criteria, StringBuilder where, Map<String, Object> params) {
+        if (criteria.ncs() != null) {
+            where.append(" AND EXISTS (SELECT 1 FROM posting_code pc WHERE pc.sn = p.sn AND pc.type = 'NCS' AND pc.code = :ncs)");
+            params.put("ncs", criteria.ncs());
+        }
+        if (criteria.region() != null) {
+            where.append(" AND EXISTS (SELECT 1 FROM posting_code pc WHERE pc.sn = p.sn AND pc.type = 'REGION' AND pc.code = :region)");
+            params.put("region", criteria.region());
+        }
+        if (criteria.hire() != null) {
+            where.append(" AND EXISTS (SELECT 1 FROM posting_code pc WHERE pc.sn = p.sn AND pc.type = 'HIRE' AND pc.code = :hire)");
+            params.put("hire", criteria.hire());
+        }
+        if (criteria.career() != null) {
+            switch (criteria.career()) {
+                case "newcomer" -> where.append(" AND p.recrut_se IN ('R2010', 'R2030')");
+                case "newonly" -> where.append(" AND p.recrut_se = 'R2010'");
+                case "career" -> where.append(" AND p.recrut_se = 'R2020'");
+                default -> { }
+            }
+        }
+        if (criteria.q() != null) {
+            where.append(" AND p.title ILIKE :likePattern ESCAPE '\\'");
+            params.put("likePattern", criteria.likePattern());
+        }
     }
 
     public boolean hasAnyPosting() {

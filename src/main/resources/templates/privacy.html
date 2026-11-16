@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="ko" xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments/layout :: head}"></head>
+<body>
+<header th:replace="~{fragments/layout :: header}"></header>
+<main id="main" class="container py-4 py-md-5" style="max-width: 800px;" th:with="unset='미정 (운영 시작 전 설정)'">
+  <h1 class="fw-bold mb-2">개인정보처리방침</h1>
+  <p class="text-secondary small mb-4">
+    버전 <span th:text="${privacy.policyVersion() ?: unset}">v1</span> ·
+    시행일 <span th:text="${privacy.effectiveDate() ?: unset}">2026-11-16</span>
+  </p>
+  <div th:unless="${alertsEnabled}" class="alert alert-secondary small" role="status">
+    알림 기능은 아직 운영하지 않으며 개인정보를 수집하지 않습니다. '미정'으로 표시된 항목은 운영을 시작하기 전에 확정해 이 문서에 적습니다.
+  </div>
+  <p>공채벨은 채용공고 조회에는 개인정보를 받지 않습니다. 알림을 신청한 경우에만 아래와 같이 개인정보를 처리합니다.</p>
+
+  <h2 class="h5 fw-bold mt-4">1. 처리 목적과 항목</h2>
+  <ul>
+    <li>목적: 관심 조건에 맞는 채용공고 알림 발송, 신청 확인, 구독 관리(조건 수정·해지·관리 링크 재발송)</li>
+    <li>이메일 알림: 이메일 주소, 관심 조건, 받을 알림 종류, 동의 문구 버전, 동의·확인 시각</li>
+    <li>디스코드 알림: 디스코드 웹훅 URL(AES-256-GCM으로 암호화해 저장), 같은 항목의 조건·종류·동의 기록</li>
+    <li>남용 방지: 접속 IP, 이메일 주소, 웹훅 URL의 HMAC 값과 요청 횟수. 원래 값은 저장하지 않습니다.</li>
+    <li>발송 기록: 발송 시도 시각과 결과 코드. 메일 본문과 링크 토큰은 저장하지 않습니다.</li>
+  </ul>
+
+  <h2 class="h5 fw-bold mt-4">2. 보유 기간과 파기</h2>
+  <ul>
+    <li>확인하지 않은 신청: 신청 후 24시간이 지나면 삭제</li>
+    <li>알림 받는 구독: 해지할 때까지. 해지하면 바로 구독 정보와 그 구독의 발송 기록을 삭제</li>
+    <li>발송이 막혀 비활성화된 구독: 비활성화 30일 뒤 삭제</li>
+    <li>발송 기록: 처리가 끝난 뒤 30일 뒤 삭제</li>
+    <li>남용 방지 값: 제한 기간(10분 또는 1시간)이 끝난 뒤 정리 주기(5분) 안에 삭제</li>
+    <li>위 삭제는 서비스가 실행되는 동안 정해진 주기로 수행합니다. 서비스가 멈춰 있던 동안의 삭제는 다시 시작한 뒤에 수행합니다.</li>
+    <li>해지 대장: 백업에서 복원할 때 해지한 구독이 되살아나지 않도록 구독 ID와 해지 시각을 기록합니다. 정리 시점은 <span th:text="${unset}">미정</span>이며, 모든 백업 사본의 삭제가 확인된 뒤 정리합니다.</li>
+    <li>백업: 데이터베이스 백업은 설계상 14일 보관 후 삭제합니다. 백업 사본에는 그 기간 동안 해지 전 정보가 남을 수 있습니다.</li>
+  </ul>
+
+  <h2 class="h5 fw-bold mt-4">3. 처리 위탁과 국외 처리</h2>
+  <ul>
+    <li>서비스 호스팅 위치: <span th:text="${privacy.hostingLocation() ?: unset}">미정</span></li>
+    <li>이메일 발송: Plus Five Five, Inc.(Resend), 미국. 이메일 주소와 메일 본문(확인·관리·해지 링크 포함)을 발송 시점에 전송합니다.
+      공급자 보관: <span th:text="${privacy.resendRetention() ?: unset}">미정</span></li>
+    <li>디스코드 알림은 등록한 웹훅으로 공고 요약을 전송하며, 전송된 메시지는 Discord Inc.가 자체 정책에 따라 처리합니다. 공채벨에서 해지해도 이미 채널에 올라간 메시지는 지워지지 않습니다.</li>
+    <li>국외 이전 근거와 거부 방법: <span th:text="${privacy.overseasBasis() ?: unset}">미정</span></li>
+  </ul>
+
+  <h2 class="h5 fw-bold mt-4">4. 안전성 확보 조치</h2>
+  <ul>
+    <li>웹훅 URL 암호화, 확인 토큰은 해시로만 저장, 관리·해지 링크는 서버 키로 검증</li>
+    <li>요청 횟수 제한, 관리 화면 캐시 금지와 Referer 전송 금지</li>
+    <li>이메일·웹훅·토큰을 로그와 오류 화면에 남기지 않음</li>
+    <li>쿠키·열람/클릭 추적·외부 추적 이미지를 쓰지 않음</li>
+  </ul>
+
+  <h2 class="h5 fw-bold mt-4">5. 권리 행사</h2>
+  <p>알림 메일의 관리 링크(디스코드는 등록 완료 화면의 관리 링크)에서 내 구독 정보를 열람·정정하거나 해지(동의 철회)할 수 있습니다. 링크를 잃어버렸다면 <a th:href="@{/subscriptions/recover}">관리 링크 다시 받기</a>를 이용하세요. 그 밖의 열람·정정·삭제·처리정지 요청은 아래 담당자에게 보내 주시면 처리하고, 법령에 따라 거절할 때는 그 사유를 알려 드립니다.</p>
+
+  <h2 class="h5 fw-bold mt-4">6. 개인정보 보호 담당</h2>
+  <ul>
+    <li>담당: <span th:text="${privacy.officer() ?: unset}">미정</span></li>
+    <li>연락처: <span th:text="${privacy.contact() ?: unset}">미정</span></li>
+  </ul>
+
+  <h2 class="h5 fw-bold mt-4">7. 만 14세 미만</h2>
+  <p>만 14세 미만은 알림을 신청할 수 없습니다. 신청 화면과 서버에서 확인 항목을 검사하지만, 이것은 본인 확인이나 연령 인증이 아닙니다.</p>
+</main>
+<footer th:replace="~{fragments/layout :: footer}"></footer>
+</body>
+</html>
