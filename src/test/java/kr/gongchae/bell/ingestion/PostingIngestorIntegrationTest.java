@@ -326,6 +326,9 @@ class PostingIngestorIntegrationTest extends IntegrationTestSupport {
         assertThat(page.beginsWithin(LocalDate.of(2026, 11, 1), LocalDate.of(2026, 11, 30))).isFalse();
         assertThat(page.beginsWithin(LocalDate.of(2026, 10, 31), LocalDate.of(2026, 11, 13))).isTrue();
         assertThat(page.beginsWithin(LocalDate.of(2026, 10, 31), LocalDate.of(2026, 11, 12))).as("307032 starts 11-13").isFalse();
+        ParsedPage started = page.startingOnOrBefore(LocalDate.of(2026, 11, 12));
+        assertThat(started.sns()).containsExactly(999004L);
+        assertThat(started.totalCount()).as("upstream total is kept").isEqualTo(497);
         assertThat(dump()).as("parsing alone writes nothing").isEqualTo(before);
         assertThatThrownBy(() -> page.sns().add(1L)).isInstanceOf(UnsupportedOperationException.class);
     }

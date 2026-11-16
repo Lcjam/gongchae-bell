@@ -34,6 +34,12 @@ public final class ParsedPage {
         return page.rows().stream().allMatch(row -> !row.begin().isBefore(from) && !row.begin().isAfter(to));
     }
 
+    /** The rows starting on or before {@code to}, taken from this same parse; totalCount stays the upstream value. */
+    public ParsedPage startingOnOrBefore(LocalDate to) {
+        return new ParsedPage(new ListResponseParser.Page(page.totalCount(),
+                page.rows().stream().filter(row -> !row.begin().isAfter(to)).toList()));
+    }
+
     ListResponseParser.Page page() {
         return page;
     }

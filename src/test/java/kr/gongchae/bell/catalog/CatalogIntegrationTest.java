@@ -50,7 +50,9 @@ import tools.jackson.databind.ObjectMapper;
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = {
                 "management.server.port=0",
-                "app.base-url=https://gongchae.example"
+                "app.base-url=https://gongchae.example",
+                "collector.enabled=false",
+                "collector.backfill=false"
         }
 )
 @AutoConfigureMockMvc

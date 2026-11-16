@@ -1,0 +1,26 @@
+# ADR-0016 보조 세션 잠금: 최초 적재 명령과 상세 sweep의 겹침 방지
+
+- **상태**: 채택 (2026-11-15). codex 검수와 agy 교차 리뷰가 범위·전용 물리 연결·한계를 수용했다. PR #11 머지(사용자 승인)로 확정한다. 검토 기록은 [초안](../../collab/2026-11-15-implementation/sol-collector-lock-proposal.md)에 있다.
+- **관계**: [ADR-0003](0003-schedule-dedup-by-slot.md)을 **대체하지 않는다.** 회차 소유권은 계속 `collect_run(kind, slot)` UNIQUE INSERT가 갖는다. 이 잠금은 그 위에 더하는 보호다.
+- **맥락**: 회차 키는 같은 슬롯의 중복 실행만 막는다. 두 경우는 슬롯이 달라 막지 못한다.
+  - 최초 적재는 명령마다 운영자가 정한 수동 슬롯을 쓴다(`command/{슬롯}`, `{슬롯}/scan`, `{슬롯}/scan/{페이지}`, V4 이전에는 `{슬롯}/{월}`·`{슬롯}/{월}/{페이지}`). 서로 다른 슬롯의 두 명령이 같은 페이지를 함께 요청할 수 있다.
+  - 상세 sweep의 슬롯은 `{정기 슬롯}/{sn}`이다. sweep이 다음 정시를 넘기거나 blue/green 두 앱이 겹치면 같은 공고를 두 앱이 요청할 수 있다.
+  - 두 경우 모두 반영은 #3 코어가 멱등 처리하므로 데이터는 상하지 않는다. 손해는 예산(하루 1,000회 한도) 이중 사용이다.
+- **선택지**
+  - 잠금 없음: 위 겹침을 운영 절차로만 막는다
+  - DB lease + fence 토큰: 만료 시각이 지나면 HTTP 진행 중인 앱의 작업을 새 앱이 가져갈 수 있고, 갱신·회수 정책이 따로 필요하다
+  - 실행 중 상태 테이블 + 회수 명령: 상태와 운영 명령이 늘어난다
+  - **전용 세션 advisory lock**: 단일 PostgreSQL에 직접 연결하는 현재 배포에서 가장 작다. 세션이 끝나면 PostgreSQL이 잠금을 푼다
+- **결정**
+  - **범위**: 최초 적재 명령 전체는 키 `47111001`, 상세 sweep 전체는 키 `47111002`. 정기 수집에는 쓰지 않는다(ADR-0003으로 충분). 이 키는 다른 기능에서 쓰지 않는다.
+  - **획득**: 회차를 선점하기 **전에** `pg_try_advisory_lock(key)`. 실패하면 기다리지 않고 외부 호출 없이 돌아간다(최초 적재 `ALREADY_RUNNING`, 상세는 그 회차를 건너뜀). 큐나 TTL은 없다.
+  - **전용 물리 연결**: 잠금마다 **Hikari 풀 밖에서** 새 물리 연결을 연다(`JdbcConnectionDetails`의 URL·계정으로 만든 `DriverManagerDataSource`). 트랜잭션 밖에서 쓴다. 매 페이지·상세 요청 전에 `SELECT 1`로 그 연결이 살아 있는지 확인한다.
+  - **해제**: 같은 연결로 `pg_advisory_unlock(key)`을 실행한 뒤 **결과와 관계없이 그 물리 연결을 닫는다.** unlock이 SQL 오류로 실패하거나 false를 돌려줘도 연결을 닫으면 백엔드가 끝나 PostgreSQL이 세션 잠금을 푼다. 풀에서 빌린 연결이 아니므로 잠금을 쥔 세션이 풀로 돌아가는 경로가 없다. 이 경우 호출자에게 `DATABASE_FAILURE`를 알린다.
+- **결과**
+  - 서로 다른 슬롯의 최초 적재 명령과 겹치는 상세 sweep을 한 번에 하나로 줄인다. 같은 슬롯의 중복은 계속 회차 UNIQUE INSERT가 막는다.
+  - 잠금마다 DB 연결이 하나 더 필요하고 Hikari 최대 크기에 포함되지 않는다. 앱당 최대 2개(적재 명령 1, 상세 sweep 1), blue/green 교차 중 최대 4개를 PostgreSQL `max_connections`에서 남긴다.
+  - PgBouncer transaction pooling에서는 쓸 수 없다(현재 설계에 없음).
+  - 세션이 끊기면 잠금이 즉시 풀린다. 원래 앱이 HTTP나 페이지 반영 도중이면 새 실행과 최대 한 페이지·한 상세 요청이 겹칠 수 있다. 이미 보낸 HTTP는 되돌릴 수 없으므로 외부 exactly-once라고 주장하지 않는다. 데이터는 멱등, 예산은 이중이다.
+  - 반쯤 열린 TCP에서는 서버가 끊김을 알아챌 때까지(리눅스 기본 keepalive 약 2시간) 잠금이 남아 그동안 적재·상세가 건너뛰어진다. 지금은 같은 VM의 Docker 내부망이라 가능성이 낮다. DB를 다른 호스트로 옮기면 `tcp_keepalives_idle` 같은 keepalive 설정을 함께 정한다.
+  - 작업이 `COMPLETE`로 커밋된 뒤 `close()`에서 연결이 끊기면 호출자는 `DATABASE_FAILURE`를 받을 수 있다. 회차 기록은 이미 커밋돼 있다.
+  - 검증: `RuntimeDatabaseTest.supplementalSessionLockExcludesAnotherOwnerAndReleasesAfterCloseAndBackendDeath`(동시 소유 차단, 정상 해제, `pg_terminate_backend` 뒤 재선점), `RuntimeDatabaseTest.leaseClosesItsPhysicalConnectionWhenUnlockFailsOnALiveSessionSoAnotherOwnerAcquires`(세션은 살아 있고 unlock만 실패), `CollectorWiringIntegrationTest.leaseConnectionIsNotBorrowedFromThePool`(실제 Spring 배선에서 Hikari 활성 연결 불변), `BackfillRuntimeTest.zeroMonthWorksAndTwoManualSlotsCannotRunTheSameBackfillTogether`.

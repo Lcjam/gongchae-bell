@@ -13,6 +13,12 @@ spring:
       hibernate.jdbc.time_zone: UTC
   lifecycle:
     timeout-per-shutdown-phase: 30s
+  task:
+    scheduling:
+      shutdown:
+        # ADR-0014: let a running collection finish for up to 30s on shutdown instead of cutting it off.
+        await-termination: true
+        await-termination-period: 30s
 app:
   base-url: ${APP_BASE_URL:http://localhost:8080}
 server:
@@ -37,3 +43,9 @@ management:
       group:
         readiness:
           include: readinessState,db
+
+collector:
+  enabled: ${COLLECTOR_ENABLED:false}
+  service-key: ${COLLECTOR_SERVICE_KEY:}
+  warning-limit: ${COLLECTOR_WARNING_LIMIT:500}
+  stop-limit: ${COLLECTOR_STOP_LIMIT:900}
