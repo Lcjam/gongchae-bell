@@ -4,6 +4,7 @@
 > 브랜치 `feat/#6-subscriptions`. Orca 워크트리 `issue-6-subscriptions`는 `origin/main` `000dce5`(M1 PR #11 merge 포함)에서 새로 만들었다.
 > 계약: [#6 계약](claude-subscriptions-contract.md). 근거 기록(root 원본을 그대로 복사): [06](../2026-11-15-m2-readiness/06-codex-coordination.md)·[07](../2026-11-15-m2-readiness/07-sol-review.md)·[08](../2026-11-15-m2-readiness/08-agy-final-review.md)·[12](../2026-11-15-m2-readiness/12-claude-revised-contract.md)·[13](../2026-11-15-m2-readiness/13-sol-revised-review.md)·[14](../2026-11-15-m2-readiness/14-codex-implementation-decision.md), [개인정보 출처 검토](../2026-11-16-m2-privacy/sol-source-review.md).
 > 하지 않은 것: 실제 ALIO·Resend·Discord 호출, 사용자 데이터·env 비밀값 열람, 서버·DNS·키 변경, 영속 개발 DB·볼륨 접근, root·#4·agy·Sol 브랜치 수정, 원격 머지. #7(매칭·묶음·outbox·비동기 워커)은 구현하지 않았다.
+> 후속(2026-11-17): PR #13 검수 결함 C1~C6 수정과 검증은 [수정 결과](claude-subscriptions-fixes.md)에 있다. 이 문서의 25초 예산·대장 서술은 그 문서와 계약이 대체한다.
 
 ## 커밋과 CI
 
@@ -98,7 +99,7 @@
 - **디스코드 등록 테스트의 시도 감사**: 행이 성공 뒤에만 생기므로, 실패한 테스트의 시도는 DB 행이 아니라 `rate_limit` 예약과 지표로만 남는다. 12 §6과 13에서 수용한 예외다. 검증되지 않은 웹훅 URL을 저장하지 않기 위해서다.
 - **이메일 자동 비활성화 없음**: Resend 공식 오류 표에 수신자 전용 응답이 없다. 그래서 #6에는 이메일 구독을 끄는 코드가 없다. 디스코드 404 비활성화는 비동기 발송이 있는 #7에서 한다. 등록 테스트의 404는 등록하지 않는 것으로 끝난다.
 - **DB 풀 획득 대기 5초**를 전역으로 걸었다(기본 30초). 25초 예산 때문이다. 목록 화면에도 적용되지만 지금 부하에서는 영향이 없을 것으로 본다. 실측하지 않았다.
-- **목록 CTA 주소**에 빈 인자가 붙는다(`?ncs=&region=…`). 폼은 빈 값을 '전체'로 받는다. 보기만의 문제라 고치지 않았다.
+- **목록 CTA 주소**에 빈 인자가 붙는다(예: `?ncs=R600020&region=&hire=&career=&q=`). 폼은 빈 값을 '전체'로 받는다. 보기만의 문제라 고치지 않았다. (2026-11-17 재확인: 응답 HTML에 실제로 빈 인자가 있고, 테스트가 이 링크와 그 링크로 연 화면을 확인한다.)
 - `alerts.mail.base-url`은 시험·점검용 설정이고 환경변수 이름은 두지 않았다(기본 `https://api.resend.com/`).
 
 ## 남은 일과 실사용 전 게이트
