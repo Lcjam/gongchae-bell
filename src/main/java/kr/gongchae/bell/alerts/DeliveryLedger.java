@@ -6,6 +6,7 @@ import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.UUID;
+import java.util.function.Supplier;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -83,10 +84,13 @@ public class DeliveryLedger {
                 }).optional().orElseThrow(() -> new IllegalStateException("NOTIFICATION_GONE"));
     }
 
-    /** R: commits on its own connection. {@code total} is the SEND_TOTAL window to charge, or null for none. */
-    public Reservation reserve(Claim claim, UUID key, byte[] payloadHash, byte[] totalKey, RateLimiter.Limit total, Duration lockTimeout) {
+    /**
+     * R: commits on its own connection. {@code total} is the SEND_TOTAL window to charge, or null for none.
+     * {@code waitLimit} is read after B is taken from the pool: nothing left means nothing is reserved (14-4).
+     */
+    public Reservation reserve(Claim claim, UUID key, byte[] payloadHash, byte[] totalKey, RateLimiter.Limit total, Supplier<Duration> waitLimit) {
         return independent.execute(status -> {
-            boundWaits(lockTimeout);
+            boundWaits(waitLimit.get());
             var attemptNo = jdbc.sql("""
                     UPDATE notification SET attempts = attempts + 1, idempotency_key = :key, payload_sha256 = :hash
                     WHERE id = :id AND status = 'SENDING' AND claimed_at = :claim AND attempts < :max RETURNING attempts
@@ -215,12 +219,8 @@ public class DeliveryLedger {
                 """).param("now", now()).param("id", notificationId).update();
     }
 
-    /** Bounds lock and statement waits of the current transaction (used inside R and the sync loop's A). */
-    void boundWaits(Duration limit) {
-        long ms = Math.max(1, limit.toMillis());
-        jdbc.sql("SELECT set_config('lock_timeout', :ms, true), set_config('statement_timeout', :ms, true)")
-                .param("ms", ms + "ms").query().singleRow();
-    }
+    /** See {@link RateLimiter#boundWaits}: used inside R and the sync loop's A. */
+    void boundWaits(Duration limit) { limits.boundWaits(limit); }
 
     private OffsetDateTime now() { return OffsetDateTime.now(clock).truncatedTo(ChronoUnit.MICROS); }
 }

@@ -14,6 +14,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import kr.gongchae.bell.catalog.CatalogRepository;
 import kr.gongchae.bell.catalog.JobSearchCriteria;
@@ -105,27 +106,34 @@ public class SubscriptionService {
 
     // ---- email sign-up and confirmation ----
 
-    /** FR-A1. Always ACCEPTED (or RATE_LIMITED): the answer never says whether the address is already subscribed. */
+    /**
+     * FR-A1. Always ACCEPTED (or RATE_LIMITED): the answer never says whether the address is already subscribed.
+     * Every DB wait before the send is bounded by the request budget (14-4). A wait that runs out throws
+     * {@code CannotAcquireLockException}/{@code QueryTimeoutException}, and no part of the sign-up is committed.
+     */
     public State subscribeEmail(String rawEmail, Conditions conditions, boolean agreed, boolean age14, String ip) {
         long start = sender.start();
         consent(agreed, age14);
         String email = email(rawEmail);
-        if (!limits.acquire(RateLimiter.Scope.SUBSCRIBE, crypto.limitKey("SUBSCRIBE:ip", ip), RateLimiter.PER_IP)
-                || !limits.acquire(RateLimiter.Scope.SUBSCRIBE, crypto.limitKey("SUBSCRIBE:email", email), RateLimiter.PER_TARGET))
+        Supplier<Duration> waits = () -> sender.waitLimit(start);
+        if (!limits.acquire(RateLimiter.Scope.SUBSCRIBE, crypto.limitKey("SUBSCRIBE:ip", ip), RateLimiter.PER_IP, waits)
+                || !limits.acquire(RateLimiter.Scope.SUBSCRIBE, crypto.limitKey("SUBSCRIBE:email", email), RateLimiter.PER_TARGET, waits))
             return State.RATE_LIMITED;
         String token = crypto.newConfirmToken();
         byte[] hash = AlertsCrypto.sha256(token);
         byte[] destination = crypto.destination("EMAIL", email);
-        Signup signup = tx.execute(status -> signupEmail(email, destination, conditions, hash));
+        Signup signup = tx.execute(status -> signupEmail(email, destination, conditions, hash, waits));
         if (signup != null) deliver(signup.claim(), confirmJob(signup.id(), hash, email, token), start);
         return State.ACCEPTED;
     }
 
     private record Signup(UUID id, DeliveryLedger.Claim claim) {}
 
-    private Signup signupEmail(String email, byte[] destination, Conditions conditions, byte[] hash) {
+    /** Each statement that can wait gets what is left of the budget: the insert behind a concurrent one, and the row lock. */
+    private Signup signupEmail(String email, byte[] destination, Conditions conditions, byte[] hash, Supplier<Duration> waits) {
         OffsetDateTime now = now();
         for (int attempt = 0; attempt < 2; attempt++) {
+            limits.boundWaits(waits.get());
             Optional<UUID> inserted = jdbc.sql("""
                     INSERT INTO subscription(id, channel, status, email, dest_hmac, conditions, notify_new, notify_deadline,
                       confirm_token_hash, confirm_expires_at, consent_version, consented_at, age_confirmed, created_at, updated_at)
@@ -137,6 +145,7 @@ public class SubscriptionService {
                     .param("hash", hash).param("expires", now.plus(CONFIRM_TTL)).param("consent", properties.privacy().policyVersion())
                     .param("now", now).query(UUID.class).optional();
             if (inserted.isPresent()) return new Signup(inserted.get(), ledger.createSync(inserted.get(), "EMAIL_CONFIRM"));
+            limits.boundWaits(waits.get());
             var existing = jdbc.sql("""
                     SELECT id, status FROM subscription WHERE channel = 'EMAIL' AND dest_hmac = :dest AND status IN ('PENDING','ACTIVE') FOR UPDATE
                     """).param("dest", destination).query((rs, row) -> Map.entry(rs.getObject(1, UUID.class), rs.getString(2))).optional();
@@ -262,19 +271,29 @@ public class SubscriptionService {
 
     // ---- recovery ----
 
-    /** FR-A3: mails the management link to an active address. Always ACCEPTED (or RATE_LIMITED). */
+    /**
+     * FR-A3: mails the management link to an active address. Always ACCEPTED (or RATE_LIMITED). The parent row is
+     * held FOR KEY SHARE from the read to the job insert, which serializes the read with an unsubscribe (FOR UPDATE,
+     * then DELETE). The unsubscribe either waits for this transaction, or commits first and the read finds no row.
+     * A status or token change in between is caught by the eligibility check in A. Budget as in {@link #subscribeEmail}.
+     */
     public State recoverEmail(String rawEmail, String ip) {
         long start = sender.start();
         String email = email(rawEmail);
-        if (!limits.acquire(RateLimiter.Scope.RESEND, crypto.limitKey("RESEND:ip", ip), RateLimiter.PER_IP)
-                || !limits.acquire(RateLimiter.Scope.RESEND, crypto.limitKey("RESEND:email", email), RateLimiter.PER_TARGET))
+        Supplier<Duration> waits = () -> sender.waitLimit(start);
+        if (!limits.acquire(RateLimiter.Scope.RESEND, crypto.limitKey("RESEND:ip", ip), RateLimiter.PER_IP, waits)
+                || !limits.acquire(RateLimiter.Scope.RESEND, crypto.limitKey("RESEND:email", email), RateLimiter.PER_TARGET, waits))
             return State.RATE_LIMITED;
         byte[] destination = crypto.destination("EMAIL", email);
         record Recovery(UUID id, int version, DeliveryLedger.Claim claim) {}
-        Recovery recovery = tx.execute(status -> jdbc.sql("""
-                SELECT id, token_version FROM subscription WHERE channel = 'EMAIL' AND dest_hmac = :dest AND status = 'ACTIVE'
-                """).param("dest", destination).query((rs, row) -> Map.entry(rs.getObject(1, UUID.class), rs.getInt(2))).optional()
-                .map(row -> new Recovery(row.getKey(), row.getValue(), ledger.createSync(row.getKey(), "EMAIL_RECOVER"))).orElse(null));
+        Recovery recovery = tx.execute(status -> {
+            limits.boundWaits(waits.get());
+            return jdbc.sql("""
+                    SELECT id, token_version FROM subscription WHERE channel = 'EMAIL' AND dest_hmac = :dest AND status = 'ACTIVE'
+                    FOR KEY SHARE
+                    """).param("dest", destination).query((rs, row) -> Map.entry(rs.getObject(1, UUID.class), rs.getInt(2))).optional()
+                    .map(row -> new Recovery(row.getKey(), row.getValue(), ledger.createSync(row.getKey(), "EMAIL_RECOVER"))).orElse(null);
+        });
         if (recovery != null) deliver(recovery.claim(), recoverJob(recovery.id(), recovery.version(), email), start);
         return State.ACCEPTED;
     }
@@ -317,20 +336,22 @@ public class SubscriptionService {
     /**
      * FR-A2: validated URL, limits, no test for an already-live destination, then the in-request test (each attempt
      * charged to the Discord hourly total first). Only a 2xx inserts the ACTIVE row together with the DISCORD_TEST
-     * success record and its attempts; a failed test stores nothing about the webhook.
+     * success record and its attempts; a failed test stores nothing about the webhook. Budget as in
+     * {@link #subscribeEmail}; the final insert gets the CLEANUP share.
      */
     public Result registerDiscord(String rawUrl, Conditions conditions, boolean agreed, boolean age14, String ip) {
         long start = sender.start();
         consent(agreed, age14);
         WebhookUrl url = WebhookUrl.parse(rawUrl).orElseThrow(() -> new InvalidInput("webhook"));
         String target = url.normalized();
-        if (!limits.acquire(RateLimiter.Scope.SUBSCRIBE, crypto.limitKey("SUBSCRIBE:ip", ip), RateLimiter.PER_IP)
-                || !limits.acquire(RateLimiter.Scope.SUBSCRIBE, crypto.limitKey("SUBSCRIBE:webhook", target), RateLimiter.PER_TARGET)
-                || !limits.acquire(RateLimiter.Scope.WEBHOOK_TEST, crypto.limitKey("WEBHOOK_TEST:ip", ip), RateLimiter.PER_IP)
-                || !limits.acquire(RateLimiter.Scope.WEBHOOK_TEST, crypto.limitKey("WEBHOOK_TEST:webhook", target), RateLimiter.PER_TARGET))
+        Supplier<Duration> waits = () -> sender.waitLimit(start);
+        if (!limits.acquire(RateLimiter.Scope.SUBSCRIBE, crypto.limitKey("SUBSCRIBE:ip", ip), RateLimiter.PER_IP, waits)
+                || !limits.acquire(RateLimiter.Scope.SUBSCRIBE, crypto.limitKey("SUBSCRIBE:webhook", target), RateLimiter.PER_TARGET, waits)
+                || !limits.acquire(RateLimiter.Scope.WEBHOOK_TEST, crypto.limitKey("WEBHOOK_TEST:ip", ip), RateLimiter.PER_IP, waits)
+                || !limits.acquire(RateLimiter.Scope.WEBHOOK_TEST, crypto.limitKey("WEBHOOK_TEST:webhook", target), RateLimiter.PER_TARGET, waits))
             return Result.of(State.RATE_LIMITED);
         byte[] destination = crypto.destination("DISCORD", target);
-        if (liveDestination(destination)) return Result.of(State.ALREADY);
+        if (liveDestination(destination, waits)) return Result.of(State.ALREADY);
         List<SyncSender.WebhookAttempt> attempts = sender.testWebhook(url, testMessage(), start);
         SendOutcome last = attempts.isEmpty() ? null : attempts.getLast().result().outcome();
         if (last != SendOutcome.SUCCESS)
@@ -338,6 +359,7 @@ public class SubscriptionService {
         UUID id = UUID.randomUUID();
         OffsetDateTime now = now();
         Boolean inserted = tx.execute(status -> {
+            limits.boundWaits(SyncSender.CLEANUP);
             boolean created = jdbc.sql("""
                     INSERT INTO subscription(id, channel, status, webhook_enc, webhook_key_id, dest_hmac, conditions, notify_new,
                       notify_deadline, consent_version, consented_at, age_confirmed, confirmed_at, created_at, updated_at)
@@ -366,10 +388,13 @@ public class SubscriptionService {
                 : Result.of(State.ALREADY);
     }
 
-    private boolean liveDestination(byte[] destination) {
-        return Boolean.TRUE.equals(jdbc.sql("""
-                SELECT EXISTS (SELECT 1 FROM subscription WHERE channel = 'DISCORD' AND dest_hmac = :dest AND status IN ('PENDING','ACTIVE'))
-                """).param("dest", destination).query(Boolean.class).single());
+    private boolean liveDestination(byte[] destination, Supplier<Duration> waits) {
+        return Boolean.TRUE.equals(tx.execute(status -> {
+            limits.boundWaits(waits.get());
+            return jdbc.sql("""
+                    SELECT EXISTS (SELECT 1 FROM subscription WHERE channel = 'DISCORD' AND dest_hmac = :dest AND status IN ('PENDING','ACTIVE'))
+                    """).param("dest", destination).query(Boolean.class).single();
+        }));
     }
 
     private static byte[] testMessage() {

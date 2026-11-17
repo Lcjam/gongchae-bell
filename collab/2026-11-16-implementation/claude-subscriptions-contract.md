@@ -13,7 +13,7 @@
 | 용어 | 구현 |
 |---|---|
 | 선점 | 비동기: `claimDue(limit)`가 `PENDING`·`RETRY`이고 `next_attempt_at <= now`인 **비동기 종류만** `FOR UPDATE SKIP LOCKED`로 잡아 `SENDING`, `claimed_at=now`로 바꾼다. 동기(`createSync`): 만들 때부터 `SENDING`이고 그 요청이 선점한 것이다. **선점은 시도가 아니다** |
-| 예약 R = 시도 | `reserve(claim, key, payloadHash, totalKey, limit, lockTimeout)`가 **자기 연결(REQUIRES_NEW)**에서 한 번에 한다: ① 펜싱(`status='SENDING' AND claimed_at=:claim`)과 `attempts < 3`을 확인하며 `attempts+1`, ② 키·해시를 기록, ③ `SEND_TOTAL` 1을 상한 안에서만 예약, ④ 시도 행 INSERT(`outcome` null). 하나라도 실패하면 전부 롤백한다. 반환은 `Reserved(attemptId, no)`, `Fenced`, `Capped` 중 하나다 |
+| 예약 R = 시도 | `reserve(claim, key, payloadHash, totalKey, limit, waitLimit)`가 **자기 연결(REQUIRES_NEW)**에서 한 번에 한다. `waitLimit`은 B를 풀에서 받은 **뒤에** 읽는다. 남은 대기 시간이 없으면 아무것도 예약하지 않고 실패한다(롤백). 예약은 이렇게 한다: ① 펜싱(`status='SENDING' AND claimed_at=:claim`)과 `attempts < 3`을 확인하며 `attempts+1`, ② 키·해시를 기록, ③ `SEND_TOTAL` 1을 상한 안에서만 예약, ④ 시도 행 INSERT(`outcome` null). 하나라도 실패하면 전부 롤백한다. 반환은 `Reserved(attemptId, no)`, `Fenced`, `Capped` 중 하나다 |
 | HTTP | R이 커밋된 뒤에만 1회 보낸다. 그래서 공급자 요청 수 ≤ 시도 행 수 ≤ 3이다. R 뒤에 종료해도 예약과 시도는 환불하지 않는다. 그 시도는 null(결과 모름)로 남는다 |
 | 로컬 사전 거절 | R이 `Capped`를 돌려준다. HTTP·시도·예약 모두 없다 |
 | 결과 기록 | `recordOutcome(attemptId, result)`는 `outcome IS NULL`일 때만 쓴다. 먼저 기록된 결과(회수의 `UNKNOWN_CRASH` 포함)는 덮어쓰지 않는다 |
@@ -31,7 +31,9 @@
 4. 결과·회수·종결·파기의 잠금 순서는 **subscription → notification → attempt/item**이다. 회수는 notification을 `SKIP LOCKED`로 잡으므로, HTTP 중인 A의 행은 건너뛴다.
 5. 디스코드 404의 비활성화(#7)는 A가 커밋한 뒤 별도 짧은 트랜잭션에서 subscription을 `FOR UPDATE`로 잡아 한다.
 
-워커 하나가 연결 2개(A, B)를 동시에 쓴다. 풀 획득 대기는 5초로 묶었다(`spring.datasource.hikari.connection-timeout: 5000`). A와 R은 `lock_timeout`·`statement_timeout`을 남은 시간으로 건다(`boundWaits`).
+워커 하나가 연결 2개(A, B)를 동시에 쓴다. 풀 획득 대기는 5초로 묶었다(`spring.datasource.hikari.connection-timeout: 5000`). 동기 경로의 대기 상한은 §6 "동기 요청 예산"에 있다(2026-11-17 PR #13 수정).
+
+부모를 읽은 뒤 자식 작업 행을 만드는 동기 경로는, 읽을 때부터 부모를 잠근다. 신청은 새 행을 직접 넣거나 기존 행을 `FOR UPDATE`로 잡는다. 관리 링크 재발송은 `FOR KEY SHARE`를 쓴다. 그래서 해지(`FOR UPDATE`, `DELETE`)와 겹치면 둘 중 하나만 된다. 해지가 이 트랜잭션을 기다리거나, 해지가 먼저 커밋되고 읽기가 행을 찾지 못한다. 재발송에 `FOR KEY SHARE`를 쓴 이유: FK 확인이 쓰는 것과 같은 최소 잠금이고, 그사이 상태나 `token_version`이 바뀌어도 A의 `stillEligible`(`FOR SHARE`)이 R 전과 HTTP 전에 잡기 때문이다.
 
 ## 4. 결과 분류 (`SendOutcome`)
 
@@ -39,9 +41,9 @@
 |---|---|---|
 | 성공 | `SUCCESS` (2xx) | `SENT` |
 | 결과 모름 | `TIMEOUT`, `IO_ERROR`, **모든 5xx**(`HTTP_5XX`), Resend 409(`HTTP_409`), `UNKNOWN_CRASH`, null | 같은 키로만 재시도. 종결 시 `UNCERTAIN` |
-| 확실한 거절, 재시도 | `CONNECT_FAILED`(연결 수립 실패), `RATE_LIMITED`(429), `NOT_SENT`(예약했지만 시간이 모자라 보내지 않음) | 2초·4초 대기, 429는 `retry-after`/`retry_after` |
+| 확실한 거절, 재시도 | `CONNECT_FAILED`(연결 수립 실패), `RATE_LIMITED`(429), `NOT_SENT`(예약했지만 시간이 모자라 보내지 않음. 디스코드 주소 확인이 시간을 다 쓴 경우 포함) | 2초·4초 대기. 429는 `retry-after`/`retry_after`를 따른다. 유한한 음이 아닌 십진수만 읽고, 1일 이상은 1일로 묶는다. NaN·무한대·음수·16진수·날짜·문자열은 읽지 않은 것(null)으로 보고 기본 대기를 쓴다. 지시가 예정 대기보다 길면 요청 안에서는 다시 보내지 않는다 |
 | 확실한 거절, 다음 창 | `QUOTA_DAILY`(Resend `daily_quota_exceeded`, HTTP를 받았으므로 시도·예약에 포함) | 비동기는 다음 UTC 00:00, 동기는 종결 |
-| 확실한 거절, 종결 | `QUOTA_MONTHLY`, `REQUEST_4XX`(400·422 등), `ACCOUNT_4XX`(401·403), `REDIRECTED`(3xx, 따르지 않음), `WEBHOOK_404`, `WEBHOOK_401`, `BLOCKED_ADDRESS` | 종결. **구독을 끄는 것은 `WEBHOOK_404`(#7)뿐**이다. 범용·계정 4xx는 작업 실패와 지표로만 남긴다 |
+| 확실한 거절, 종결 | `QUOTA_MONTHLY`, `REQUEST_4XX`(400·422 등), `ACCOUNT_4XX`(401·403), `REDIRECTED`(3xx, 따르지 않음), `WEBHOOK_404`, `WEBHOOK_401`, `BLOCKED_ADDRESS`(공개 주소가 아니거나, 주소 조회가 실패했거나, 전송 타임아웃 안에 끝나지 않음. 요청은 보내지 않음) | 종결. **구독을 끄는 것은 `WEBHOOK_404`(#7)뿐**이다. 범용·계정 4xx는 작업 실패와 지표로만 남긴다 |
 
 Resend 공식 오류 표에는 수신자 주소 전용 오류가 없다(12 §7). 그래서 이메일 구독을 자동으로 끄는 경로는 만들지 않았다. "Resend는 실패 응답을 저장하지 않는다"는 주장은 공식 문서에 없어 채택하지 않았다.
 
@@ -57,7 +59,7 @@ Resend 공식 오류 표에는 수신자 주소 전용 오류가 없다(12 §7).
 | 항목 | 값 |
 |---|---|
 | 작업당 시도 | 최대 3. 실패 뒤 대기 2초, 4초 |
-| 동기 요청 예산 | 요청 시작부터 단조 시계로 25초. 남은 시간이 5초 미만이면 새 시도를 시작하지 않는다. HTTP 타임아웃 = min(10초, 남은 시간 − 정리 몫 2초)이고 R 뒤 HTTP 직전에 다시 계산한다. 1초 미만이면 보내지 않고 `NOT_SENT`. 429의 대기가 예정 대기보다 길면 그 요청은 끝낸다. graceful shutdown은 30초다 |
+| 동기 요청 예산 | 요청 시작부터 단조 시계로 25초다. ① 잠금을 기다리거나 오래 걸릴 수 있는 문장마다, 직전에 `lock_timeout`·`statement_timeout`을 (남은 시간 − 뒤 단계 몫)으로 건다. 대상은 요청 제한 카운트, 신청 INSERT·행 잠금, 재발송 조회, 디스코드 중복 조회, A의 자격·이력, R, `lockReserved`다. 남은 몫이 1ms 미만이면 그 문장을 시작하지 않는다(`SYNC_BUDGET_SPENT`). ② 연결을 받은 뒤에 다시 잰다: A에 들어가서, R 전, R 안에서. 새 시도(R)는 5초 이상 남아야 하고, R은 요청 1회 몫(1초)과 정리 몫(2초)을 남긴다. ③ HTTP 타임아웃 = min(10초, 남은 시간 − 2초)이고 HTTP 직전에 계산한다. 1초 미만이면 보내지 않고 `NOT_SENT`. 디스코드는 주소 확인과 요청이 이 타임아웃 하나를 나눠 쓴다. ④ 마지막 쓰기(종결·결과 기록·디스코드 등록 INSERT)는 정리 몫 2초로 묶는다. 대기 상한에 걸리면 발송 작업은 그 몫 안에서 `DEADLINE`으로 끝난다. 이미 커밋된 R의 null 시도는 결과 모름(`UNCERTAIN`)으로 남는다. 발송 전 단계에서 걸리면 응답은 503이고, 그 단계의 쓰기는 커밋되지 않는다(이미 센 요청 제한과 예약은 환불하지 않음). ⑤ 예산이 묶지 못하는 것: 풀 대기(연결마다 Hikari 5초, 받은 뒤에 다시 잼), GC·OS 정지, 응답하지 않는 DB. 이때는 응답이 25초를 넘을 수 있다. 429의 대기가 예정 대기보다 길면 그 요청은 끝낸다. graceful shutdown은 30초다 |
 | 비동기 수명(#7) | `created_at + 23시간`(자체 정책이며 Resend 키 24시간 보관보다 짧음). 넘거나 다음 시도가 넘으면 HTTP 없이 종결 |
 | 회수 | `SENDING` 5분 초과 |
 | 발송 상한 | 이메일 90/UTC 날짜, 디스코드 300/시간. 시도마다 R에서 예약 |
@@ -69,7 +71,7 @@ Resend 공식 오류 표에는 수신자 주소 전용 오류가 없다(12 §7).
 | 경로 | 행 | 자격 재확인(`stillEligible`) | 응답 |
 |---|---|---|---|
 | 확인 메일 `EMAIL_CONFIRM` | 신청 트랜잭션에서 PENDING과 함께 만든다(`batch_key`=UUID) | PENDING, 이 요청 토큰의 해시, 만료 전 | 고정 응답 |
-| 관리 링크 `EMAIL_RECOVER` | ACTIVE를 찾았을 때만 | ACTIVE, 같은 `token_version`, 같은 주소 | 고정 응답(있든 없든, 실패든) |
+| 관리 링크 `EMAIL_RECOVER` | ACTIVE를 `FOR KEY SHARE`로 찾았을 때만(해지와 직렬화, §3) | ACTIVE, 같은 `token_version`, 같은 주소 | 고정 응답(있든 없든, 실패든) |
 | 디스코드 테스트 `DISCORD_TEST` | 성공했을 때만 사후에 `SENT`와 시도 행을 넣는다 | 없음(행이 없음). 시도마다 디스코드 시간당 상한을 예약 | 성공·이미 등록·404·실패 |
 
 `EMAIL_CONFIRM`이 `SENT`여도 구독은 `PENDING`이다. 유효한 확인 POST만 `ACTIVE`로 바꾼다(13-1, 14-1). 루프 중 해지·만료로 행이 지워지면 0행 갱신으로 조용히 끝난다.

@@ -5,6 +5,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.function.Supplier;
+import org.springframework.dao.QueryTimeoutException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -41,6 +43,28 @@ public class RateLimiter {
     /** Counts one request and says whether it is still within {@code max}. Commits on its own. */
     public boolean acquire(Scope scope, byte[] key, Limit limit) {
         return Boolean.TRUE.equals(independent.execute(status -> acquireHere(scope, key, limit.max(), limit.window())));
+    }
+
+    /**
+     * {@link #acquire} inside an in-request budget (14-4): {@code waitLimit} is read once the connection is taken and
+     * bounds the lock and statement waits of the count.
+     */
+    public boolean acquire(Scope scope, byte[] key, Limit limit, Supplier<Duration> waitLimit) {
+        return Boolean.TRUE.equals(independent.execute(status -> {
+            boundWaits(waitLimit.get());
+            return acquireHere(scope, key, limit.max(), limit.window());
+        }));
+    }
+
+    /**
+     * Cuts {@code lock_timeout} and {@code statement_timeout} of the current transaction to {@code limit}. Less than
+     * 1 ms left means the step must not start: {@link QueryTimeoutException} without running anything (never a 1 ms
+     * limit that fails the next statement at random).
+     */
+    public void boundWaits(Duration limit) {
+        if (limit.compareTo(Duration.ofMillis(1)) < 0) throw new QueryTimeoutException("SYNC_BUDGET_SPENT");
+        jdbc.sql("SELECT set_config('lock_timeout', :ms, true), set_config('statement_timeout', :ms, true)")
+                .param("ms", limit.toMillis() + "ms").query().singleRow();
     }
 
     /** The same as {@link #acquire} inside the caller's transaction (used by the send reservation R). */

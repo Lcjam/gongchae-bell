@@ -1,6 +1,7 @@
 package kr.gongchae.bell.alerts;
 
-import java.io.IOException;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.net.ConnectException;
 import java.net.InetAddress;
 import java.net.URI;
@@ -56,12 +57,21 @@ final class HttpTransports {
         catch (RuntimeException notJson) { return JSON.createObjectNode(); }
     }
 
+    /** Longest provider wait kept as given; anything longer is this value. Longer than any request (25 s) or job (23 h). */
+    static final Duration MAX_WAIT = Duration.ofDays(1);
+
+    /**
+     * A provider's wait in seconds (Retry-After header, Discord {@code retry_after}). A finite non-negative decimal is
+     * kept, rounded up to the millisecond and capped at {@link #MAX_WAIT}, so a long wait stays long and the caller
+     * ends instead of retrying early. NaN, infinity, negatives, hex, HTTP dates and other text are unreadable: null.
+     */
     static Duration seconds(String value) {
         if (value == null) return null;
-        try {
-            double seconds = Double.parseDouble(value.trim());
-            return seconds >= 0 && seconds < 86_400 ? Duration.ofMillis((long) Math.ceil(seconds * 1000)) : null;
-        } catch (NumberFormatException unreadable) { return null; }
+        BigDecimal seconds;
+        try { seconds = new BigDecimal(value.trim()); } catch (NumberFormatException unreadable) { return null; }
+        if (seconds.signum() < 0) return null;
+        if (seconds.compareTo(BigDecimal.valueOf(MAX_WAIT.toSeconds())) >= 0) return MAX_WAIT;
+        return Duration.ofMillis(seconds.movePointRight(3).setScale(0, RoundingMode.CEILING).longValueExact());
     }
 
     /** POST https://api.resend.com/emails with Idempotency-Key (ADR-0007). */
@@ -104,7 +114,10 @@ final class HttpTransports {
         }
     }
 
-    /** Discord Execute Webhook with wait=true. Every resolved address is checked right before the request. */
+    /**
+     * Discord Execute Webhook with wait=true. Every resolved address is checked right before the request. The check and
+     * the request share the one {@code timeout}. A check still running at its end refuses, and so no request starts.
+     */
     @Component
     static class Discord implements WebhookTransport {
         private final HttpClient http;
@@ -118,10 +131,13 @@ final class HttpTransports {
 
         @Override
         public SendOutcome.Result send(WebhookUrl url, byte[] payload, Duration timeout) {
-            if (!guard.allows(url.host())) return SendOutcome.Result.of(SendOutcome.BLOCKED_ADDRESS);
-            HttpRequest request = HttpRequest.newBuilder(target.apply(url)).timeout(timeout)
+            long begin = System.nanoTime();
+            if (!guard.allows(url.host(), timeout)) return SendOutcome.Result.of(SendOutcome.BLOCKED_ADDRESS);
+            Duration rest = timeout.minusNanos(System.nanoTime() - begin);
+            if (rest.toMillis() < 1) return SendOutcome.Result.of(SendOutcome.NOT_SENT);  // the lookup used it all
+            HttpRequest request = HttpRequest.newBuilder(target.apply(url)).timeout(rest)
                     .header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofByteArray(payload)).build();
-            Exchange exchange = exchange(http, request, timeout);
+            Exchange exchange = exchange(http, request, rest);
             if (exchange.failure() != null) return SendOutcome.Result.of(exchange.failure());
             int status = exchange.response().statusCode();
             if (status >= 200 && status < 300) return new SendOutcome.Result(SendOutcome.SUCCESS, status, null);

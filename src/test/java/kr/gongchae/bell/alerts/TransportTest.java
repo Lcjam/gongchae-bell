@@ -82,9 +82,11 @@ class TransportTest {
         assertThat(refused.outcome().unknown()).isFalse();
     }
 
-    private SendOutcome.Result discord(URI target, AddressGuard guard) {
+    private SendOutcome.Result discord(URI target, AddressGuard guard) { return discord(target, guard, Duration.ofSeconds(2)); }
+
+    private SendOutcome.Result discord(URI target, AddressGuard guard, Duration timeout) {
         var url = WebhookUrl.parse("https://discord.com/api/webhooks/1/token").orElseThrow();
-        return new HttpTransports.Discord(HttpTransports.client(), guard, u -> target).send(url, "{}".getBytes(UTF_8), Duration.ofSeconds(2));
+        return new HttpTransports.Discord(HttpTransports.client(), guard, u -> target).send(url, "{}".getBytes(UTF_8), timeout);
     }
 
     @Test
@@ -114,5 +116,59 @@ class TransportTest {
         assertThat(discord(serve(404, "{\"code\":10015}", null, 0), open).outcome()).isEqualTo(SendOutcome.WEBHOOK_404);
         stop();
         assertThat(discord(serve(401, "{\"code\":50027}", null, 0), open).outcome()).isEqualTo(SendOutcome.WEBHOOK_401);
+    }
+
+    @Test
+    void aValidLongProviderWaitStaysLongAndOnlyUnreadableValuesAreDropped() throws Exception {
+        assertThat(HttpTransports.seconds("3")).isEqualTo(Duration.ofSeconds(3));
+        assertThat(HttpTransports.seconds(" 1.25 ")).isEqualTo(Duration.ofMillis(1250));
+        assertThat(HttpTransports.seconds("0.0001")).isEqualTo(Duration.ofMillis(1));
+        assertThat(HttpTransports.seconds("86399")).isEqualTo(Duration.ofSeconds(86_399));
+        for (String long_ : new String[]{"86400", "90000", "1e400", "9".repeat(40)})
+            assertThat(HttpTransports.seconds(long_)).as(long_).isEqualTo(HttpTransports.MAX_WAIT);
+        for (String unreadable : new String[]{"NaN", "Infinity", "-Infinity", "-1", "0x10", "1d", "", "abc", "Wed, 21 Oct 2026 07:28:00 GMT"})
+            assertThat(HttpTransports.seconds(unreadable)).as(unreadable).isNull();
+        assertThat(HttpTransports.seconds(null)).isNull();
+
+        var resend = resend(serve(429, "{\"name\":\"rate_limit_exceeded\"}", "retry-after:86400", 0), Duration.ofSeconds(2));
+        assertThat(resend.retryAfter()).as("a day is not 'no wait given'").isEqualTo(HttpTransports.MAX_WAIT);
+        stop();
+        var junk = resend(serve(429, "{\"name\":\"rate_limit_exceeded\"}", "retry-after:NaN", 0), Duration.ofSeconds(2));
+        assertThat(junk.outcome()).isEqualTo(SendOutcome.RATE_LIMITED);
+        assertThat(junk.retryAfter()).isNull();
+        stop();
+        var open = new AddressGuard(host -> new InetAddress[]{InetAddress.getByName("162.159.135.232")});
+        assertThat(discord(serve(429, "{\"retry_after\": 90000, \"global\": true}", null, 0), open).retryAfter()).isEqualTo(HttpTransports.MAX_WAIT);
+        stop();
+        assertThat(discord(serve(429, "{\"retry_after\": 1.0E10}", null, 0), open).retryAfter()).isEqualTo(HttpTransports.MAX_WAIT);
+        stop();
+        assertThat(discord(serve(429, "{\"retry_after\": \"soon\"}", "retry-after:7", 0), open).retryAfter())
+                .as("an unreadable body value falls back to the header").isEqualTo(Duration.ofSeconds(7));
+    }
+
+    @Test
+    void theAddressCheckAndTheRequestShareOneTimeoutAndAStalledLookupStartsNoRequest() throws Exception {
+        URI stub = serve(204, "", null, 0);
+        var stalled = new AddressGuard(host -> {
+            try { Thread.sleep(5_000); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+            return new InetAddress[]{InetAddress.getByName("162.159.135.232")};
+        });
+        long t0 = System.nanoTime();
+        assertThat(discord(stub, stalled, Duration.ofMillis(300)).outcome()).isEqualTo(SendOutcome.BLOCKED_ADDRESS);
+        assertThat(Duration.ofNanos(System.nanoTime() - t0)).as("returns at the timeout, not after the lookup").isLessThan(Duration.ofMillis(2_000));
+        assertThat(hits).as("no request after a lookup that ran out").hasValue(0);
+        stop();
+
+        // The lookup takes 500 ms of 1000 ms; the stub answers after 900 ms. Only the rest (about 500 ms) is left for
+        // the request, so it times out instead of getting a fresh 1000 ms.
+        URI slowStub = serve(204, "", null, 900);
+        var slowLookup = new AddressGuard(host -> {
+            try { Thread.sleep(500); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+            return new InetAddress[]{InetAddress.getByName("162.159.135.232")};
+        });
+        t0 = System.nanoTime();
+        var shared = discord(slowStub, slowLookup, Duration.ofMillis(1_000));
+        assertThat(shared.outcome()).isEqualTo(SendOutcome.TIMEOUT);
+        assertThat(Duration.ofNanos(System.nanoTime() - t0)).isLessThan(Duration.ofMillis(1_700));
     }
 }

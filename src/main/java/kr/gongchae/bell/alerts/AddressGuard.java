@@ -3,6 +3,11 @@ package kr.gongchae.bell.alerts;
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * ADR-0009: right before a webhook request, every address the host resolves to must be public. Loopback, any-local,
@@ -21,6 +26,20 @@ public final class AddressGuard {
         if (addresses == null || addresses.length == 0) return false;
         for (InetAddress address : addresses) if (!isPublic(address)) return false;
         return true;
+    }
+
+    /**
+     * {@link #allows(String)} with the lookup given at most {@code timeout}. A lookup that is still running then counts
+     * as failed and refuses. The JDK lookup cannot be interrupted, so it runs on its own daemon thread.
+     * shortcut: one thread per lookup, and an abandoned one ends with the OS resolver's own timeout; use a bounded pool if lookups grow.
+     */
+    public boolean allows(String host, Duration timeout) {
+        CompletableFuture<Boolean> lookup = new CompletableFuture<>();
+        Thread.ofPlatform().daemon().name("webhook-dns").start(() -> lookup.complete(allows(host)));
+        try { return lookup.get(Math.max(1, timeout.toMillis()), TimeUnit.MILLISECONDS); }
+        catch (TimeoutException slow) { return false; }
+        catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); return false; }
+        catch (ExecutionException failed) { return false; }
     }
 
     static boolean isPublic(InetAddress address) {

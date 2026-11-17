@@ -15,9 +15,11 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * Restore step of ADR-0013, run with alerts disabled after a DB restore:
- * {@code --spring.main.web-application-type=none --alerts.erasure-reapply=true}. The whole journal is validated first;
- * a torn or malformed line stops the command before anything is deleted (fail closed) and alerts stay off until an
- * operator has checked the journal. Otherwise every listed subscription is deleted again in one transaction.
+ * {@code --spring.main.web-application-type=none --alerts.erasure-reapply=true}. The whole journal is validated first.
+ * A missing journal file (wrong path, mount not restored) or a torn or malformed line stops the command before
+ * anything is deleted (fail closed): no completion log, and the run fails, so the process exits non-zero. Alerts
+ * stay off until an operator has checked the journal. Otherwise every listed subscription is deleted again in one
+ * transaction. Only an existing empty file (prepared, nothing erased yet) is a valid empty journal.
  */
 @Component
 @ConditionalOnProperty(name = "alerts.erasure-reapply", havingValue = "true")

@@ -4,6 +4,10 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.sql.Connection;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -19,15 +23,26 @@ import java.util.function.Function;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
+import org.springframework.context.support.GenericApplicationContext;
+import org.springframework.dao.CannotAcquireLockException;
+import org.springframework.dao.QueryTimeoutException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.support.JdbcTransactionManager;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionStatus;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /** Contract 12/13/14 bookkeeping against PostgreSQL 17, with a scripted provider and a virtual monotonic clock. */
 @Testcontainers
+@ExtendWith(OutputCaptureExtension.class)
 class DeliveryLedgerTest {
     @Container static PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:17");
 
@@ -59,6 +74,21 @@ class DeliveryLedgerTest {
         }
     }
 
+    /** Hands out each transaction after a scripted connection-pool wait in virtual time (none when the script is empty). */
+    final class SlowPool implements PlatformTransactionManager {
+        final Deque<Duration> waits = new ArrayDeque<>();
+        @Override public TransactionStatus getTransaction(TransactionDefinition definition) {
+            Duration wait = waits.pollFirst();
+            if (wait != null) timer.advance(wait);
+            return manager.getTransaction(definition);
+        }
+        @Override public void commit(TransactionStatus status) { manager.commit(status); }
+        @Override public void rollback(TransactionStatus status) { manager.rollback(status); }
+    }
+
+    static final WebhookTransport NO_WEBHOOK = (url, payload, timeout) -> { throw new AssertionError("no webhook here"); };
+
+    DriverManagerDataSource ds;
     JdbcClient jdbc;
     JdbcTransactionManager manager;
     MutableClock clock;
@@ -71,7 +101,7 @@ class DeliveryLedgerTest {
 
     @BeforeEach
     void setUp() {
-        var ds = new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
+        ds = new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
         Flyway.configure().dataSource(ds).load().migrate();
         jdbc = JdbcClient.create(ds);
         manager = new JdbcTransactionManager(ds);
@@ -86,7 +116,7 @@ class DeliveryLedgerTest {
     }
 
     SyncSender sender(DeliveryLedger with) {
-        return new SyncSender(jdbc, manager, with, limits, mail, (url, payload, timeout) -> { throw new AssertionError("no webhook here"); }, crypto, timer);
+        return new SyncSender(jdbc, manager, with, limits, mail, NO_WEBHOOK, crypto, timer);
     }
 
     record Pending(UUID id, byte[] hash, DeliveryLedger.Claim claim) {}
@@ -241,25 +271,122 @@ class DeliveryLedgerTest {
         assertThat(job(p.claim().id())).isEqualTo("UNCERTAIN|DEADLINE|2");
         assertThat(timer.nanos).isLessThanOrEqualTo(Duration.ofSeconds(25).toNanos());
 
-        // A slow R (pool or lock wait) shortens the HTTP timeout measured after R; too little left means no HTTP.
+        // A slow start of R (its pool wait) is measured inside R: with no room left for a request, nothing is reserved.
         var slowLedger = new DeliveryLedger(jdbc, clock, limits, manager) {
             int calls;
-            @Override public Reservation reserve(Claim claim, UUID key, byte[] hash, byte[] totalKey, RateLimiter.Limit total, Duration lockTimeout) {
+            @Override public Reservation reserve(Claim claim, UUID key, byte[] hash, byte[] totalKey, RateLimiter.Limit total, java.util.function.Supplier<Duration> waitLimit) {
                 timer.advance(Duration.ofSeconds(++calls == 1 ? 9 : 12));
-                return super.reserve(claim, key, hash, totalKey, total, lockTimeout);
+                return super.reserve(claim, key, hash, totalKey, total, waitLimit);
             }
         };
         sender = sender(slowLedger);
         mail.timeouts.clear();
         Pending q = pending();
         long start = timer.nanoTime();
+        int totalBefore = emailTotal();
         mail.steps.add(timeout -> { timer.advance(Duration.ofSeconds(1)); return SendOutcome.Result.of(SendOutcome.HTTP_5XX); });
         sender.deliverMail(q.claim(), job(q), start);
-        // attempt 1: R ends at 9 s, timeout min(10, 25-9-2)=10, 5xx at 10 s; wait 2 -> 12 s; R ends at 24 s: < 1 s left -> NOT_SENT
+        // attempt 1: R starts at 9 s, timeout min(10, 25-9-2)=10, 5xx at 10 s; wait 2 -> 12 s; R starts at 24 s: 1 s left
+        // is less than CLEANUP + one request, so R reserves nothing (before: a NOT_SENT attempt and one more unit)
         assertThat(mail.timeouts).containsExactly(Duration.ofSeconds(10));
-        assertThat(attempts(q.claim().id())).containsExactly("HTTP_5XX", "NOT_SENT");
-        assertThat(job(q.claim().id())).isEqualTo("UNCERTAIN|DEADLINE|2");
+        assertThat(attempts(q.claim().id())).containsExactly("HTTP_5XX");
+        assertThat(emailTotal() - totalBefore).isEqualTo(1);
+        assertThat(job(q.claim().id())).isEqualTo("UNCERTAIN|DEADLINE|1");
         assertThat(timer.nanoTime() - start).isLessThanOrEqualTo(Duration.ofSeconds(25).toNanos());
+
+        // A slow end of R (after it committed) is measured again before the request: the reserved attempt is NOT_SENT.
+        var lateCommit = new DeliveryLedger(jdbc, clock, limits, manager) {
+            @Override public Reservation reserve(Claim claim, UUID key, byte[] hash, byte[] totalKey, RateLimiter.Limit total, java.util.function.Supplier<Duration> waitLimit) {
+                Reservation reservation = super.reserve(claim, key, hash, totalKey, total, waitLimit);
+                timer.advance(Duration.ofSeconds(22));
+                return reservation;
+            }
+        };
+        sender = sender(lateCommit);
+        mail.timeouts.clear();
+        Pending r = pending();
+        sender.deliverMail(r.claim(), job(r), timer.nanoTime());
+        assertThat(mail.timeouts).isEmpty();
+        assertThat(attempts(r.claim().id())).containsExactly("NOT_SENT");
+        assertThat(job(r.claim().id())).isEqualTo("FAILED|DEADLINE|1");
+    }
+
+    @Test
+    void aPoolWaitBeforeEitherTransactionIsMeasuredSoTheJobEndsWithoutAReservationOrRequest() {
+        var pool = new SlowPool();
+        var poolLimits = new RateLimiter(jdbc, clock, pool);
+        var poolLedger = new DeliveryLedger(jdbc, clock, poolLimits, pool);
+        sender = new SyncSender(jdbc, pool, poolLedger, poolLimits, mail, NO_WEBHOOK, crypto, timer);
+        // A gets its connection after 21 s: 4 s left. agy M-1: before, A set a 1 ms limit, the next statement failed and
+        // the row stayed SENDING until the sweep. Now A measures again and ends the job inside the CLEANUP share.
+        Pending a = pending();
+        pool.waits.add(Duration.ofSeconds(21));
+        deliver(a);
+        assertThat(job(a.claim().id())).isEqualTo("FAILED|DEADLINE|0");
+        // R gets connection B after 22 s: 3 s left is not CLEANUP plus one request, so R reserves nothing.
+        Pending b = pending();
+        pool.waits.addAll(List.of(Duration.ZERO, Duration.ofSeconds(22)));
+        deliver(b);
+        assertThat(job(b.claim().id())).isEqualTo("FAILED|DEADLINE|0");
+        assertThat(attempts(b.claim().id())).isEmpty();
+        assertThat(mail.keys).isEmpty();
+        assertThat(emailTotal()).isZero();
+    }
+
+    @Test
+    void aRowLockHeldByAnotherTransactionIsWaitedForOnlyWithinTheBudgetAndTheJobStillEnds() throws Exception {
+        Pending p = pending();
+        try (Connection holder = ds.getConnection()) {  // e.g. a condition change or an unsubscribe holding the row
+            holder.setAutoCommit(false);
+            try (var lock = holder.prepareStatement("SELECT 1 FROM subscription WHERE id = ? FOR UPDATE")) {
+                lock.setObject(1, p.id());
+                lock.executeQuery();
+            }
+            long t0 = System.nanoTime();
+            sender.deliverMail(p.claim(), job(p), timer.nanoTime() - Duration.ofSeconds(20).toNanos());  // 5 s left: waits get 3 s
+            Duration took = Duration.ofNanos(System.nanoTime() - t0);
+            holder.rollback();
+            assertThat(took).isBetween(Duration.ofMillis(2_500), Duration.ofMillis(6_000));
+        }
+        assertThat(mail.keys).isEmpty();
+        assertThat(emailTotal()).isZero();
+        assertThat(job(p.claim().id())).as("ended, not left SENDING for the sweep").isEqualTo("FAILED|DEADLINE|0");
+    }
+
+    @Test
+    void aCountWaitsForAHeldRateLimitRowOnlyAsLongAsItsBudgetAndCommitsNothingWhenItRunsOut() throws Exception {
+        byte[] key = crypto.limitKey("SUBSCRIBE:ip", "198.51.100.30");
+        assertThat(limits.acquire(RateLimiter.Scope.SUBSCRIBE, key, RateLimiter.PER_IP)).isTrue();
+        try (Connection holder = ds.getConnection()) {  // another request counting the same key, not yet committed
+            holder.setAutoCommit(false);
+            try (var count = holder.createStatement()) { count.executeUpdate("UPDATE rate_limit SET count = count + 1 WHERE scope = 'SUBSCRIBE'"); }
+            long t0 = System.nanoTime();
+            // lock_timeout and statement_timeout are the same value: either may fire first, and both are handled alike
+            assertThatThrownBy(() -> limits.acquire(RateLimiter.Scope.SUBSCRIBE, key, RateLimiter.PER_IP, () -> Duration.ofSeconds(2)))
+                    .isInstanceOfAny(CannotAcquireLockException.class, QueryTimeoutException.class);
+            assertThat(Duration.ofNanos(System.nanoTime() - t0)).isBetween(Duration.ofMillis(1_500), Duration.ofMillis(5_000));
+            assertThatThrownBy(() -> limits.acquire(RateLimiter.Scope.SUBSCRIBE, key, RateLimiter.PER_IP, () -> Duration.ZERO))
+                    .as("a spent budget starts no statement").isInstanceOf(QueryTimeoutException.class).hasMessage("SYNC_BUDGET_SPENT");
+            holder.rollback();
+        }
+        assertThat(jdbc.sql("SELECT count FROM rate_limit WHERE scope = 'SUBSCRIBE'").query(Integer.class).single())
+                .as("only the first count; the timed-out one committed nothing").isEqualTo(1);
+    }
+
+    @Test
+    void aProviderWaitOfADayEndsTheRequestAfterOneRequestForMailAndWebhookTests() {
+        Pending p = pending();
+        mail.steps.add(timeout -> new SendOutcome.Result(SendOutcome.RATE_LIMITED, 429, HttpTransports.MAX_WAIT));
+        deliver(p);
+        assertThat(mail.keys).hasSize(1);
+        assertThat(job(p.claim().id())).isEqualTo("FAILED|RATE_LIMITED|1");
+        List<Duration> requests = new ArrayList<>();
+        var discord = new SyncSender(jdbc, manager, ledger, limits, mail,
+                (url, payload, timeout) -> { requests.add(timeout); return new SendOutcome.Result(SendOutcome.RATE_LIMITED, 429, HttpTransports.MAX_WAIT); },
+                crypto, timer);
+        var attempts = discord.testWebhook(WebhookUrl.parse("https://discord.com/api/webhooks/1/token").orElseThrow(), "{}".getBytes(UTF_8), timer.nanoTime());
+        assertThat(attempts).hasSize(1);
+        assertThat(requests).hasSize(1);
     }
 
     @Test
@@ -276,7 +403,7 @@ class DeliveryLedgerTest {
         assertThat(ledger.recoverAsync()).isEqualTo(1);
         assertThat(job(digest)).isEqualTo("RETRY|UNKNOWN_CRASH|0");
         assertThat(job(confirm.claim().id())).as("the async recovery leaves the sync row alone").isEqualTo("SENDING|-|0");
-        assertThat(ledger.reserve(claims.getFirst(), UUID.randomUUID(), new byte[32], null, null, Duration.ofSeconds(1)))
+        assertThat(ledger.reserve(claims.getFirst(), UUID.randomUUID(), new byte[32], null, null, () -> Duration.ofSeconds(1)))
                 .as("the old worker's claim no longer fences").isInstanceOf(DeliveryLedger.Reservation.Fenced.class);
         assertThat(ledger.finish(claims.getFirst(), true, null, false)).isFalse();
         assertThat(ledger.sweepSync()).isEqualTo(1);
@@ -300,18 +427,30 @@ class DeliveryLedgerTest {
     }
 
     @Test
-    void restoreReappliesTheWholeJournalOrDeletesNothingWhenItIsCorrupt(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir) throws Exception {
+    void restoreReappliesTheWholeJournalOrDeletesNothingWhenItIsMissingMisplacedOrCorrupt(@TempDir Path dir, CapturedOutput output) throws Exception {
         Pending a = pending();
         Pending b = pending();
-        java.nio.file.Path file = dir.resolve("erasure.log");
+        Path file = dir.resolve("erasure.log");
+        // A path typo or a mount the restore missed, and a path that is a directory: failures, never "nothing to re-apply".
+        for (Path wrong : List.of(file, dir)) {
+            var command = new ErasureReapplyCommand(new ErasureJournal(wrong), jdbc, manager, new GenericApplicationContext());
+            assertThatThrownBy(() -> command.run(null)).as(wrong.toString())
+                    .isInstanceOf(ErasureJournal.CorruptJournal.class).hasMessage("ERASURE_LOG_MISSING");
+        }
+        Files.createFile(file);
         var journal = new ErasureJournal(file);
         journal.append(a.id(), clock.now);
-        java.nio.file.Files.writeString(file, "torn", java.nio.file.StandardOpenOption.APPEND);
-        var command = new ErasureReapplyCommand(journal, jdbc, manager, null);
-        assertThatThrownBy(command::reapply).isInstanceOf(ErasureJournal.CorruptJournal.class);
+        Files.writeString(file, "torn", StandardOpenOption.APPEND);
+        var torn = new ErasureReapplyCommand(journal, jdbc, manager, new GenericApplicationContext());
+        assertThatThrownBy(() -> torn.run(null)).isInstanceOf(ErasureJournal.CorruptJournal.class).hasMessage("ERASURE_LOG_TORN_LAST_LINE");
+        assertThat(output).as("no completion is reported for a failed run").doesNotContain("ERASURE_REAPPLY_COMPLETE");
         assertThat(jdbc.sql("SELECT count(*) FROM subscription").query(Integer.class).single()).as("fail closed").isEqualTo(2);
-        java.nio.file.Files.writeString(file, a.id() + "\t" + clock.now + "\n" + b.id() + "\t" + clock.now + "\n");
-        assertThat(command.reapply()).isEqualTo(2);
+
+        Files.writeString(file, "");
+        assertThat(torn.reapply()).as("an existing empty journal: prepared, nothing erased yet").isZero();
+        Files.writeString(file, a.id() + "\t" + clock.now + "\n" + b.id() + "\t" + clock.now + "\n");
+        new ErasureReapplyCommand(journal, jdbc, manager, new GenericApplicationContext()).run(null);
+        assertThat(output).contains("ERASURE_REAPPLY_COMPLETE deleted=2");
         assertThat(jdbc.sql("SELECT count(*) FROM subscription").query(Integer.class).single()).isZero();
     }
 

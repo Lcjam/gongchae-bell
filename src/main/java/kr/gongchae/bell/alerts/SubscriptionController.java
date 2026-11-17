@@ -7,10 +7,13 @@ import java.util.Map;
 import kr.gongchae.bell.catalog.CatalogRepository;
 import kr.gongchae.bell.catalog.CatalogViews;
 import kr.gongchae.bell.catalog.JobSearchCriteria;
+import org.springframework.dao.CannotAcquireLockException;
+import org.springframework.dao.QueryTimeoutException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Controller;
 import org.springframework.ui.Model;
+import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -127,6 +130,7 @@ public class SubscriptionController {
     @GetMapping("/subscriptions/confirm")
     String confirmPage(@RequestParam(required = false) String t, Model model, HttpServletResponse response) {
         capabilityPage(response);
+        if (!properties.enabled()) { response.setStatus(503); return unavailable(model); }
         model.addAttribute("title", "알림 신청 확인 · 공채벨");
         model.addAttribute("token", t);
         return "subscriptions/confirm";
@@ -205,6 +209,7 @@ public class SubscriptionController {
     @GetMapping("/subscriptions/unsubscribe")
     String unsubscribePage(@RequestParam(required = false) String t, Model model, HttpServletResponse response) {
         capabilityPage(response);
+        if (!properties.enabled()) { response.setStatus(503); return unavailable(model); }
         model.addAttribute("title", "알림 해지 · 공채벨");
         model.addAttribute("token", t);
         return "subscriptions/unsubscribe";
@@ -294,6 +299,16 @@ public class SubscriptionController {
     }
 
     // ---- shared pages ----
+
+    /**
+     * A lock or statement wait bounded by the in-request budget ran out (14-4). Nothing of the step that timed out was
+     * committed. Counted requests and reserved sends stay counted, as always.
+     */
+    @ExceptionHandler({CannotAcquireLockException.class, QueryTimeoutException.class})
+    String busy(Model model, HttpServletResponse response) {
+        response.setStatus(503);
+        return notice(model, "지금은 요청을 처리하지 못했습니다", "요청이 몰려 제한 시간 안에 처리하지 못했습니다. 잠시 뒤 다시 시도해 주세요.", null);
+    }
 
     private static String notice(Model model, String heading, String message, String detail) {
         model.addAttribute("title", heading + " · 공채벨");

@@ -4,7 +4,11 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Instant;
@@ -20,9 +24,12 @@ import org.junit.jupiter.api.io.TempDir;
 class ErasureJournalTest {
     @TempDir Path dir;
 
+    /** The operator's one-time preparation: an existing empty file. */
+    Path prepared() throws IOException { return Files.createFile(dir.resolve("erasure.log")); }
+
     @Test
     void concurrentAppendsKeepEveryLineWholeAndReadBack() throws Exception {
-        var journal = new ErasureJournal(dir.resolve("erasure.log"));
+        var journal = new ErasureJournal(prepared());
         List<UUID> ids = new ArrayList<>();
         for (int i = 0; i < 200; i++) ids.add(UUID.randomUUID());
         try (var pool = Executors.newFixedThreadPool(8)) {
@@ -37,8 +44,9 @@ class ErasureJournalTest {
 
     @Test
     void tornOrMalformedJournalFailsClosedAndANewLineNeverJoinsATornOne() throws Exception {
-        Path file = dir.resolve("erasure.log");
+        Path file = prepared();
         var journal = new ErasureJournal(file);
+        assertThat(journal.readStrict()).as("a prepared empty journal is a valid empty journal").isEmpty();
         UUID first = UUID.randomUUID();
         journal.append(first, Instant.parse("2026-11-16T00:00:00Z"));
         Files.writeString(file, "0b4c", UTF_8, StandardOpenOption.APPEND);  // a crash mid-write
@@ -53,8 +61,55 @@ class ErasureJournalTest {
         assertThatThrownBy(journal::readStrict).hasMessage("ERASURE_LOG_BAD_LINE_1");
         Files.writeString(file, first + "\tyesterday\n", UTF_8);
         assertThatThrownBy(journal::readStrict).hasMessage("ERASURE_LOG_BAD_LINE_1");
-        Files.writeString(file, "", UTF_8);
-        assertThat(journal.readStrict()).isEmpty();
-        assertThat(new ErasureJournal(dir.resolve("missing.log")).readStrict()).isEmpty();
+    }
+
+    @Test
+    void aMissingFileOrAWrongPathIsNeverAnEmptyJournal() throws Exception {
+        assertThatThrownBy(() -> new ErasureJournal(dir.resolve("missing.log")).readStrict())
+                .isInstanceOf(ErasureJournal.CorruptJournal.class).hasMessage("ERASURE_LOG_MISSING");
+        assertThatThrownBy(() -> new ErasureJournal(dir).readStrict()).as("a directory, e.g. a bind mount Docker made up")
+                .isInstanceOf(ErasureJournal.CorruptJournal.class).hasMessage("ERASURE_LOG_MISSING");
+        assertThatThrownBy(() -> new ErasureJournal(dir.resolve("missing.log")).append(UUID.randomUUID(), Instant.now()))
+                .as("the app never creates the journal").isInstanceOf(NoSuchFileException.class);
+        assertThat(dir.resolve("missing.log")).doesNotExist();
+
+        AlertsProperties base = AlertsSecurityTest.enabled();
+        AlertsProperties missing = new AlertsProperties(true, base.tokenKey(), base.hmacKey(), base.webhookKey(), base.webhookKeyId(),
+                dir.resolve("missing.log").toString(), base.mail(), base.privacy());
+        assertThatThrownBy(() -> new ErasureJournal(missing)).as("enabled alerts refuse to start without the prepared file")
+                .hasMessage("ALERTS_ERASURE_LOG_MISSING");
+        AlertsProperties ready = new AlertsProperties(true, base.tokenKey(), base.hmacKey(), base.webhookKey(), base.webhookKeyId(),
+                prepared().toString(), base.mail(), base.privacy());
+        assertThat(new ErasureJournal(ready).readStrict()).isEmpty();
+        assertThat(new ErasureJournal(new AlertsProperties(false, null, null, null, null, null, null, null))).as("off: not checked").isNotNull();
+    }
+
+    @Test
+    void everyAppendForcesTheDirectoryWhileStillHoldingTheFileLockAndAFailureReachesTheCaller() throws Exception {
+        Path file = prepared();
+        List<Boolean> heldDuringSync = new ArrayList<>();
+        List<FileChannel> probes = new ArrayList<>();
+        var journal = new ErasureJournal(file) {
+            @Override void syncDirectory(Path directory) throws IOException {
+                assertThat(directory).isEqualTo(file.toAbsolutePath().getParent());
+                FileChannel probe = FileChannel.open(file, StandardOpenOption.READ, StandardOpenOption.WRITE);
+                probes.add(probe);  // closed only after the append: closing it could drop this JVM's POSIX lock early
+                try { probe.tryLock().release(); heldDuringSync.add(false); }
+                catch (OverlappingFileLockException held) { heldDuringSync.add(true); }
+            }
+        };
+        try {
+            journal.append(UUID.randomUUID(), Instant.parse("2026-11-16T00:00:00Z"));
+            journal.append(UUID.randomUUID(), Instant.parse("2026-11-16T00:00:01Z"));
+        } finally {
+            for (FileChannel probe : probes) probe.close();
+        }
+        assertThat(heldDuringSync).as("not only for the first writer, and before the lock is released").containsExactly(true, true);
+
+        var failing = new ErasureJournal(file) {
+            @Override void syncDirectory(Path directory) throws IOException { throw new IOException("directory force failed"); }
+        };
+        assertThatThrownBy(() -> failing.append(UUID.randomUUID(), Instant.now()))
+                .as("the caller (unsubscribe) fails and deletes nothing").isInstanceOf(IOException.class).hasMessage("directory force failed");
     }
 }

@@ -2,6 +2,7 @@ package kr.gongchae.bell.alerts;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -13,16 +14,22 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.sql.Connection;
 import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
+import javax.sql.DataSource;
 import kr.gongchae.bell.IntegrationTestSupport;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -36,6 +43,7 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.test.web.servlet.request.RequestPostProcessor;
 
@@ -58,7 +66,8 @@ import org.springframework.test.web.servlet.request.RequestPostProcessor;
 class SubscriptionFlowIntegrationTest extends IntegrationTestSupport {
     static final Path JOURNAL;
     static {
-        try { JOURNAL = Files.createTempDirectory("erasure").resolve("erasure.log"); }
+        // Prepared before the context starts, as the operator does before enabling alerts.
+        try { JOURNAL = Files.createFile(Files.createTempDirectory("erasure").resolve("erasure.log")); }
         catch (IOException e) { throw new UncheckedIOException(e); }
     }
     static final String ORIGIN = "https://gongchae.example";
@@ -77,6 +86,9 @@ class SubscriptionFlowIntegrationTest extends IntegrationTestSupport {
     static final AtomicReference<SendOutcome> MAIL_RESULT = new AtomicReference<>(SendOutcome.SUCCESS);
     static final AtomicInteger WEBHOOK_CALLS = new AtomicInteger();
     static final AtomicReference<SendOutcome> WEBHOOK_RESULT = new AtomicReference<>(SendOutcome.SUCCESS);
+    /** Fake monotonic clock: real time plus AHEAD. SKIP_AFTER_START moves it ahead right after the next reading. */
+    static final AtomicLong AHEAD = new AtomicLong();
+    static final AtomicLong SKIP_AFTER_START = new AtomicLong();
 
     @TestConfiguration
     static class Fakes {
@@ -88,7 +100,11 @@ class SubscriptionFlowIntegrationTest extends IntegrationTestSupport {
         }
         @Bean @Primary SyncSender.Timer noWaitTimer() {
             return new SyncSender.Timer() {
-                @Override public long nanoTime() { return System.nanoTime(); }
+                @Override public long nanoTime() {
+                    long now = System.nanoTime() + AHEAD.get();
+                    AHEAD.addAndGet(SKIP_AFTER_START.getAndSet(0));  // the request's start() reads before the jump
+                    return now;
+                }
                 @Override public void sleep(Duration duration) { }
             };
         }
@@ -97,6 +113,7 @@ class SubscriptionFlowIntegrationTest extends IntegrationTestSupport {
     @Autowired MockMvc mvc;
     @Autowired JdbcClient jdbc;
     @Autowired AlertsCrypto crypto;
+    @Autowired DataSource dataSource;
 
     @BeforeEach
     void clean() throws IOException {
@@ -109,7 +126,8 @@ class SubscriptionFlowIntegrationTest extends IntegrationTestSupport {
         MAIL_RESULT.set(SendOutcome.SUCCESS);
         WEBHOOK_CALLS.set(0);
         WEBHOOK_RESULT.set(SendOutcome.SUCCESS);
-        Files.deleteIfExists(JOURNAL);
+        SKIP_AFTER_START.set(0);
+        Files.write(JOURNAL, new byte[0]);
     }
 
     static RequestPostProcessor from(String ip) { return request -> { request.setRemoteAddr(ip); return request; }; }
@@ -328,7 +346,10 @@ class SubscriptionFlowIntegrationTest extends IntegrationTestSupport {
         mvc.perform(get("/privacy")).andExpect(status().isOk()).andExpect(content().string(containsString("개인정보 담당(시험값)")))
                 .andExpect(content().string(containsString("Plus Five Five, Inc.")));
         mvc.perform(get("/jobs").param("ncs", "R600020")).andExpect(status().isOk())
-                .andExpect(content().string(containsString("/subscriptions/new?ncs=R600020")));
+                // unset filters stay as empty arguments (agy's PR #13 note said they are left out; they are not)
+                .andExpect(content().string(containsString("/subscriptions/new?ncs=R600020&amp;region=&amp;hire=&amp;career=&amp;q=\"")));
+        mvc.perform(get("/subscriptions/new?ncs=R600020&region=&hire=&career=&q=")).andExpect(status().isOk())
+                .andExpect(content().string(containsString("<option value=\"R600020\" selected=\"selected\">정보통신</option>")));
         mvc.perform(post("/subscriptions/email").header("Origin", ORIGIN).param("email", "x@example.com").param("notifyNew", "true")
                 .param("age14", "true")).andExpect(status().isBadRequest()).andExpect(content().string(containsString("동의해야")));
         mvc.perform(post("/subscriptions/email").header("Origin", ORIGIN).param("email", "x@example.com").param("notifyNew", "true")
@@ -339,5 +360,87 @@ class SubscriptionFlowIntegrationTest extends IntegrationTestSupport {
         assertThat(jdbc.sql("SELECT count(*) FROM subscription").query(Integer.class).single()).isZero();
         for (int i = 0; i < 3; i++) mvc.perform(signup("same@example.com")).andExpect(status().isOk());
         mvc.perform(signup("same@example.com")).andExpect(status().isTooManyRequests());
+    }
+
+    MockHttpServletRequestBuilder recover(String email) {
+        return post("/subscriptions/recover/email").header("Origin", ORIGIN).param("email", email);
+    }
+
+    void awaitLockWait() throws InterruptedException {
+        for (int i = 0; i < 200; i++) {
+            if (jdbc.sql("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()")
+                    .query(Integer.class).single() > 0) return;
+            Thread.sleep(50);
+        }
+        throw new AssertionError("no transaction waited on the lock");
+    }
+
+    /** Root C1 / agy R-1: before the parent lock, the job insert after the unsubscribe's delete failed the FK (500). */
+    @Test
+    void aRecoveryRacingAnUnsubscribeAnswersTheSameAndSendsNothing() throws Exception {
+        confirmed("racer@example.com");
+        UUID id = id("racer@example.com");
+        int mails = MAILS.size();
+        String fixed = mvc.perform(recover("nobody@example.com")).andExpect(status().isOk()).andReturn().getResponse().getContentAsString(UTF_8);
+        try (Connection unsubscribe = dataSource.getConnection(); var pool = Executors.newSingleThreadExecutor()) {
+            unsubscribe.setAutoCommit(false);
+            // The unsubscribe's own DB statements (its journal line is outside the DB): the row lock, then the delete.
+            try (var lock = unsubscribe.prepareStatement("SELECT token_version FROM subscription WHERE id = ? FOR UPDATE")) {
+                lock.setObject(1, id);
+                lock.executeQuery();
+            }
+            try (var delete = unsubscribe.prepareStatement("DELETE FROM subscription WHERE id = ?")) {
+                delete.setObject(1, id);
+                delete.executeUpdate();
+            }
+            Future<MvcResult> recovery = pool.submit(() -> mvc.perform(recover("racer@example.com")).andReturn());
+            awaitLockWait();  // the recovery's read now waits for the unsubscribe
+            unsubscribe.commit();
+            MvcResult result = recovery.get(20, TimeUnit.SECONDS);
+            assertThat(result.getResponse().getStatus()).isEqualTo(200);
+            assertThat(result.getResponse().getContentAsString(UTF_8)).as("the fixed answer").isEqualTo(fixed);
+        }
+        assertThat(MAILS).as("nothing sent to an erased address").hasSize(mails);
+        assertThat(jdbc.sql("SELECT count(*) FROM notification WHERE kind = 'EMAIL_RECOVER'").query(Integer.class).single()).isZero();
+        assertThat(jdbc.sql("SELECT count(*) FROM subscription WHERE id = :id").param("id", id).query(Integer.class).single()).isZero();
+    }
+
+    /** Root C4: a lock wait before the send is cut to the request budget and ends as a 503, keeping nothing of the step. */
+    @Test
+    void aBoundedWaitThatRunsOutAnswersBusyInsideTheBudgetAndKeepsNothingOfTheSignup() throws Exception {
+        try (Connection other = dataSource.getConnection()) {  // another sign-up of the same address, not yet committed
+            other.setAutoCommit(false);
+            try (var insert = other.prepareStatement("""
+                    INSERT INTO subscription(id, channel, status, email, dest_hmac, conditions, notify_new, notify_deadline,
+                      confirm_token_hash, confirm_expires_at, consent_version, consented_at, age_confirmed, created_at, updated_at)
+                    VALUES (?, 'EMAIL', 'PENDING', 'busy@example.com', ?, '{}'::jsonb, true, false, ?, now() + interval '1 day',
+                      'test-1', now(), true, now(), now())
+                    """)) {
+                insert.setObject(1, UUID.randomUUID());
+                insert.setBytes(2, crypto.destination("EMAIL", "busy@example.com"));
+                insert.setBytes(3, AlertsCrypto.sha256("other request"));
+                insert.executeUpdate();
+            }
+            SKIP_AFTER_START.set(Duration.ofSeconds(20).toNanos());  // 20 s gone right after the start: 3 s left for waits
+            long t0 = System.nanoTime();
+            mvc.perform(signup("busy@example.com")).andExpect(status().isServiceUnavailable())
+                    .andExpect(content().string(containsString("잠시 뒤 다시 시도해 주세요")));
+            assertThat(Duration.ofNanos(System.nanoTime() - t0)).isBetween(Duration.ofMillis(2_500), Duration.ofMillis(8_000));
+            other.rollback();
+        }
+        assertThat(MAILS).isEmpty();
+        assertThat(jdbc.sql("SELECT count(*) FROM subscription").query(Integer.class).single()).isZero();
+        assertThat(jdbc.sql("SELECT count(*) FROM notification").query(Integer.class).single()).isZero();
+    }
+
+    @Test
+    void anUnsubscribeWithoutItsJournalFileDeletesNothing() throws Exception {
+        confirmed("stay@example.com");
+        String token = crypto.capability(AlertsCrypto.Purpose.UNSUBSCRIBE, id("stay@example.com"), 1);
+        Files.delete(JOURNAL);  // the mount went away: the app does not create a fresh journal
+        assertThatThrownBy(() -> mvc.perform(post("/subscriptions/unsubscribe").param("t", token)))
+                .hasRootCauseInstanceOf(NoSuchFileException.class);
+        assertThat(stateOf("stay@example.com")).isEqualTo("ACTIVE");
+        assertThat(JOURNAL).doesNotExist();
     }
 }

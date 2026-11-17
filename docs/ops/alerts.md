@@ -11,7 +11,7 @@
 - Discord: 국외 처리와 법적 관계(위탁인지, 독립 처리자인지)를 확정한다.
 - 브라우저: `Referrer-Policy: no-referrer` 페이지의 POST가 보내는 `Origin`을 실제 HTTPS와 Firefox·Safari에서 확인한다(지금은 Chromium 루프백 관측뿐이다).
 - 프록시: Caddy만 `X-Forwarded-For`를 넘기고, 외부 요청이 그 헤더를 직접 넣지 못한다. 접근 로그에서 쿼리 `t`를 지운다.
-- 해지 대장: 호스트 경로가 blue·green 두 컨테이너에 같은 파일로 바인드되고 restic 백업에 들어가는지 확인한다. 대장 정리 시점은 아래 "해지 대장"을 본다.
+- 해지 대장: 처음 켜기 전에 운영자가 빈 파일을 만든다(예: `install -m 600 /dev/null <경로>` 뒤 `sync`). 앱은 대장을 만들지 않는다. 알림을 켰을 때 그 경로에 파일이 없으면 `ALERTS_ERASURE_LOG_MISSING`으로 시작하지 않는다. 그 호스트 파일이 blue·green 두 컨테이너에 같은 파일로 바인드되고 restic 백업에 들어가는지 확인한다. Docker는 없는 호스트 경로를 디렉터리로 만들기 때문에, 파일을 먼저 만들어야 한다. 대장 정리 시점은 아래 "해지 대장"을 본다.
 - 백업 사본(OCI·NAS·PC)이 실제로 14일 뒤 지워지는지 확인한다.
 
 ## 설정 (값은 환경변수·GitHub Secrets에만)
@@ -22,7 +22,7 @@
 | `ALERTS_TOKEN_KEY` | 관리·해지 HMAC 키. base64, 32바이트 이상 |
 | `ALERTS_HMAC_KEY` | 목적지·요청 제한 HMAC 키. 위와 다른 값, base64, 32바이트 이상 |
 | `ALERTS_WEBHOOK_KEY`, `ALERTS_WEBHOOK_KEY_ID` | 웹훅 URL AES-256-GCM 키(base64, 정확히 32바이트)와 그 ID(`[A-Za-z0-9_-]{1,40}`) |
-| `ALERTS_ERASURE_LOG` | 해지 대장 파일 경로. DB 볼륨과 다른 호스트 디렉터리 |
+| `ALERTS_ERASURE_LOG` | 해지 대장 파일 경로. DB 볼륨과 다른 호스트 디렉터리. 켜기 전에 빈 파일로 준비해 둔다 |
 | `RESEND_API_KEY`, `ALERTS_MAIL_FROM` | Resend API 키, 발신 주소(인증된 도메인) |
 | `PRIVACY_OFFICER`, `PRIVACY_CONTACT`, `PRIVACY_POLICY_VERSION`, `PRIVACY_EFFECTIVE_DATE`, `PRIVACY_HOSTING_LOCATION`, `PRIVACY_OVERSEAS_BASIS`, `PRIVACY_RESEND_RETENTION` | 처리방침에 그대로 보이는 값. 동의 기록의 `consent_version`은 `PRIVACY_POLICY_VERSION`이다 |
 
@@ -42,7 +42,7 @@
 | 신청(이메일·디스코드)·관리 링크 재발송·웹훅 테스트 | IP당 10분 10회, 대상(이메일·웹훅)당 1시간 3회 |
 | 토큰 실패 | IP당 10분 30회. 넘으면 그 IP의 토큰 요청은 검사 없이 429 |
 | 발송 상한 | 이메일 하루 90통(UTC 날짜), 디스코드 시간당 300회. 시도마다 예약하며 환불하지 않는다 |
-| 요청 안 발송 | 요청당 최대 3회, 25초 안 |
+| 요청 안 발송 | 요청당 최대 3회, 25초 예산. 잠금·문장 대기도 이 예산에서 나눠 쓴다. 발송 전 대기가 예산을 넘으면 응답은 503 "지금은 요청을 처리하지 못했습니다"이다. 풀 대기(연결마다 5초)는 예산으로 묶지 못한다([계약 §6](../../collab/2026-11-16-implementation/claude-subscriptions-contract.md#6-수치-adr-0014에-반영)) |
 
 ## 보존과 정리
 
@@ -60,16 +60,18 @@
 
 ## 해지 대장과 복원 (ADR-0013)
 
-- 해지하면 구독 행 잠금 아래에서 `<구독 UUID>\t<UTC 시각>` 한 줄을 쓰고 fsync한 뒤 행을 지운다. 대장 쓰기가 실패하면 해지 요청이 실패하고 아무것도 지우지 않는다.
+- 해지하면 구독 행 잠금 아래에서 `<구독 UUID>\t<UTC 시각>` 한 줄을 쓰고, 파일과 디렉터리를 fsync한다. 디렉터리 fsync는 POSIX에서만 하며, 매번 파일 잠금을 쥔 채로 한다. 그 뒤에 행을 지운다. 대장 쓰기가 실패하면(파일이 없거나 fsync 실패) 해지 요청이 실패하고 아무것도 지우지 않는다.
 - 복원:
   1. 알림을 끈 채(`ALERTS_ENABLED=false`) 덤프를 복원한다.
   2. 다음 명령을 실행한다.
      ```
      java -jar gongchae-bell.jar --spring.main.web-application-type=none --alerts.erasure-reapply=true
      ```
-     `ALERTS_ERASURE_LOG`가 필요하다. 로그 `ERASURE_REAPPLY_COMPLETE deleted=N`을 확인한다.
+     `ALERTS_ERASURE_LOG`에는 백업에서 되살린 대장 파일을 지정한다. 로그 `ERASURE_REAPPLY_COMPLETE deleted=N`이 나오고 종료 코드가 0인지 확인한다.
   3. 결과를 확인한 뒤 알림을 켠다.
-- 대장에 잘리거나 형식이 틀린 줄이 있으면 명령은 `ERASURE_LOG_TORN_LAST_LINE` 또는 `ERASURE_LOG_BAD_LINE_<줄 번호>`로 실패하고 아무것도 지우지 않는다. 운영자가 해당 줄을 확인·수정한 뒤 다시 실행한다. 그동안 알림을 켜지 않는다.
+- 아래 경우 명령은 실패한다. 완료 로그가 없고, 종료 코드가 0이 아니며, 아무것도 지우지 않는다. 운영자가 원인을 확인한 뒤 다시 실행한다. 그동안 알림을 켜지 않는다.
+  - 경로에 파일이 없음(경로 오타, 대장을 되살리지 않음, 디렉터리를 가리킴): `ERASURE_LOG_MISSING`. 빈 대장으로 보지 않는다. 해지가 한 번도 없었던 경우에도 준비해 둔 빈 파일이 백업에 있어야 한다.
+  - 대장에 잘리거나 형식이 틀린 줄: `ERASURE_LOG_TORN_LAST_LINE` 또는 `ERASURE_LOG_BAD_LINE_<줄 번호>`.
 - 정리: 자동 정리는 없다. 해지 시각 이전에 만든 모든 백업 사본의 삭제가 확인된 뒤에만 그 줄을 지울 수 있다. 파일을 다시 쓰는 정리는 두 앱을 멈춘 상태에서 한다. 사본 삭제를 확인할 방법과 주기를 정하기 전까지 대장은 정리하지 않는다(처리방침에도 '미정'으로 표시).
 
 ## 발송 기록 읽기

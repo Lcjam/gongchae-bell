@@ -1,7 +1,6 @@
 package kr.gongchae.bell.alerts;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
-import static java.nio.file.StandardOpenOption.CREATE;
 import static java.nio.file.StandardOpenOption.READ;
 import static java.nio.file.StandardOpenOption.WRITE;
 
@@ -17,27 +16,37 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 /**
  * ADR-0013 host-file erasure journal, shared by blue and green: one line {@code <subscription uuid>\t<instant>\n}
- * per unsubscribe, written under the subscription row lock before the DB delete. Writers in one JVM are serialized
- * here; across containers by an OS file lock. A write loop puts every byte, a newline guard keeps a new line from
- * joining a torn one, and force(true) runs before the DB delete. Reading for restore is strict: any malformed or torn
- * line fails the whole read, so nothing is re-applied from a journal we cannot trust (fail closed).
+ * per unsubscribe, written under the subscription row lock before the DB delete.
+ *
+ * <p>The operator creates the empty file once, before alerts are first enabled. With alerts enabled the app refuses
+ * to start without it, and the app never creates it. So a missing file always means a wrong path or mount, never
+ * "nothing erased yet", both in service and at restore.
+ *
+ * <p>Writers in one JVM are serialized here, and writers across containers by an OS file lock. A write loop puts
+ * every byte, and a newline guard keeps a new line from joining a torn one. Before the lock is released, the file is
+ * forced and so is its directory (POSIX), on every append, so the entry is durable before any DB delete commits,
+ * whichever process wrote first. Reading for restore is strict: a missing file or a malformed or torn line fails the
+ * whole read, and nothing is re-applied from a journal we cannot trust (fail closed).
  */
 @Component
 public class ErasureJournal {
     private final Object writers = new Object();
     private final Path path;
 
-    @org.springframework.beans.factory.annotation.Autowired
+    @Autowired
     public ErasureJournal(AlertsProperties properties) {
         this(AlertsProperties.present(properties.erasureLog()) ? Path.of(properties.erasureLog()) : null);
+        if (properties.enabled() && !Files.isRegularFile(path)) throw new IllegalStateException("ALERTS_ERASURE_LOG_MISSING");
     }
 
     ErasureJournal(Path path) { this.path = path; }
 
+    /** The journal cannot be trusted for a restore: missing, torn or malformed. The message is a fixed code. */
     public static final class CorruptJournal extends IOException {
         CorruptJournal(String reason) { super(reason); }
     }
@@ -45,8 +54,7 @@ public class ErasureJournal {
     public void append(UUID subscriptionId, Instant at) throws IOException {
         if (path == null) throw new IllegalStateException("ALERTS_DISABLED");
         synchronized (writers) {
-            boolean created = Files.notExists(path);
-            try (FileChannel channel = FileChannel.open(path, CREATE, READ, WRITE); FileLock lock = channel.lock()) {
+            try (FileChannel channel = FileChannel.open(path, READ, WRITE); FileLock lock = channel.lock()) {  // no CREATE
                 long end = channel.size();
                 boolean torn = false;
                 if (end > 0) {
@@ -57,15 +65,15 @@ public class ErasureJournal {
                 ByteBuffer line = UTF_8.encode((torn ? "\n" : "") + subscriptionId + "\t" + at + "\n");
                 while (line.hasRemaining()) end += channel.write(line, end);
                 channel.force(true);
+                syncDirectory(path.toAbsolutePath().getParent());  // still under the OS lock
             }
-            if (created) forceDirectory(path.toAbsolutePath().getParent());
         }
     }
 
-    /** Every subscription id in the journal, or {@link CorruptJournal} naming the first bad line. Reads under the lock. */
+    /** Every subscription id in the journal, or {@link CorruptJournal} naming why it cannot be used. Reads under the lock. */
     public List<UUID> readStrict() throws IOException {
         if (path == null) throw new IllegalStateException("ALERTS_ERASURE_LOG_REQUIRED");
-        if (Files.notExists(path)) return List.of();
+        if (!Files.isRegularFile(path)) throw new CorruptJournal("ERASURE_LOG_MISSING");
         byte[] bytes;
         synchronized (writers) {
             try (FileChannel channel = FileChannel.open(path, READ, WRITE); FileLock lock = channel.lock()) {
@@ -74,7 +82,7 @@ public class ErasureJournal {
                 bytes = all.array();
             }
         }
-        if (bytes.length == 0) return List.of();
+        if (bytes.length == 0) return List.of();  // a prepared journal with no unsubscribe yet
         if (bytes[bytes.length - 1] != '\n') throw new CorruptJournal("ERASURE_LOG_TORN_LAST_LINE");
         List<UUID> ids = new ArrayList<>();
         String[] lines = new String(bytes, UTF_8).split("\n", -1);
@@ -93,8 +101,11 @@ public class ErasureJournal {
         return ids;
     }
 
-    /** First creation: make the new directory entry durable too (POSIX). Windows cannot open a directory for this. */
-    private static void forceDirectory(Path directory) throws IOException {
+    /**
+     * Makes the file's directory entry durable on POSIX (the deployment). Windows cannot open a directory for this,
+     * so there it does nothing. Package-private so a test can check that it runs while the lock is held.
+     */
+    void syncDirectory(Path directory) throws IOException {
         if (directory == null || System.getProperty("os.name", "").toLowerCase(Locale.ROOT).startsWith("windows")) return;
         try (FileChannel dir = FileChannel.open(directory, READ)) { dir.force(true); }
     }

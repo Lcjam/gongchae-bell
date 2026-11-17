@@ -22,6 +22,11 @@ class AlertsDisabledIntegrationTest extends IntegrationTestSupport {
     @Test
     void withAlertsOffNothingIsCollectedAndThePolicySaysWhatIsStillUnset() throws Exception {
         mvc.perform(get("/subscriptions/new")).andExpect(status().isOk()).andExpect(content().string(containsString("알림 신청은 준비 중입니다")));
+        // agy R-3: the link pages say the same instead of showing a form whose POST would be refused
+        mvc.perform(get("/subscriptions/confirm").param("t", "x")).andExpect(status().isServiceUnavailable())
+                .andExpect(content().string(containsString("알림 신청은 준비 중입니다")));
+        mvc.perform(get("/subscriptions/unsubscribe").param("t", "x")).andExpect(status().isServiceUnavailable())
+                .andExpect(content().string(containsString("알림 신청은 준비 중입니다")));
         mvc.perform(post("/subscriptions/email").header("Origin", "http://localhost:8080").param("email", "a@example.com")
                 .param("notifyNew", "true").param("consent", "true").param("age14", "true")).andExpect(status().isServiceUnavailable());
         assertThat(jdbc.sql("SELECT count(*) FROM subscription").query(Integer.class).single()).isZero();
