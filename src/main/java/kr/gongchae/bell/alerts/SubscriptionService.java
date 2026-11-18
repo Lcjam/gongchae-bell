@@ -18,13 +18,16 @@ import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import kr.gongchae.bell.catalog.CatalogRepository;
 import kr.gongchae.bell.catalog.CatalogViews;
+import kr.gongchae.bell.catalog.FreshnessService;
 import kr.gongchae.bell.catalog.JobSearchCriteria;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionException;
 import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.databind.json.JsonMapper;
 import tools.jackson.databind.node.ObjectNode;
@@ -70,15 +73,17 @@ public class SubscriptionService {
     private final SyncSender sender;
     private final ErasureJournal journal;
     private final CatalogRepository catalog;
+    private final FreshnessService freshness;
     private final AlertsProperties properties;
     private final Clock clock;
     private final String baseUrl;
 
     public SubscriptionService(JdbcClient jdbc, PlatformTransactionManager manager, AlertsCrypto crypto, RateLimiter limits,
             DeliveryLedger ledger, SyncSender sender, ErasureJournal journal, CatalogRepository catalog,
-            AlertsProperties properties, Clock clock, @Value("${app.base-url:http://localhost:8080}") String baseUrl) {
+            FreshnessService freshness, AlertsProperties properties, Clock clock,
+            @Value("${app.base-url:http://localhost:8080}") String baseUrl) {
         this.jdbc = jdbc; this.tx = new TransactionTemplate(manager); this.crypto = crypto; this.limits = limits;
-        this.ledger = ledger; this.sender = sender; this.journal = journal; this.catalog = catalog;
+        this.ledger = ledger; this.sender = sender; this.journal = journal; this.catalog = catalog; this.freshness = freshness;
         this.properties = properties; this.clock = clock;
         this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
     }
@@ -86,6 +91,24 @@ public class SubscriptionService {
     // ---- input ----
 
     public long start() { return sender.start(); }
+
+    /**
+     * The footer's collection time for a budgeted POST's own response (Codex C4 P2), read as a final step like the
+     * Discord save: the pool bound must fit before the cleanup share, and the read gets the 2 s cleanup deadline capped
+     * by the request's. No room or a failed read shows it as unavailable and changes nothing else.
+     */
+    public FreshnessService.FreshnessStatus freshness(long start) {
+        try {
+            limits.requirePoolRoom(() -> sender.remaining(start).minus(SyncSender.CLEANUP));
+            return tx.execute(status -> {
+                limits.boundWaits(sender.cleanupWaits(start).get());
+                return freshness.currentStatus();
+            });
+        } catch (DataAccessException | TransactionException unavailable) {  // a pool timeout surfaces as TransactionException
+            log.warn("ALERT_FRESHNESS_UNAVAILABLE {}", unavailable.getClass().getSimpleName());
+            return FreshnessService.FreshnessStatus.unavailable();
+        }
+    }
 
     /** Read once within the POST budget, also reused when invalid input is shown again. */
     public Map<String, List<CatalogViews.FilterOption>> signupOptions(long start) {
@@ -300,8 +323,7 @@ public class SubscriptionService {
      * then DELETE). The unsubscribe either waits for this transaction, or commits first and the read finds no row.
      * A status or token change in between is caught by the eligibility check in A. Budget as in {@link #subscribeEmail}.
      */
-    public State recoverEmail(String rawEmail, String ip) {
-        long start = sender.start();
+    public State recoverEmail(String rawEmail, String ip, long start) {
         String email = email(rawEmail);
         Supplier<Duration> waits = () -> sender.waitLimit(start);
         if (!limits.acquire(RateLimiter.Scope.RESEND, crypto.limitKey("RESEND:ip", ip), RateLimiter.PER_IP, waits)

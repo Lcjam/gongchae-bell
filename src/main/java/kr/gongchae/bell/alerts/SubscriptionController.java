@@ -4,8 +4,11 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 import kr.gongchae.bell.catalog.CatalogRepository;
 import kr.gongchae.bell.catalog.CatalogViews;
+import kr.gongchae.bell.catalog.FreshnessModelInterceptor;
+import kr.gongchae.bell.catalog.FreshnessService;
 import kr.gongchae.bell.catalog.JobSearchCriteria;
 import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.dao.QueryTimeoutException;
@@ -71,7 +74,7 @@ public class SubscriptionController {
             @RequestParam(defaultValue = "false") boolean consent, @RequestParam(defaultValue = "false") boolean age14,
             Model model, HttpServletRequest request, HttpServletResponse response) {
         if (!properties.enabled()) { response.setStatus(503); return unavailable(model); }
-        long start = service.start();
+        long start = budgeted(request);
         Map<String, List<CatalogViews.FilterOption>> options = service.signupOptions(start);
         SubscriptionService.Conditions conditions = new SubscriptionService.Conditions(blank(ncs), blank(region), blank(hire), blank(career), blank(q), notifyNew, notifyDeadline);
         try {
@@ -98,7 +101,7 @@ public class SubscriptionController {
             @RequestParam(defaultValue = "false") boolean consent, @RequestParam(defaultValue = "false") boolean age14,
             Model model, HttpServletRequest request, HttpServletResponse response) {
         if (!properties.enabled()) { response.setStatus(503); return unavailable(model); }
-        long start = service.start();
+        long start = budgeted(request);
         Map<String, List<CatalogViews.FilterOption>> options = service.signupOptions(start);
         SubscriptionService.Conditions conditions = new SubscriptionService.Conditions(blank(ncs), blank(region), blank(hire), blank(career), blank(q), notifyNew, notifyDeadline);
         SubscriptionService.Result result;
@@ -262,8 +265,9 @@ public class SubscriptionController {
     @PostMapping("/subscriptions/recover/email")
     String recoverEmail(@RequestParam(required = false) String email, Model model, HttpServletRequest request, HttpServletResponse response) {
         if (!properties.enabled()) { response.setStatus(503); return unavailable(model); }
+        long start = budgeted(request);
         try {
-            if (service.recoverEmail(email, ip(request)) == SubscriptionService.State.RATE_LIMITED) return limited(model, response);
+            if (service.recoverEmail(email, ip(request), start) == SubscriptionService.State.RATE_LIMITED) return limited(model, response);
         } catch (SubscriptionService.InvalidInput invalid) {
             response.setStatus(400);
             return notice(model, "이메일 주소를 확인해 주세요", "올바른 이메일 주소 형식이 아닙니다.", null);
@@ -312,6 +316,17 @@ public class SubscriptionController {
     String busy(Model model, HttpServletResponse response) {
         response.setStatus(503);
         return notice(model, "지금은 요청을 처리하지 못했습니다", "요청이 몰려 제한 시간 안에 처리하지 못했습니다. 잠시 뒤 다시 시도해 주세요.", null);
+    }
+
+    /**
+     * Starts a POST's 25 s budget and makes the footer's collection time read inside it (Codex C4 P2); the view
+     * interceptor would otherwise read it after the send with no limit.
+     */
+    private long budgeted(HttpServletRequest request) {
+        long start = service.start();
+        request.setAttribute(FreshnessModelInterceptor.STATUS_SOURCE,
+                (Supplier<FreshnessService.FreshnessStatus>) () -> service.freshness(start));
+        return start;
     }
 
     private static String notice(Model model, String heading, String message, String detail) {

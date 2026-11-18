@@ -35,6 +35,7 @@ import java.util.regex.Pattern;
 import javax.sql.DataSource;
 import kr.gongchae.bell.IntegrationTestSupport;
 import kr.gongchae.bell.catalog.CatalogRepository;
+import kr.gongchae.bell.catalog.FreshnessService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -475,6 +476,41 @@ class SubscriptionFlowIntegrationTest extends IntegrationTestSupport {
             }
         }
         assertThat(WEBHOOK_CALLS).hasValue(0);
+    }
+
+    /**
+     * Codex C4 P2: the footer's collection time (collect_run) is read for the response after the send. Before, the
+     * view interceptor read it on a fresh connection with no limit, so a locked collect_run held the response.
+     */
+    @Test
+    void theFooterCollectionTimeIsReadInsideTheRequestBudgetWhileCollectRunIsLocked() throws Exception {
+        try (Connection holder = dataSource.getConnection(); var pool = Executors.newSingleThreadExecutor()) {
+            holder.setAutoCommit(false);
+            try (var lock = holder.createStatement()) { lock.execute("LOCK TABLE collect_run IN ACCESS EXCLUSIVE MODE"); }
+            try {
+                MvcResult sent = within(pool, signup("footer@example.com"));
+                MvcResult invalid = within(pool, signup("footer@example.com").param("region", "INVALID"));
+                MvcResult resent = within(pool, recover("nobody@example.com"));
+                assertThat(List.of(sent, invalid, resent)).extracting(r -> r.getResponse().getStatus()).containsExactly(200, 400, 200);
+                for (MvcResult result : List.of(sent, invalid, resent))
+                    assertThat(result.getResponse().getContentAsString(UTF_8)).contains(FreshnessService.UNAVAILABLE_DISPLAY);
+                SKIP_AFTER_START.set(Duration.ofSeconds(14).toNanos());  // 11 s left: no room for the condition lookup
+                assertThat(within(pool, signup("late@example.com")).getResponse().getStatus()).isEqualTo(503);
+            } finally {
+                holder.rollback();  // always release before the executor waits for a request to finish
+            }
+        }
+        assertThat(MAILS).as("one confirm mail, not repeated for the footer").hasSize(1);
+        assertThat(mvc.perform(signup("free@example.com")).andReturn().getResponse().getContentAsString(UTF_8))
+                .as("unlocked, the footer shows the real state again").doesNotContain(FreshnessService.UNAVAILABLE_DISPLAY);
+    }
+
+    /** One request observed with an upper bound, so a regression fails the test instead of hanging it. */
+    MvcResult within(java.util.concurrent.ExecutorService pool, MockHttpServletRequestBuilder request) throws Exception {
+        long t0 = System.nanoTime();
+        MvcResult result = pool.submit(() -> mvc.perform(request).andReturn()).get(8, TimeUnit.SECONDS);
+        assertThat(Duration.ofNanos(System.nanoTime() - t0)).isLessThan(Duration.ofSeconds(5));
+        return result;
     }
 
     @Test
