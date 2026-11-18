@@ -1,0 +1,17 @@
+[Unit]
+Description=Gongchae-Bell Daily PostgreSQL and Erasure Journal Restic Backup
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/gongchae-bell
+ExecStart=/opt/gongchae-bell/deploy/backup/backup.sh run --env-file /opt/gongchae-bell/backup/backup.env
+TimeoutStartSec=30min
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gongchae-backup
+NoNewPrivileges=yes
+PrivateTmp=yes
