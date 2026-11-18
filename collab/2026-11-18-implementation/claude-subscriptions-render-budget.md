@@ -9,6 +9,9 @@
 | 시작 head | `7cb0068e1704247111e4d325faefb6a4f1b584c5` |
 | 코드 커밋 | `d474cf7` (`fix: read the footer collection time inside the request budget (#6)`) |
 | CI (코드 커밋) | [44274892246](https://github.com/Lcjam/gongchae-bell/actions/runs/44274892246) test(`check bootJar`, ARM64)·secrets 성공 |
+| 1단계 결과 문서 | `919cf70` |
+| 2단계 코드 커밋 (풀 실패 응답) | `c005ee1` |
+| main(#14) 병합 | `97c7415`, CI [44280281080](https://github.com/Lcjam/gongchae-bell/actions/runs/44280281080) test·deploy-verify·secrets 성공 |
 | 최종 head | 이 파일을 담은 다음 커밋(문서만). PR #13 head로 확인 |
 | PR | [#13](https://github.com/Lcjam/gongchae-bell/pull/13) draft 유지 |
 
@@ -35,8 +38,26 @@
 
 provider는 시험 대역, DB는 Testcontainers PostgreSQL 17만 썼다. 실제 API·메일·Discord·OCI·DNS·계정·env·키 접근은 0회다.
 
-## 남은 범위와 관찰
+## 2단계: 풀 획득 실패 응답 (root 후속 배정)
 
-- **관찰(이번 범위 밖, 수정하지 않음)**: 다른 예산 단계(`signupOptions`, 요청 제한 `acquire`, 신청 트랜잭션)에서 풀 획득이 실제로 5초 상한을 넘기면 Spring은 `CannotCreateTransactionException`(`TransactionException`)을 던진다. 컨트롤러 `busy()`는 `CannotAcquireLockException`·`QueryTimeoutException`만 처리하므로 이 경우 고정 503 안내 대신 일반 오류 화면(500)이 나간다. 예산 시간은 지켜지고(풀 진입 전 상한 확보) 쓰기는 커밋되지 않는다. 고정 응답을 원하면 `busy()` 대상에 `CannotCreateTransactionException`을 더하는 한 줄 수정이 가능하다. 판단은 root에 맡긴다. 메일 발송 단계는 `deliver()`가 `RuntimeException`을 잡아 영향이 없다
+root가 아래 관찰을 받아 고치도록 배정했다. 실제 풀 획득이 Hikari 상한(5초)을 넘기면 Spring은 `CannotCreateTransactionException`을 던진다(트랜잭션이 시작되지 않음). 이를 기존 의미와 대조해 두 곳을 고쳤다.
+
+| 위치 | 수정 전 | 수정 후 |
+|---|---|---|
+| `SubscriptionController.busy()` | `CannotAcquireLockException`·`QueryTimeoutException`만 처리. 풀 실패는 일반 오류 화면(500) | 풀 실패도 같은 고정 503 안내. 숨기지 않도록 `ALERT_REQUEST_BUSY <예외 클래스> cause=<근본 원인 클래스>` 경고 로그를 남긴다. 메시지는 접속 정보가 섞일 수 있어 남기지 않는다. 근본 원인 클래스로 풀 포화(`SQLTransientConnectionException`)와 DB 연결 거부를 구분할 수 있다 |
+| `SyncSender.deliverMail` | 잠금·문장 시간 초과만 잡음. A의 연결이나 R의 연결 B를 못 받으면 예외가 `deliver()`까지 올라가 작업 행이 5분 회수까지 `SENDING`으로 남음 | 같은 경로로 `end(DEADLINE)` 종결. 종결용 연결도 못 받으면 기존처럼 `deliver()`가 로그만 남기고 회수 경로가 정리한다 |
+
+쓰기 의미는 그대로다. 실패한 단계는 시작되지 않았으므로 커밋된 것이 없고, 이미 센 요청 제한과 예약은 환불하지 않는다. 디스코드 테스트 도중 실제 풀 실패는 기존 시간 초과와 같이 503이다(과부하 신호). 예산 계산으로 미리 막는 경로는 1~3라운드에서 이미 502·503 경계를 정했다.
+
+| 시험 | 결과 |
+|---|---|
+| `DeliveryLedgerTest.aConnectionThePoolCannotHandOverEndsTheJobAsDeadline` | 풀 대역이 1번째(A) 또는 2번째(R의 B) 획득에서 `CannotCreateTransactionException`을 던지면 작업이 `FAILED|DEADLINE|0`, 시도·발송·카운터 0 |
+| `SubscriptionFlowIntegrationTest.aFullPoolAnswersBusyWithinItsBoundAndWritesNothing` | 실제 Hikari 풀의 연결을 최대 개수만큼 쥔 채 실제 MVC 신청 POST. 5.8초(Hikari 5초 상한)에 503 고정 안내, 구독·요청 제한·메일 0. 쥔 연결은 `finally`에서 먼저 반납 |
+| 변이 확인 | 두 수정을 각각 되돌리면 두 시험이 `CannotCreateTransactionException`(MVC 쪽은 처리되지 않은 요청 실패)으로 실패하는 것을 확인하고 원복 |
+| 로컬 `check bootJar` | 146 tests, 0 failures |
+
+코드 커밋 `c005ee1`을 push한 뒤 PR13이 CI를 받지 못했다. root가 #14를 main에 병합해 `application.yml`이 충돌(`CONFLICTING`)했고, GitHub는 충돌한 PR의 `pull_request` 워크플로를 돌리지 않는다. main을 PR13 브랜치에 병합했다(`97c7415`). 두 쪽 모두 `forward-headers-strategy`를 넣었으므로 #14 계약인 main의 env 재정의 형식(`${SERVER_FORWARD_HEADERS_STRATEGY:native}`)을 택했다. 병합 뒤 로컬 `check bootJar` **148 tests, 0 failures**(#14의 `DeploymentConfigIntegrationTest` 포함), CI [44280281080](https://github.com/Lcjam/gongchae-bell/actions/runs/44280281080) test·deploy-verify·secrets 성공, PR 상태 `MERGEABLE`.
+
+## 남은 범위와 관찰
 - `POST /subscriptions/recover/discord`는 시작 시각을 쓰는 예산 경로가 아니라(동기 발송 없음) 기존 조회를 그대로 쓴다. 확인·관리·해지 POST도 같다
 - 실제 공개 HTTPS·고지·실발송 검증은 PR 본문의 실사용 전 게이트로 남는다. main 머지, #7 착수, Sol 재개는 하지 않았다
