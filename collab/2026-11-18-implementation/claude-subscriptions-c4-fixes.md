@@ -8,8 +8,11 @@
 |---|---|
 | 시작 head (PR13) | `7fa3f385773b3bcf2cb76b7a8f2766c1867cc432` |
 | 코드 커밋 | `6554ea6dec974a3677419e220eab4258beaee5ca` |
-| 이 결과 문서 커밋 | 이 파일을 담은 다음 커밋 (PR13 head) |
+| 1차 결과 문서 커밋 | `68c7767` |
 | CI (코드 커밋) | [44223952032](https://github.com/Lcjam/gongchae-bell/actions/runs/44223952032) test(ARM64)·secrets 성공 |
+| agy C4-R1 수정 | `10fb394`, CI [44225118487](https://github.com/Lcjam/gongchae-bell/actions/runs/44225118487) 성공 |
+| agy 2라운드 메모 수정 | `1a0b01f`, CI [44225868874](https://github.com/Lcjam/gongchae-bell/actions/runs/44225868874) 성공 |
+| 이 결과 문서 갱신 | 이 파일을 담은 다음 커밋 (PR13 head) |
 
 ## 세 항목의 수정
 
@@ -40,6 +43,8 @@
 - 풀 상한을 보수적으로 확보하므로 실제 풀 대기가 짧아도 HTTP timeout이 줄고(현재 최대 7초를 남김) 재시도 수가 줄 수 있다.
 - 실제 고지 게시, Resend·Discord 실발송, 실서버 HTTPS·Caddy 로그 확인은 PR13 본문의 "실사용 전 게이트"로 남는다. 실제 API·메일·Discord·OCI·DNS·계정·env·키 접근은 0회다.
 
-## 리뷰
+## 리뷰와 후속 수정
 
-agy C4 리뷰 `collab/reviews/pr-13-agy-c4.md`(진행 중), Codex는 복귀 후. draft 유지, main 머지와 #7 착수는 하지 않았다.
+- **agy 1라운드** `collab/reviews/pr-13-agy-c4.md`: 수정 요청. **C4-R1** 디스코드 등록 테스트가 1회차 10초 타임아웃 뒤 재시도할 때 `MIN_START`(5초) 검사는 통과하고 새 풀 진입 확인(남은 13초 필요)에서 `QueryTimeoutException`이 나 502 대신 503이 나갔다. Claude가 코드로 재현을 확인하고 `10fb394`에서 고쳤다. 이메일·디스코드 재시도 루프가 백오프 sleep 전에 `roomForNext`(MIN_START + 다음 시도의 풀 상한·요청·정리 몫)를 확인하고, 못 들어가면 sleep 없이 끝난다(디스코드 `TEST_FAILED` 502, 이메일 A 안에서 `DEADLINE`). 1회차 전 예산 부족은 그대로 503이다. 낡은 Javadoc 두 곳과 계약 §6 ③도 고쳤다. 새 테스트 `aWebhookRetryThatCouldNotBeAdmittedEndsAsAFailedTestWithoutSleeping`은 수정을 되돌린 변이에서 `SYNC_BUDGET_SPENT`로 실패하는 것을 확인하고 원복했다. alerts 47건 통과
+- **agy 2라운드** `collab/reviews/pr-13-agy-c4-round2.md`: 수용. 비차단 관찰로 sleep 전 확인을 몇 ms 차로 통과한 뒤 sleep이 OS 오차로 길어지면 2회차가 다시 503으로 빠질 수 있는 좁은 창을 짚었다. `1a0b01f`에서 디스코드 재시도를 sleep 뒤 `roomForNext(start, 0)`로 다시 재게 했다. 같은 테스트에 1ms 초과 sleep 시나리오를 넣었고, 가드를 되돌린 변이에서 실패를 확인하고 원복했다. alerts 47건 통과
+- Codex 리뷰는 복귀 후. draft 유지, main 머지와 #7 착수는 하지 않았다
