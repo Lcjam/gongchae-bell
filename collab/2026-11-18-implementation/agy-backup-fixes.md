@@ -4,10 +4,13 @@
 - **대상 브랜치 / Worktree**: `ops/#16-backup` (`C:/Users/lcj/orca/workspaces/my-project/issue-16-backup`)
 - **기준 HEAD (수정 전)**: `c9225fa60107679b69395a8fed33a7ca6aa1b8bf`
 - **코드·테스트·운영문서 수정 커밋 SHA**: `8501539adf5c949b1c68d03c6c4d8ed726e6aec5` (`ops: fix restic forget grouping, log redaction loop, and env parsing (Refs #16)`)
+- **병합 기준 `origin/main` SHA**: `be30f6999db4ccd31e590dd7de054c85c049dee4` (PR #20 반영)
+- **`main` 통합 머지 커밋 SHA / CI Run**: `5a0049406ff4a1d6fd1c66f44be922ebcca2226a` / [CI Run #44282076712](https://github.com/Lcjam/gongchae-bell/actions/runs/44282076712) (`secrets` / `test` / `backup-verify` / `deploy-verify` 전 항목 `success`)
 - **PR**: `https://github.com/Lcjam/gongchae-bell/pull/22` (Draft 유지, `main` 병합 및 `#16` close 미수행)
-- **코드 수정 커밋 CI Run**: [CI Run #44275512026](https://github.com/Lcjam/gongchae-bell/actions/runs/44275512026) (`secrets` / `test` / `backup-verify` 전 항목 `success`)
-- **직전 문서 커밋 SHA / CI Run**: `0760ff0fafee2e0cead23a4d6716d60220bd481a` / [CI Run #44278207418](https://github.com/Lcjam/gongchae-bell/actions/runs/44278207418) (`secrets` / `test` / `backup-verify` 전 항목 `success`)
-- **최종 HEAD 안내**: §3 운영 경로 대조 정정 커밋(`docs: align backup doc install paths with systemd unit (Refs #16)`)이 `ops/#16-backup` 및 PR #22의 최종 HEAD가 되며, 푸시 후 최종 HEAD의 CI 통과까지 확인해 PR #22 본문에 최종 SHA·CI를 갱신합니다.
+- **이전 회차 CI 기록**:
+  - `8501539a`: [CI Run #44275512026](https://github.com/Lcjam/gongchae-bell/actions/runs/44275512026) (`secrets` / `test` / `backup-verify` `success`)
+  - `0760ff0f`: [CI Run #44278207418](https://github.com/Lcjam/gongchae-bell/actions/runs/44278207418) (`secrets` / `test` / `backup-verify` `success`)
+- **최종 HEAD 안내**: 이 문서 갱신 커밋이 `ops/#16-backup` 및 PR #22의 최종 HEAD가 되며, 푸시 후 4개 잡(`test`·`deploy-verify`·`backup-verify`·`secrets`) CI 통과 및 `mergeable=MERGEABLE` 상태를 확인해 PR #22 본문에 최종 SHA·CI를 갱신합니다.
 
 ---
 
@@ -39,6 +42,13 @@
   - §6 모니터링 연동에 `backup.env` 로드·검증 이전 단계 실패 시 `HEALTHCHECKS_BACKUP_URL`이 로드되지 않아 `/fail` ping을 보낼 수 없으므로 Healthchecks 미수신(grace/period 만료) 알림과 `journalctl -u gongchae-backup.service`로 감지·조치함을 명시했습니다.
   - §8 `#17` 이관 범위에 `--group-by host,tags` 기준으로 실서버 격리 복원 리허설을 검증하도록 반영했습니다.
 
+### 5) `origin/main` (`be30f699`) 통합 및 CI·Runbook 연동 (`5a004940`)
+- **수정 파일**: [.github/workflows/ci.yml](file:///C:/Users/lcj/orca/workspaces/my-project/issue-16-backup/.github/workflows/ci.yml), [docs/runbook.md](file:///C:/Users/lcj/orca/workspaces/my-project/issue-16-backup/docs/runbook.md)
+- **내용**:
+  - `origin/main`(`be30f6999db4ccd31e590dd7de054c85c049dee4`)을 `ops/#16-backup`으로 머지하고 `.github/workflows/ci.yml` 충돌을 해소해 `test`, `deploy-verify`, `backup-verify`, `secrets` 4개 잡이 모두 유지되도록 정리했습니다.
+  - `docs/runbook.md` §7 `#16 백업` 항목에 실제 운영 문서 링크 `[백업과 복구 절차](ops/backup-restore.md)`를 연결했습니다.
+  - `8501539a`의 `deploy/backup/`, `deploy/tests/backup-*`, `docs/ops/backup-restore.md` 수정 의미는 머지 과정에서 100% 보존됐습니다.
+
 ---
 
 ## 2. 추가 회귀 테스트 및 검증 결과
@@ -64,10 +74,12 @@
   - 결과: exit `0`, `BACKUP_INTEGRATION_TEST_PASSED`
 
 ### 3) Gradle / Gitleaks / GitHub Actions ARM64 CI
-- `./gradlew --no-daemon check bootJar`: exit `0`, `BUILD SUCCESSFUL`
+- `./gradlew --no-daemon check bootJar` (`8501539a`): exit `0`, `BUILD SUCCESSFUL`
+- `./gradlew --no-daemon check bootJar` (`main` 머지 `5a004940` 후): exit `0`, `BUILD SUCCESSFUL in 1m 46s`
 - `gitleaks detect --source C:/Users/lcj/orca/workspaces/my-project/issue-16-backup --verbose`: exit `0`, `71 commits scanned`, `no leaks found`
 - `gitleaks dir C:/Users/lcj/orca/workspaces/my-project/issue-16-backup --verbose`: exit `0`, `no leaks found`
 - ARM64 CI (`8501539adf5c949b1c68d03c6c4d8ed726e6aec5`): [Run #44275512026](https://github.com/Lcjam/gongchae-bell/actions/runs/44275512026) — `secrets`, `test`, `backup-verify` 전 Job `success`
+- ARM64 CI (`main` 머지 `5a0049406ff4a1d6fd1c66f44be922ebcca2226a`): [Run #44282076712](https://github.com/Lcjam/gongchae-bell/actions/runs/44282076712) — `secrets`, `test`, `backup-verify`, `deploy-verify` 4개 Job 전 항목 `success`
 
 ---
 
