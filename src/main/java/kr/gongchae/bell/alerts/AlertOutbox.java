@@ -50,14 +50,20 @@ public class AlertOutbox implements PostingIngestor.RegularNewOutbox {
     boolean createJobWithItems(UUID subscriptionId, String kind, String batchKey, OffsetDateTime now,
             List<Long> deadlineSns, List<Long> newSns) {
         if (deadlineSns.isEmpty() && newSns.isEmpty()) return false;
+        // Lock parent FOR KEY SHARE before child INSERT (#6 contract §3) to serialize with concurrent unsubscribe
+        // (FOR UPDATE + DELETE): if the subscription is deleted or disabled concurrently, skip it cleanly without FK 23503.
+        boolean stillActive = jdbc.sql("""
+                SELECT 1 FROM subscription WHERE id = :subId AND status = 'ACTIVE' FOR KEY SHARE
+                """).param("subId", subscriptionId).query(Integer.class).optional().isPresent();
+        if (!stillActive) return false;
+
         Optional<Long> notifId = jdbc.sql("""
                 INSERT INTO notification(subscription_id, kind, batch_key, status, next_attempt_at, created_at, idempotency_key)
-                SELECT s.id, :kind, :batchKey, 'PENDING', :now, :now, :key
-                FROM subscription s WHERE s.id = :subId AND s.status = 'ACTIVE'
+                VALUES (:subId, :kind, :batchKey, 'PENDING', :now, :now, :key)
                 ON CONFLICT (subscription_id, kind, batch_key) DO NOTHING
                 RETURNING id
-                """).param("kind", kind).param("batchKey", batchKey).param("now", now)
-                .param("key", UUID.randomUUID()).param("subId", subscriptionId).query(Long.class).optional();
+                """).param("subId", subscriptionId).param("kind", kind).param("batchKey", batchKey).param("now", now)
+                .param("key", UUID.randomUUID()).query(Long.class).optional();
         if (notifId.isEmpty()) return false;
 
         int inserted = 0;

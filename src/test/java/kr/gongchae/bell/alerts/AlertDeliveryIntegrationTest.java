@@ -38,6 +38,7 @@ import javax.sql.DataSource;
 import kr.gongchae.bell.IntegrationTestSupport;
 import kr.gongchae.bell.ingestion.PostingIngestor;
 import kr.gongchae.bell.ingestion.runtime.CollectionRuns;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -171,6 +172,7 @@ class AlertDeliveryIntegrationTest extends IntegrationTestSupport {
     @Value("${local.management.port}") int managementPort;
 
     @BeforeEach
+    @AfterEach
     void resetState() throws IOException {
         NOW.set(Instant.parse("2026-11-18T00:00:00Z")); // 2026-11-18 09:00 KST
         SENT_MAILS.clear();
@@ -863,6 +865,143 @@ class AlertDeliveryIntegrationTest extends IntegrationTestSupport {
                     .doesNotContain(sub.toString())
                     .doesNotContain(discDisabled.toString());
         }
+    }
+
+    // ---- 7. Outbox & daily batch vs concurrent unsubscribe serialization (no FK 23503 rollback) ----
+
+    @Test
+    void outboxAndDigestSerializeWithConcurrentUnsubscribeWithoutRollback() throws Exception {
+        Instant tConfirm = Instant.parse("2026-11-17T22:00:00Z");
+        UUID discDeleting = insertActiveDiscord("https://discord.com/api/webhooks/701/del", null, null, null, null, true, false, tConfirm);
+        UUID discSurvivor = insertActiveDiscord("https://discord.com/api/webhooks/702/surv", null, null, null, null, true, false, tConfirm);
+        UUID emailDeleting = insertActiveEmail("del@example.com", null, null, null, null, true, false, tConfirm);
+        UUID emailSurvivor = insertActiveEmail("surv@example.com", null, null, null, null, true, false, tConfirm);
+
+        // (1) Mid-flight unsubscribe commit during PostingIngestor.applyRegular -> no FK 23503, posting + survivor preserved, 0 HTTP to deleted
+        String reg1 = fixtureBody(307032L, r -> r.put("pbancEndYmd", "20261125").put("ongoingYn", "Y"));
+        long run1 = runs.claim("REGULAR", "2026-11-18T10:00:00+09:00").orElseThrow();
+        try (var holder = dataSource.getConnection(); var pool = Executors.newSingleThreadExecutor()) {
+            holder.setAutoCommit(false);
+            try {
+                try (var ps = holder.prepareStatement("SELECT id FROM subscription WHERE id = ? FOR UPDATE")) {
+                    ps.setObject(1, discDeleting);
+                    ps.executeQuery().close();
+                }
+                try (var del = holder.prepareStatement("DELETE FROM subscription WHERE id = ?")) {
+                    del.setObject(1, discDeleting);
+                    del.executeUpdate();
+                }
+                Future<?> regularFuture = pool.submit(() ->
+                        ingestor.applyRegular(run1, reg1, Instant.parse("2026-11-18T01:00:00Z")));
+                awaitLockWait("SELECT 1 FROM subscription");
+                holder.commit();
+                regularFuture.get(8, TimeUnit.SECONDS);
+            } finally {
+                holder.rollback();
+            }
+        }
+        assertThat(jdbc.sql("SELECT status FROM posting WHERE sn = 307032").query(String.class).single()).isEqualTo("OPEN");
+        assertThat(jdbc.sql("SELECT count(*) FROM notification WHERE subscription_id = :s").param("s", discDeleting)
+                .query(Integer.class).single()).isZero();
+        assertThat(jdbc.sql("SELECT count(*) FROM notification WHERE subscription_id = :s AND kind = 'DISCORD_NEW'")
+                .param("s", discSurvivor).query(Integer.class).single()).isEqualTo(1);
+
+        // (2) Mid-flight unsubscribe commit during AlertBatchGenerator.generateEmailDigest -> no FK 23503, survivor digest preserved
+        NOW.set(Instant.parse("2026-11-18T01:00:00Z"));
+        try (var holder = dataSource.getConnection(); var pool = Executors.newSingleThreadExecutor()) {
+            holder.setAutoCommit(false);
+            try {
+                try (var ps = holder.prepareStatement("SELECT id FROM subscription WHERE id = ? FOR UPDATE")) {
+                    ps.setObject(1, emailDeleting);
+                    ps.executeQuery().close();
+                }
+                try (var del = holder.prepareStatement("DELETE FROM subscription WHERE id = ?")) {
+                    del.setObject(1, emailDeleting);
+                    del.executeUpdate();
+                }
+                Future<Integer> digestFuture = pool.submit(() ->
+                        batchGenerator.generateEmailDigest(LocalDate.of(2026, 11, 18)));
+                awaitLockWait("SELECT 1 FROM subscription");
+                holder.commit();
+                assertThat(digestFuture.get(8, TimeUnit.SECONDS)).isEqualTo(1);
+            } finally {
+                holder.rollback();
+            }
+        }
+        assertThat(jdbc.sql("SELECT count(*) FROM notification WHERE subscription_id = :s").param("s", emailDeleting)
+                .query(Integer.class).single()).isZero();
+        assertThat(jdbc.sql("SELECT count(*) FROM notification WHERE subscription_id = :s AND kind = 'EMAIL_DIGEST'")
+                .param("s", emailSurvivor).query(Integer.class).single()).isEqualTo(1);
+
+        // Dispatch survivor batches first, then verify creation-first (FOR KEY SHARE held first) serializes with unsubscribe
+        worker.runOnce();
+        assertThat(SENT_WEBHOOKS).hasSize(1);
+        assertThat(SENT_WEBHOOKS.getFirst().url().normalized()).contains("702/surv");
+        assertThat(SENT_MAILS).hasSize(1);
+        assertThat(SENT_MAILS.getFirst().body()).contains("surv@example.com").doesNotContain("del@example.com");
+
+        // (3) Creation-first (FOR KEY SHARE held on first Discord sub while paused on second) -> concurrent unsubscribe waits then cascades cleanly
+        UUID discExtra = insertActiveDiscord("https://discord.com/api/webhooks/703/extra", null, null, null, null, true, false, tConfirm);
+        List<UUID> ordered = jdbc.sql("""
+                SELECT id FROM subscription WHERE channel = 'DISCORD' AND status = 'ACTIVE' ORDER BY id
+                """).query(UUID.class).list();
+        assertThat(ordered).hasSize(2);
+        UUID firstSub = ordered.get(0);
+        UUID secondSub = ordered.get(1);
+        String firstUnsubTok = crypto.capability(AlertsCrypto.Purpose.UNSUBSCRIBE, firstSub, 1);
+
+        String reg2 = fixtureBody(307031L, r -> r.put("pbancEndYmd", "20261126").put("ongoingYn", "Y"));
+        long run2 = runs.claim("REGULAR", "2026-11-18T11:00:00+09:00").orElseThrow();
+        SENT_WEBHOOKS.clear();
+
+        try (var secondLock = dataSource.getConnection(); var pool = Executors.newFixedThreadPool(2)) {
+            secondLock.setAutoCommit(false);
+            try {
+                try (var ps = secondLock.prepareStatement("SELECT id FROM subscription WHERE id = ? FOR UPDATE")) {
+                    ps.setObject(1, secondSub);
+                    ps.executeQuery().close();
+                }
+                Future<?> regularFuture = pool.submit(() ->
+                        ingestor.applyRegular(run2, reg2, Instant.parse("2026-11-18T02:00:00Z")));
+                awaitLockWait("SELECT 1 FROM subscription");
+
+                // regularFuture now holds FOR KEY SHARE on firstSub while blocked on secondSub -> unsubscribe(firstSub) must wait
+                Future<SubscriptionService.State> unsubFuture = pool.submit(() ->
+                        subscriptions.unsubscribe(firstUnsubTok, AlertsCrypto.Purpose.UNSUBSCRIBE, "198.51.100.9"));
+                Thread.sleep(100);
+                assertThat(unsubFuture.isDone()).isFalse();
+
+                // Release lock on secondSub -> applyRegular commits, then unsubscribe acquires FOR UPDATE & cascades firstSub!
+                secondLock.rollback();
+                regularFuture.get(8, TimeUnit.SECONDS);
+                assertThat(unsubFuture.get(8, TimeUnit.SECONDS)).isEqualTo(SubscriptionService.State.UNSUBSCRIBED);
+            } finally {
+                secondLock.rollback();
+            }
+        }
+
+        // Dispatch after serialization: secondSub receives 1 webhook, unsubscribed firstSub receives 0 HTTP!
+        NOW.set(Instant.parse("2026-11-18T02:00:00Z"));
+        worker.runOnce();
+        assertThat(SENT_WEBHOOKS).hasSize(1);
+        assertThat(jdbc.sql("SELECT count(*) FROM subscription WHERE id = :s").param("s", firstSub).query(Integer.class).single())
+                .isZero();
+        assertThat(jdbc.sql("SELECT count(*) FROM notification WHERE subscription_id = :s").param("s", firstSub)
+                .query(Integer.class).single()).isZero();
+        assertThat(discExtra).isNotNull();
+    }
+
+    private void awaitLockWait(String sqlSubstring) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (System.nanoTime() < deadline) {
+            Integer waiting = jdbc.sql("""
+                    SELECT count(*) FROM pg_stat_activity
+                    WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE :q
+                    """).param("q", "%" + sqlSubstring + "%").query(Integer.class).single();
+            if (waiting != null && waiting > 0) return;
+            Thread.sleep(20);
+        }
+        throw new AssertionError("Timed out waiting for PostgreSQL lock wait on: " + sqlSubstring);
     }
 }
 
