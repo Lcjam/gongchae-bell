@@ -1,0 +1,32 @@
+name: Monitoring
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  rules:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Prometheus config, rules and rule tests (promtool)
+        run: |
+          promtool() { docker run --rm -v "$PWD/deploy/monitoring/prometheus:/w:ro" \
+            -v "$PWD/deploy/monitoring/prometheus/rules:/etc/prometheus/rules:ro" -w "$1" --entrypoint promtool prom/prometheus:v3.16.0 "${@:2}"; }
+          promtool /w check config prometheus.yml
+          promtool /w/tests test rules gongchae.test.yml
+  alert-e2e:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-java@v6.3.0
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v6.4.1
+      - run: ./gradlew --no-daemon bootJar
+      - name: Alert forwarding on an isolated stack (webhook stub, no real Discord)
+        run: deploy/monitoring/tests/alert-e2e.sh

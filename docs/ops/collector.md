@@ -81,6 +81,7 @@ java -jar build/libs/gongchae-bell.jar --spring.main.web-application-type=none -
 | 지표 | 용도 |
 |---|---|
 | `collector_api_attempts_today` | KST 일 예산. 500 경고/900 중단 상태 |
+| `collector_api_warning_limit`, `collector_api_stop_limit` | 설정된 경고·차단 한도(`COLLECTOR_WARNING_LIMIT`·`COLLECTOR_STOP_LIMIT`). 경보 규칙이 이 값과 비교한다 |
 | `collector_api_attempts_kind_today{kind}` | REGULAR/BACKFILL/DETAIL별 당일 시도 |
 | `collector_api_retries_today` | attempt_no>1인 당일 재시도 |
 | `collector_api_unfinished_today` | 결과를 남기지 못한 예약 |
@@ -90,4 +91,4 @@ java -jar build/libs/gongchae-bell.jar --spring.main.web-application-type=none -
 | `collector_runs_unfinished` | 중단되거나 아직 진행 중인 회차 |
 | `collector_detail_gave_up` | 상세 실패 3회 상한에 걸려 더 요청하지 않는 진행 공고 수. 0이 아니면 공고 상세 형식이나 공급자 상태를 확인한다 |
 
-Grafana 경고 조건은 일 예산 >=500, 최근 미완료 >=2, 마지막 완전 수집 경과 시간이다. 실제 운영 디스코드 경보 연결·수신 시험은 M3 운영 구성과 실제 환경 준비 뒤 수행한다. 현재 문서만으로 수신 검증 완료라고 표시하지 않는다. 같은 DB의 blue/green 지표는 sum 대신 max로 읽는다. 실제 공식 봉투 1회 확인, 3년 적재와 오래된 코드/품질 표본 검수도 환경 준비 뒤 별도 기록한다.
+경보 규칙(일 예산 경고·차단 한도, 최근 미완료 2회, 마지막 완전 수집 경과 2시간 15분)과 대시보드, 정기 수집 heartbeat(`HEARTBEAT_COLLECTOR_URL`, 기본 꺼짐)는 [모니터링](monitoring.md)에 있다. 실제 운영 디스코드 경보 연결·수신 시험은 아직 하지 않았다. 현재 문서만으로 수신 검증 완료라고 표시하지 않는다. 같은 DB의 blue/green 지표는 sum 대신 max로 읽는다. 실제 공식 봉투 1회 확인, 3년 적재와 오래된 코드/품질 표본 검수도 환경 준비 뒤 별도 기록한다.

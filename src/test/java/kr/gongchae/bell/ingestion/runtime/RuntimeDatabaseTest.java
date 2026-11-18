@@ -55,8 +55,9 @@ class RuntimeDatabaseTest {
             var runs=new CollectionRuns(jdbc,clock,manager);
             var ingestor=new kr.gongchae.bell.ingestion.PostingIngestor(jdbc,manager,clock.withZone(ApiBudget.KST));
             var details=org.mockito.Mockito.mock(DetailCollector.class);
-            var one=new RegularCollector(runs,new RecruitmentClient(http,first,"fixture",uri,d->{},clock,java.time.Duration.ofSeconds(2)),ingestor,details,clock);
-            var two=new RegularCollector(runs,new RecruitmentClient(http,second,"fixture",uri,d->{},clock,java.time.Duration.ofSeconds(2)),ingestor,details,clock);
+            var heartbeat=org.mockito.Mockito.mock(kr.gongchae.bell.ops.Heartbeat.class);
+            var one=new RegularCollector(runs,new RecruitmentClient(http,first,"fixture",uri,d->{},clock,java.time.Duration.ofSeconds(2)),ingestor,details,heartbeat,clock);
+            var two=new RegularCollector(runs,new RecruitmentClient(http,second,"fixture",uri,d->{},clock,java.time.Duration.ofSeconds(2)),ingestor,details,heartbeat,clock);
             var start=new CountDownLatch(1);
             var a=pool.submit(()->{start.await();return one.collect(clock.instant());});
             var b=pool.submit(()->{start.await();return two.collect(clock.instant());});start.countDown();
@@ -66,6 +67,8 @@ class RuntimeDatabaseTest {
             assertThat(jdbc.sql("SELECT result FROM collect_run WHERE kind='REGULAR'").query(String.class).single()).isEqualTo("COMPLETE");
             assertThat(jdbc.sql("SELECT count FROM api_budget").query(Integer.class).single()).isEqualTo(1);
             org.mockito.Mockito.verify(details).collect(RegularCollector.slot(clock.instant()));
+            // Two apps, one slot: one heartbeat.
+            org.mockito.Mockito.verify(heartbeat).ping();
         } finally {server.stop(0);}
     }
     @Test void regularHttpAndCoreFailuresKeepLastCompleteAndCoreOwnsParserFailureCode() throws Exception {
@@ -74,7 +77,8 @@ class RuntimeDatabaseTest {
         var client=org.mockito.Mockito.mock(RecruitmentClient.class);
         var ingestor=new kr.gongchae.bell.ingestion.PostingIngestor(jdbc,manager,clock.withZone(ApiBudget.KST));
         var details=org.mockito.Mockito.mock(DetailCollector.class);
-        var collector=new RegularCollector(runs,client,ingestor,details,clock);
+        var heartbeat=org.mockito.Mockito.mock(kr.gongchae.bell.ops.Heartbeat.class);
+        var collector=new RegularCollector(runs,client,ingestor,details,heartbeat,clock);
         org.mockito.Mockito.when(client.regularList()).thenReturn(completeFixture()).thenReturn("not-json fixture secret")
                 .thenThrow(new CollectionFailure(CollectionFailure.Code.HTTP_TIMEOUT));
         assertThat(collector.collect(clock.instant())).isTrue();
@@ -86,6 +90,11 @@ class RuntimeDatabaseTest {
         assertThat(jdbc.sql("SELECT max(finished_at)::text FROM collect_run WHERE result='COMPLETE'").query(String.class).single()).isEqualTo(last);
         assertThat(jdbc.sql("SELECT count(*) FROM posting").query(Integer.class).single()).isEqualTo(10);
         org.mockito.Mockito.verify(details).collect(RegularCollector.slot(clock.instant()));
+        // Only the COMPLETE run pings; the failed ones stay silent so the external check notices the gap.
+        org.mockito.Mockito.verify(heartbeat).ping();
+        // Same slot again (a restart or the other color): not claimed, no second ping.
+        assertThat(collector.collect(clock.instant())).isFalse();
+        org.mockito.Mockito.verify(heartbeat).ping();
     }
     @Test void completedPageCheckpointKeepsExactIdsAndPeriodForResume() {
         var runs=new CollectionRuns(jdbc,clock,manager);
@@ -177,7 +186,7 @@ class RuntimeDatabaseTest {
         assertThat(jdbc.sql("SELECT detail_status FROM posting WHERE sn=42").query(String.class).single()).isEqualTo("FAILED");
         var registry=new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
         try {
-            new CollectorMetrics(registry,jdbc,clock);
+            new CollectorMetrics(registry,jdbc,clock,new CollectorProperties(false,null,500,900,false,null,null,null,false));
             assertThat(registry.get("collector.detail.gave.up").gauge().value()).isEqualTo(1);
         } finally {registry.close();}
     }
@@ -309,7 +318,7 @@ class RuntimeDatabaseTest {
                 """).update();
         var registry=new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
         try {
-            new CollectorMetrics(registry,jdbc,clock);
+            new CollectorMetrics(registry,jdbc,clock,new CollectorProperties(false,null,500,900,false,null,null,null,false));
             assertThat(registry.get("collector.api.attempts.today").gauge().value()).isEqualTo(2);
             assertThat(registry.get("collector.api.retries.today").gauge().value()).isEqualTo(1);
             assertThat(registry.get("collector.regular.incomplete.consecutive").gauge().value()).isEqualTo(2);

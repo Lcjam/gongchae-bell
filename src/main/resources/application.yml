@@ -43,6 +43,19 @@ management:
       group:
         readiness:
           include: readinessState,db
+  metrics:
+    distribution:
+      # Buckets for the Prometheus p95 (docs/ops/monitoring.md); the range bounds how many buckets each series gets.
+      percentiles-histogram:
+        "[http.server.requests]": true
+      minimum-expected-value:
+        "[http.server.requests]": 5ms
+      maximum-expected-value:
+        "[http.server.requests]": 10s
+
+heartbeat:
+  # Healthchecks.io ping URL (ADR-0006). Blank = off. The URL contains the check id: env/Secrets only, never logged.
+  collector-url: ${HEARTBEAT_COLLECTOR_URL:}
 
 collector:
   enabled: ${COLLECTOR_ENABLED:false}

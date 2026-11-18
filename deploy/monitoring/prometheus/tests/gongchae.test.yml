@@ -1,0 +1,134 @@
+# promtool test rules: each alert fires on synthetic series, stays quiet below its threshold and resolves.
+# Times are minutes from the Unix epoch, so time() is small and epoch gauges are written in seconds from 0.
+rule_files:
+  - ../rules/gongchae.yml
+evaluation_interval: 30s
+
+tests:
+  # Deploy switch: one color stops, the other keeps answering -> quiet. Both stop -> fires after 5m, then recovers.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="gongchae-app",instance="app-blue:8081"}'
+        values: '1x10 0x10 1x10'
+      - series: 'up{job="gongchae-app",instance="app-green:8081"}'
+        values: '0x5 1x5 0x20'
+    alert_rule_test:
+      - {eval_time: 8m, alertname: GongchaeAppMetricsDown, exp_alerts: []}
+      - {eval_time: 14m, alertname: GongchaeAppMetricsDown, exp_alerts: []}
+      - eval_time: 18m
+        alertname: GongchaeAppMetricsDown
+        exp_alerts:
+          - exp_labels: {severity: critical, summary: "앱 지표 수집 실패 5분 (blue·green 모두 응답 없음)"}
+      - {eval_time: 25m, alertname: GongchaeAppMetricsDown, exp_alerts: []}
+
+  # No target at all (scrape config broken): absent() keeps the alert from going silent.
+  - interval: 1m
+    input_series:
+      - series: 'collector_api_stop_limit{job="gongchae-app",instance="app-blue:8081"}'
+        values: '900x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: GongchaeAppMetricsDown
+        exp_alerts:
+          - exp_labels: {job: gongchae-app, severity: critical, summary: "앱 지표 수집 실패 5분 (blue·green 모두 응답 없음)"}
+
+  # Both colors read the same DB and report the same value: one alert, not two.
+  # 22-27m: a failed run then one in progress (2 for 5 minutes) -> quiet. 50-70m: two finished failures -> fires.
+  - interval: 1m
+    input_series:
+      - series: 'collector_regular_incomplete_consecutive{job="gongchae-app",instance="app-blue:8081"}'
+        values: '0x10 1x10 2x5 0x10 1x10 2x20 0x10'
+      - series: 'collector_regular_incomplete_consecutive{job="gongchae-app",instance="app-green:8081"}'
+        values: '0x10 1x10 2x5 0x10 1x10 2x20 0x10'
+    alert_rule_test:
+      - {eval_time: 27m, alertname: GongchaeRegularCollectionFailing, exp_alerts: []}
+      - {eval_time: 55m, alertname: GongchaeRegularCollectionFailing, exp_alerts: []}
+      - eval_time: 61m
+        alertname: GongchaeRegularCollectionFailing
+        exp_alerts:
+          - exp_labels: {severity: critical, summary: "정기 수집 2회 연속 미완료 (실패 기록)"}
+      - {eval_time: 75m, alertname: GongchaeRegularCollectionFailing, exp_alerts: []}
+
+  # Never completed (0) -> quiet. Completes at 180m and 240m, then the 300m and 360m slots leave no COMPLETE run:
+  # 240m + 135m = 375m -> fires (for 1m). The 420m run completes -> recovers.
+  - interval: 1m
+    input_series:
+      - series: 'collector_last_complete_epoch{job="gongchae-app",instance="app-blue:8081"}'
+        values: '0x179 10800x59 14400x179 25200x30'
+    alert_rule_test:
+      - {eval_time: 170m, alertname: GongchaeRegularCollectionStale, exp_alerts: []}
+      - {eval_time: 300m, alertname: GongchaeRegularCollectionStale, exp_alerts: []}
+      - {eval_time: 370m, alertname: GongchaeRegularCollectionStale, exp_alerts: []}
+      - eval_time: 378m
+        alertname: GongchaeRegularCollectionStale
+        exp_alerts:
+          - exp_labels: {severity: critical, summary: "정기 수집 2회 연속 미완료 (마지막 완전 수집 2시간 15분 초과)"}
+      - {eval_time: 425m, alertname: GongchaeRegularCollectionStale, exp_alerts: []}
+
+  # 10 attempts a minute: 500 at 50m (warning), 900 at 90m (stop). The KST day turns at 101m -> both recover.
+  - interval: 1m
+    input_series:
+      - series: 'collector_api_attempts_today{job="gongchae-app",instance="app-blue:8081"}'
+        values: '0+10x90 900x10 1x10'
+      - series: 'collector_api_attempts_today{job="gongchae-app",instance="app-green:8081"}'
+        values: '0+10x90 900x10 1x10'
+      - series: 'collector_api_warning_limit{job="gongchae-app",instance="app-blue:8081"}'
+        values: '500x111'
+      - series: 'collector_api_stop_limit{job="gongchae-app",instance="app-blue:8081"}'
+        values: '900x111'
+    alert_rule_test:
+      - {eval_time: 49m, alertname: GongchaeApiBudgetWarning, exp_alerts: []}
+      - eval_time: 50m
+        alertname: GongchaeApiBudgetWarning
+        exp_alerts:
+          - exp_labels: {severity: warning, summary: "공공데이터 API 일 호출 경고 한도 도달"}
+      - {eval_time: 89m, alertname: GongchaeApiBudgetStopped, exp_alerts: []}
+      - eval_time: 90m
+        alertname: GongchaeApiBudgetStopped
+        exp_alerts:
+          - exp_labels: {severity: critical, summary: "공공데이터 API 일 호출 차단 한도 도달 (오늘 수집 중단)"}
+      - {eval_time: 105m, alertname: GongchaeApiBudgetWarning, exp_alerts: []}
+      - {eval_time: 105m, alertname: GongchaeApiBudgetStopped, exp_alerts: []}
+
+  # A lowered COLLECTOR_WARNING_LIMIT moves the alert with it.
+  - interval: 1m
+    input_series:
+      - series: 'collector_api_attempts_today{job="gongchae-app",instance="app-blue:8081"}'
+        values: '300x5'
+      - series: 'collector_api_warning_limit{job="gongchae-app",instance="app-blue:8081"}'
+        values: '300x5'
+      - series: 'collector_api_stop_limit{job="gongchae-app",instance="app-blue:8081"}'
+        values: '400x5'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: GongchaeApiBudgetWarning
+        exp_alerts:
+          - exp_labels: {severity: warning, summary: "공공데이터 API 일 호출 경고 한도 도달"}
+
+  # 1 req/s of 200s; from 10m to 40m six 500s a minute (~9%). Actuator scrapes are left out of both sides.
+  - interval: 1m
+    input_series:
+      - series: 'http_server_requests_seconds_count{job="gongchae-app",instance="app-blue:8081",uri="/jobs",status="200"}'
+        values: '0+60x80'
+      - series: 'http_server_requests_seconds_count{job="gongchae-app",instance="app-blue:8081",uri="/jobs",status="500"}'
+        values: '0x10 0+6x30 180x40'
+      - series: 'http_server_requests_seconds_count{job="gongchae-app",instance="app-blue:8081",uri="/actuator/prometheus",status="500"}'
+        values: '0+100x80'
+    alert_rule_test:
+      - {eval_time: 9m, alertname: GongchaeHttp5xxHigh, exp_alerts: []}
+      - {eval_time: 18m, alertname: GongchaeHttp5xxHigh, exp_alerts: []}
+      - eval_time: 25m
+        alertname: GongchaeHttp5xxHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, summary: "HTTP 5xx 비율 5% 초과 (10분, 5건 이상)"}
+      - {eval_time: 60m, alertname: GongchaeHttp5xxHigh, exp_alerts: []}
+
+  # A quiet site: one 500 among ten requests is 10% but only one error -> quiet.
+  - interval: 1m
+    input_series:
+      - series: 'http_server_requests_seconds_count{job="gongchae-app",instance="app-blue:8081",uri="/",status="200"}'
+        values: '0+1x30'
+      - series: 'http_server_requests_seconds_count{job="gongchae-app",instance="app-blue:8081",uri="/",status="500"}'
+        values: '0x10 1x20'
+    alert_rule_test:
+      - {eval_time: 15m, alertname: GongchaeHttp5xxHigh, exp_alerts: []}
