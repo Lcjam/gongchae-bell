@@ -19,6 +19,10 @@ import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
@@ -28,7 +32,6 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.context.support.GenericApplicationContext;
-import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.dao.QueryTimeoutException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
@@ -77,7 +80,9 @@ class DeliveryLedgerTest {
     /** Hands out each transaction after a scripted connection-pool wait in virtual time (none when the script is empty). */
     final class SlowPool implements PlatformTransactionManager {
         final Deque<Duration> waits = new ArrayDeque<>();
+        int acquisitions;
         @Override public TransactionStatus getTransaction(TransactionDefinition definition) {
+            acquisitions++;
             Duration wait = waits.pollFirst();
             if (wait != null) timer.advance(wait);
             return manager.getTransaction(definition);
@@ -266,111 +271,153 @@ class DeliveryLedgerTest {
         mail.steps.add(timeout -> { timer.advance(timeout); return SendOutcome.Result.of(SendOutcome.TIMEOUT); });
         mail.steps.add(timeout -> { timer.advance(timeout); return SendOutcome.Result.of(SendOutcome.TIMEOUT); });
         deliver(p);
-        // t=0 attempt 1 (10 s) -> wait 2 -> t=12 attempt 2 (min(10, 25-12-2)=10) -> t=22: a 4 s wait would leave < 5 s
-        assertThat(mail.timeouts).containsExactly(Duration.ofSeconds(10), Duration.ofSeconds(10));
+        assertThat(mail.timeouts).containsExactly(Duration.ofSeconds(10), Duration.ofSeconds(6));
         assertThat(job(p.claim().id())).isEqualTo("UNCERTAIN|DEADLINE|2");
-        assertThat(timer.nanos).isLessThanOrEqualTo(Duration.ofSeconds(25).toNanos());
+        assertThat(timer.nanos).isEqualTo(Duration.ofSeconds(18).toNanos());
 
-        // A slow start of R (its pool wait) is measured inside R: with no room left for a request, nothing is reserved.
-        var slowLedger = new DeliveryLedger(jdbc, clock, limits, manager) {
-            int calls;
-            @Override public Reservation reserve(Claim claim, UUID key, byte[] hash, byte[] totalKey, RateLimiter.Limit total, java.util.function.Supplier<Duration> waitLimit) {
-                timer.advance(Duration.ofSeconds(++calls == 1 ? 9 : 12));
-                return super.reserve(claim, key, hash, totalKey, total, waitLimit);
-            }
-        };
-        sender = sender(slowLedger);
-        mail.timeouts.clear();
-        Pending q = pending();
-        long start = timer.nanoTime();
-        int totalBefore = emailTotal();
-        mail.steps.add(timeout -> { timer.advance(Duration.ofSeconds(1)); return SendOutcome.Result.of(SendOutcome.HTTP_5XX); });
-        sender.deliverMail(q.claim(), job(q), start);
-        // attempt 1: R starts at 9 s, timeout min(10, 25-9-2)=10, 5xx at 10 s; wait 2 -> 12 s; R starts at 24 s: 1 s left
-        // is less than CLEANUP + one request, so R reserves nothing (before: a NOT_SENT attempt and one more unit)
-        assertThat(mail.timeouts).containsExactly(Duration.ofSeconds(10));
-        assertThat(attempts(q.claim().id())).containsExactly("HTTP_5XX");
-        assertThat(emailTotal() - totalBefore).isEqualTo(1);
-        assertThat(job(q.claim().id())).isEqualTo("UNCERTAIN|DEADLINE|1");
-        assertThat(timer.nanoTime() - start).isLessThanOrEqualTo(Duration.ofSeconds(25).toNanos());
-
-        // A slow end of R (after it committed) is measured again before the request: the reserved attempt is NOT_SENT.
         var lateCommit = new DeliveryLedger(jdbc, clock, limits, manager) {
-            @Override public Reservation reserve(Claim claim, UUID key, byte[] hash, byte[] totalKey, RateLimiter.Limit total, java.util.function.Supplier<Duration> waitLimit) {
+            @Override public Reservation reserve(Claim claim, UUID key, byte[] hash, byte[] totalKey, RateLimiter.Limit total,
+                    java.util.function.Supplier<Duration> waitLimit) {
                 Reservation reservation = super.reserve(claim, key, hash, totalKey, total, waitLimit);
-                timer.advance(Duration.ofSeconds(22));
+                timer.advance(Duration.ofSeconds(17));
                 return reservation;
             }
         };
         sender = sender(lateCommit);
         mail.timeouts.clear();
-        Pending r = pending();
-        sender.deliverMail(r.claim(), job(r), timer.nanoTime());
+        Pending q = pending();
+        sender.deliverMail(q.claim(), job(q), timer.nanoTime());
         assertThat(mail.timeouts).isEmpty();
-        assertThat(attempts(r.claim().id())).containsExactly("NOT_SENT");
-        assertThat(job(r.claim().id())).isEqualTo("FAILED|DEADLINE|1");
+        assertThat(attempts(q.claim().id())).containsExactly("NOT_SENT");
+        assertThat(job(q.claim().id())).isEqualTo("FAILED|DEADLINE|1");
     }
 
     @Test
-    void aPoolWaitBeforeEitherTransactionIsMeasuredSoTheJobEndsWithoutAReservationOrRequest() {
+    void insufficientPoolRoomStartsNoNewAttemptAndKeepsTheFinalConnectionShare() {
         var pool = new SlowPool();
         var poolLimits = new RateLimiter(jdbc, clock, pool);
         var poolLedger = new DeliveryLedger(jdbc, clock, poolLimits, pool);
         sender = new SyncSender(jdbc, pool, poolLedger, poolLimits, mail, NO_WEBHOOK, crypto, timer);
-        // A gets its connection after 21 s: 4 s left. agy M-1: before, A set a 1 ms limit, the next statement failed and
-        // the row stayed SENDING until the sweep. Now A measures again and ends the job inside the CLEANUP share.
-        Pending a = pending();
-        pool.waits.add(Duration.ofSeconds(21));
-        deliver(a);
-        assertThat(job(a.claim().id())).isEqualTo("FAILED|DEADLINE|0");
-        // R gets connection B after 22 s: 3 s left is not CLEANUP plus one request, so R reserves nothing.
-        Pending b = pending();
-        pool.waits.addAll(List.of(Duration.ZERO, Duration.ofSeconds(22)));
-        deliver(b);
-        assertThat(job(b.claim().id())).isEqualTo("FAILED|DEADLINE|0");
-        assertThat(attempts(b.claim().id())).isEmpty();
+        Pending p = pending();
+        pool.waits.add(Duration.ofSeconds(5));
+        // 11 s left cannot admit A plus a final connection/write (5 + 5 + 2). Only the final TX is taken.
+        sender.deliverMail(p.claim(), job(p), timer.nanoTime() - Duration.ofSeconds(14).toNanos());
+        assertThat(pool.acquisitions).isEqualTo(1);
+        assertThat(job(p.claim().id())).isEqualTo("FAILED|DEADLINE|0");
+        int before = pool.acquisitions;
+        assertThatThrownBy(() -> poolLedger.reserve(p.claim(), UUID.randomUUID(), new byte[32], null, null,
+                () -> Duration.ofMillis(4_999))).isInstanceOf(QueryTimeoutException.class);
+        assertThatThrownBy(() -> poolLimits.acquire(RateLimiter.Scope.SUBSCRIBE, new byte[32], RateLimiter.PER_IP,
+                () -> Duration.ofMillis(4_999))).isInstanceOf(QueryTimeoutException.class);
+        assertThat(pool.acquisitions).isEqualTo(before);
         assertThat(mail.keys).isEmpty();
         assertThat(emailTotal()).isZero();
     }
 
     @Test
+    void poolAdmissionUsesTheConfiguredUpperBoundIncludingAnUnboundedPool() {
+        var pool = new SlowPool();
+        for (long configured : new long[]{10_000, 0}) {
+            var configuredLimits = new RateLimiter(jdbc, clock, pool, configured);
+            assertThatThrownBy(() -> configuredLimits.acquire(RateLimiter.Scope.SUBSCRIBE, new byte[32], RateLimiter.PER_IP,
+                    () -> Duration.ofSeconds(9))).isInstanceOf(QueryTimeoutException.class);
+        }
+        assertThat(pool.acquisitions).isZero();
+    }
+
+    @Test
     void aRowLockHeldByAnotherTransactionIsWaitedForOnlyWithinTheBudgetAndTheJobStillEnds() throws Exception {
         Pending p = pending();
-        try (Connection holder = ds.getConnection()) {  // e.g. a condition change or an unsubscribe holding the row
+        var poolManager = new SlowPool();
+        poolManager.waits.add(Duration.ofSeconds(5));
+        sender = new SyncSender(jdbc, poolManager, ledger, limits, mail, NO_WEBHOOK, crypto, timer);
+        try (Connection holder = ds.getConnection(); var pool = Executors.newSingleThreadExecutor()) {
             holder.setAutoCommit(false);
             try (var lock = holder.prepareStatement("SELECT 1 FROM subscription WHERE id = ? FOR UPDATE")) {
                 lock.setObject(1, p.id());
                 lock.executeQuery();
             }
             long t0 = System.nanoTime();
-            sender.deliverMail(p.claim(), job(p), timer.nanoTime() - Duration.ofSeconds(20).toNanos());  // 5 s left: waits get 3 s
-            Duration took = Duration.ofNanos(System.nanoTime() - t0);
-            holder.rollback();
-            assertThat(took).isBetween(Duration.ofMillis(2_500), Duration.ofMillis(6_000));
+            Future<?> request = pool.submit(() -> sender.deliverMail(p.claim(), job(p), timer.nanoTime() - Duration.ofSeconds(10).toNanos()));
+            try {
+                request.get(8, TimeUnit.SECONDS);
+                assertThat(Duration.ofNanos(System.nanoTime() - t0)).isBetween(Duration.ofMillis(2_500), Duration.ofMillis(6_000));
+            } finally {
+                holder.rollback();
+            }
         }
         assertThat(mail.keys).isEmpty();
         assertThat(emailTotal()).isZero();
-        assertThat(job(p.claim().id())).as("ended, not left SENDING for the sweep").isEqualTo("FAILED|DEADLINE|0");
+        assertThat(job(p.claim().id())).isEqualTo("FAILED|DEADLINE|0");
     }
 
     @Test
     void aCountWaitsForAHeldRateLimitRowOnlyAsLongAsItsBudgetAndCommitsNothingWhenItRunsOut() throws Exception {
         byte[] key = crypto.limitKey("SUBSCRIBE:ip", "198.51.100.30");
         assertThat(limits.acquire(RateLimiter.Scope.SUBSCRIBE, key, RateLimiter.PER_IP)).isTrue();
-        try (Connection holder = ds.getConnection()) {  // another request counting the same key, not yet committed
+        var poolManager = new SlowPool();
+        var boundedLimits = new RateLimiter(jdbc, clock, poolManager);
+        poolManager.waits.add(Duration.ofSeconds(5));
+        long start = timer.nanoTime();
+        try (Connection holder = ds.getConnection(); var pool = Executors.newSingleThreadExecutor()) {
             holder.setAutoCommit(false);
             try (var count = holder.createStatement()) { count.executeUpdate("UPDATE rate_limit SET count = count + 1 WHERE scope = 'SUBSCRIBE'"); }
             long t0 = System.nanoTime();
-            // lock_timeout and statement_timeout are the same value: either may fire first, and both are handled alike
-            assertThatThrownBy(() -> limits.acquire(RateLimiter.Scope.SUBSCRIBE, key, RateLimiter.PER_IP, () -> Duration.ofSeconds(2)))
-                    .isInstanceOfAny(CannotAcquireLockException.class, QueryTimeoutException.class);
-            assertThat(Duration.ofNanos(System.nanoTime() - t0)).isBetween(Duration.ofMillis(1_500), Duration.ofMillis(5_000));
-            assertThatThrownBy(() -> limits.acquire(RateLimiter.Scope.SUBSCRIBE, key, RateLimiter.PER_IP, () -> Duration.ZERO))
-                    .as("a spent budget starts no statement").isInstanceOf(QueryTimeoutException.class).hasMessage("SYNC_BUDGET_SPENT");
-            holder.rollback();
+            Future<?> request = pool.submit(() -> boundedLimits.acquire(RateLimiter.Scope.SUBSCRIBE, key, RateLimiter.PER_IP,
+                    () -> Duration.ofSeconds(7).minusNanos(timer.nanoTime() - start)));
+            try {
+                assertThatThrownBy(() -> request.get(6, TimeUnit.SECONDS)).isInstanceOf(ExecutionException.class)
+                        .hasCauseInstanceOf(org.springframework.dao.DataAccessException.class);
+                assertThat(Duration.ofNanos(System.nanoTime() - t0)).isBetween(Duration.ofMillis(1_500), Duration.ofMillis(5_000));
+            } finally {
+                holder.rollback();
+            }
         }
-        assertThat(jdbc.sql("SELECT count FROM rate_limit WHERE scope = 'SUBSCRIBE'").query(Integer.class).single())
-                .as("only the first count; the timed-out one committed nothing").isEqualTo(1);
+        assertThat(jdbc.sql("SELECT count FROM rate_limit WHERE scope = 'SUBSCRIBE'").query(Integer.class).single()).isEqualTo(1);
+    }
+
+    @Test
+    void sequentialReservationLocksShareOneDecreasingBudgetAndRollbackTogether() throws Exception {
+        Pending p = pending();
+        byte[] key = crypto.limitKey("SEND_TOTAL", "email");
+        assertThat(limits.acquire(RateLimiter.Scope.SEND_TOTAL, key, RateLimiter.EMAIL_TOTAL)).isTrue();
+        try (Connection notification = ds.getConnection(); Connection counter = ds.getConnection();
+                var pool = Executors.newSingleThreadExecutor()) {
+            notification.setAutoCommit(false);
+            counter.setAutoCommit(false);
+            try (var lock = notification.prepareStatement("SELECT 1 FROM notification WHERE id = ? FOR UPDATE")) {
+                lock.setLong(1, p.claim().id());
+                lock.executeQuery();
+            }
+            try (var lock = counter.createStatement()) { lock.executeUpdate("UPDATE rate_limit SET count = count + 1 WHERE scope = 'SEND_TOTAL'"); }
+            long start = System.nanoTime();
+            Future<?> reservation = pool.submit(() -> ledger.reserve(p.claim(), UUID.randomUUID(), new byte[32], key, RateLimiter.EMAIL_TOTAL,
+                    () -> Duration.ofSeconds(6).minusNanos(System.nanoTime() - start)));
+            try {
+                awaitRowLock();
+                Thread.sleep(2_000);
+                notification.rollback();
+                awaitRowLock();
+                assertThatThrownBy(() -> reservation.get(5, TimeUnit.SECONDS)).isInstanceOf(ExecutionException.class)
+                        .hasCauseInstanceOf(org.springframework.dao.DataAccessException.class);
+                assertThat(Duration.ofNanos(System.nanoTime() - start)).isBetween(Duration.ofMillis(5_500), Duration.ofMillis(7_500));
+            } finally {
+                notification.rollback();
+                counter.rollback();
+            }
+        }
+        assertThat(job(p.claim().id())).isEqualTo("SENDING|-|0");
+        assertThat(attempts(p.claim().id())).isEmpty();
+        assertThat(emailTotal()).isEqualTo(1);
+    }
+
+    void awaitRowLock() throws InterruptedException {
+        for (int n = 0; n < 100; n++) {
+            if (jdbc.sql("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()")
+                    .query(Integer.class).single() > 0) return;
+            Thread.sleep(20);
+        }
+        throw new AssertionError("reservation did not wait on a row lock");
     }
 
     @Test
@@ -403,7 +450,7 @@ class DeliveryLedgerTest {
         assertThat(ledger.recoverAsync()).isEqualTo(1);
         assertThat(job(digest)).isEqualTo("RETRY|UNKNOWN_CRASH|0");
         assertThat(job(confirm.claim().id())).as("the async recovery leaves the sync row alone").isEqualTo("SENDING|-|0");
-        assertThat(ledger.reserve(claims.getFirst(), UUID.randomUUID(), new byte[32], null, null, () -> Duration.ofSeconds(1)))
+        assertThat(ledger.reserve(claims.getFirst(), UUID.randomUUID(), new byte[32], null, null, () -> Duration.ofSeconds(6)))
                 .as("the old worker's claim no longer fences").isInstanceOf(DeliveryLedger.Reservation.Fenced.class);
         assertThat(ledger.finish(claims.getFirst(), true, null, false)).isFalse();
         assertThat(ledger.sweepSync()).isEqualTo(1);

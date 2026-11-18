@@ -89,6 +89,7 @@ public class DeliveryLedger {
      * {@code waitLimit} is read after B is taken from the pool: nothing left means nothing is reserved (14-4).
      */
     public Reservation reserve(Claim claim, UUID key, byte[] payloadHash, byte[] totalKey, RateLimiter.Limit total, Supplier<Duration> waitLimit) {
+        limits.requirePoolRoom(waitLimit);
         return independent.execute(status -> {
             boundWaits(waitLimit.get());
             var attemptNo = jdbc.sql("""
@@ -97,10 +98,14 @@ public class DeliveryLedger {
                     """).param("key", key).param("hash", payloadHash).param("id", claim.id()).param("claim", claim.claimedAt())
                     .param("max", MAX_ATTEMPTS).query(Integer.class).optional();
             if (attemptNo.isEmpty()) return new Reservation.Fenced();
-            if (total != null && !limits.acquireHere(RateLimiter.Scope.SEND_TOTAL, totalKey, total.max(), total.window())) {
-                status.setRollbackOnly();
-                return new Reservation.Capped();
+            if (total != null) {
+                boundWaits(waitLimit.get());
+                if (!limits.acquireHere(RateLimiter.Scope.SEND_TOTAL, totalKey, total.max(), total.window())) {
+                    status.setRollbackOnly();
+                    return new Reservation.Capped();
+                }
             }
+            boundWaits(waitLimit.get());
             long attemptId = jdbc.sql("""
                     INSERT INTO notification_attempt(notification_id, attempt_no, started_at) VALUES (:id, :no, :at) RETURNING id
                     """).param("id", claim.id()).param("no", attemptNo.get()).param("at", now()).query(Long.class).single();

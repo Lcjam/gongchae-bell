@@ -6,6 +6,8 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.function.Supplier;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.QueryTimeoutException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
@@ -33,9 +35,18 @@ public class RateLimiter {
     private final JdbcClient jdbc;
     private final Clock clock;
     private final TransactionTemplate independent;
+    private final Duration poolWait;
 
     public RateLimiter(JdbcClient jdbc, Clock clock, PlatformTransactionManager manager) {
+        this(jdbc, clock, manager, 5_000);
+    }
+
+    @Autowired
+    public RateLimiter(JdbcClient jdbc, Clock clock, PlatformTransactionManager manager,
+            @Value("${spring.datasource.hikari.connection-timeout:30000}") long poolWaitMillis) {
         this.jdbc = jdbc; this.clock = clock;
+        // Hikari's zero means an unbounded wait, which cannot fit an in-request budget.
+        this.poolWait = Duration.ofMillis(poolWaitMillis == 0 ? Long.MAX_VALUE : poolWaitMillis);
         independent = new TransactionTemplate(manager);
         independent.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
@@ -50,10 +61,18 @@ public class RateLimiter {
      * bounds the lock and statement waits of the count.
      */
     public boolean acquire(Scope scope, byte[] key, Limit limit, Supplier<Duration> waitLimit) {
+        requirePoolRoom(waitLimit);
         return Boolean.TRUE.equals(independent.execute(status -> {
             boundWaits(waitLimit.get());
             return acquireHere(scope, key, limit.max(), limit.window());
         }));
+    }
+
+    Duration poolWait() { return poolWait; }
+
+    void requirePoolRoom(Supplier<Duration> waitLimit) {
+        if (waitLimit.get().compareTo(poolWait) < 0)
+            throw new QueryTimeoutException("SYNC_BUDGET_SPENT");
     }
 
     /**

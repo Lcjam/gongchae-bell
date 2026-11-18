@@ -71,10 +71,12 @@ public class SubscriptionController {
             @RequestParam(defaultValue = "false") boolean consent, @RequestParam(defaultValue = "false") boolean age14,
             Model model, HttpServletRequest request, HttpServletResponse response) {
         if (!properties.enabled()) { response.setStatus(503); return unavailable(model); }
+        long start = service.start();
+        Map<String, List<CatalogViews.FilterOption>> options = service.signupOptions(start);
         SubscriptionService.Conditions conditions = new SubscriptionService.Conditions(blank(ncs), blank(region), blank(hire), blank(career), blank(q), notifyNew, notifyDeadline);
         try {
-            conditions = service.conditions(ncs, region, hire, career, q, notifyNew, notifyDeadline);
-            SubscriptionService.State state = service.subscribeEmail(email, conditions, consent, age14, ip(request));
+            conditions = service.conditions(ncs, region, hire, career, q, notifyNew, notifyDeadline, options);
+            SubscriptionService.State state = service.subscribeEmail(email, conditions, consent, age14, ip(request), start);
             if (state == SubscriptionService.State.RATE_LIMITED) return limited(model, response);
             // One answer for every case (new, pending, active, send failure, send cap): it must not reveal any of them.
             return notice(model, "신청을 받았습니다",
@@ -84,7 +86,7 @@ public class SubscriptionController {
             response.setStatus(400);
             model.addAttribute("form", conditions);
             model.addAttribute("email", email);
-            return newPage(model, catalog.findFilterOptions(), invalid.field(), "email");
+            return newPage(model, options, invalid.field(), "email");
         }
     }
 
@@ -96,15 +98,17 @@ public class SubscriptionController {
             @RequestParam(defaultValue = "false") boolean consent, @RequestParam(defaultValue = "false") boolean age14,
             Model model, HttpServletRequest request, HttpServletResponse response) {
         if (!properties.enabled()) { response.setStatus(503); return unavailable(model); }
+        long start = service.start();
+        Map<String, List<CatalogViews.FilterOption>> options = service.signupOptions(start);
         SubscriptionService.Conditions conditions = new SubscriptionService.Conditions(blank(ncs), blank(region), blank(hire), blank(career), blank(q), notifyNew, notifyDeadline);
         SubscriptionService.Result result;
         try {
-            conditions = service.conditions(ncs, region, hire, career, q, notifyNew, notifyDeadline);
-            result = service.registerDiscord(webhook, conditions, consent, age14, ip(request));
+            conditions = service.conditions(ncs, region, hire, career, q, notifyNew, notifyDeadline, options);
+            result = service.registerDiscord(webhook, conditions, consent, age14, ip(request), start);
         } catch (SubscriptionService.InvalidInput invalid) {
             response.setStatus(400);
             model.addAttribute("form", conditions);
-            return newPage(model, catalog.findFilterOptions(), invalid.field(), "discord");
+            return newPage(model, options, invalid.field(), "discord");
         }
         return switch (result.state()) {
             case REGISTERED -> {

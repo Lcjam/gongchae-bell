@@ -5,6 +5,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
@@ -31,6 +34,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 import javax.sql.DataSource;
 import kr.gongchae.bell.IntegrationTestSupport;
+import kr.gongchae.bell.catalog.CatalogRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -42,6 +46,7 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.TestPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
@@ -114,6 +119,7 @@ class SubscriptionFlowIntegrationTest extends IntegrationTestSupport {
     @Autowired JdbcClient jdbc;
     @Autowired AlertsCrypto crypto;
     @Autowired DataSource dataSource;
+    @MockitoSpyBean CatalogRepository catalog;
 
     @BeforeEach
     void clean() throws IOException {
@@ -408,7 +414,7 @@ class SubscriptionFlowIntegrationTest extends IntegrationTestSupport {
     /** Root C4: a lock wait before the send is cut to the request budget and ends as a 503, keeping nothing of the step. */
     @Test
     void aBoundedWaitThatRunsOutAnswersBusyInsideTheBudgetAndKeepsNothingOfTheSignup() throws Exception {
-        try (Connection other = dataSource.getConnection()) {  // another sign-up of the same address, not yet committed
+        try (Connection other = dataSource.getConnection(); var pool = Executors.newSingleThreadExecutor()) {  // another sign-up of the same address, not yet committed
             other.setAutoCommit(false);
             try (var insert = other.prepareStatement("""
                     INSERT INTO subscription(id, channel, status, email, dest_hmac, conditions, notify_new, notify_deadline,
@@ -421,16 +427,54 @@ class SubscriptionFlowIntegrationTest extends IntegrationTestSupport {
                 insert.setBytes(3, AlertsCrypto.sha256("other request"));
                 insert.executeUpdate();
             }
-            SKIP_AFTER_START.set(Duration.ofSeconds(20).toNanos());  // 20 s gone right after the start: 3 s left for waits
+            SKIP_AFTER_START.set(Duration.ofSeconds(10).toNanos());  // 15 s left, including the final connection and write
             long t0 = System.nanoTime();
-            mvc.perform(signup("busy@example.com")).andExpect(status().isServiceUnavailable())
-                    .andExpect(content().string(containsString("잠시 뒤 다시 시도해 주세요")));
-            assertThat(Duration.ofNanos(System.nanoTime() - t0)).isBetween(Duration.ofMillis(2_500), Duration.ofMillis(8_000));
-            other.rollback();
+            Future<MvcResult> request = pool.submit(() -> mvc.perform(signup("busy@example.com")).andReturn());
+            try {
+                MvcResult result = request.get(12, TimeUnit.SECONDS);
+                assertThat(result.getResponse().getStatus()).isEqualTo(503);
+                assertThat(result.getResponse().getContentAsString(UTF_8)).contains("잠시 뒤 다시 시도해 주세요");
+                assertThat(Duration.ofNanos(System.nanoTime() - t0)).isBetween(Duration.ofMillis(7_000), Duration.ofMillis(11_000));
+            } finally {
+                other.rollback();  // always release before the executor waits for the request to finish
+            }
         }
         assertThat(MAILS).isEmpty();
         assertThat(jdbc.sql("SELECT count(*) FROM subscription").query(Integer.class).single()).isZero();
         assertThat(jdbc.sql("SELECT count(*) FROM notification").query(Integer.class).single()).isZero();
+    }
+
+    @Test
+    void conditionLookupUsesThePostBudgetAndInvalidInputReusesItsOptions() throws Exception {
+        doAnswer(call -> {
+            Object options = call.callRealMethod();
+            AHEAD.addAndGet(Duration.ofSeconds(14).toNanos());
+            return options;
+        }).when(catalog).findFilterOptions();
+        mvc.perform(signup("slow@example.com")).andExpect(status().isServiceUnavailable());
+        mvc.perform(discord()).andExpect(status().isServiceUnavailable());
+        mvc.perform(signup("invalid@example.com").param("region", "INVALID")).andExpect(status().isBadRequest());
+        verify(catalog, times(3)).findFilterOptions();
+        assertThat(MAILS).isEmpty();
+        assertThat(WEBHOOK_CALLS).hasValue(0);
+        assertThat(jdbc.sql("SELECT count(*) FROM subscription").query(Integer.class).single()).isZero();
+        assertThat(jdbc.sql("SELECT count(*) FROM rate_limit").query(Integer.class).single()).isZero();
+    }
+
+    @Test
+    void aConditionQueryBlockedByADdlLockTimesOutAndTheHarnessAlwaysReleasesIt() throws Exception {
+        try (Connection holder = dataSource.getConnection(); var pool = Executors.newSingleThreadExecutor()) {
+            holder.setAutoCommit(false);
+            try (var lock = holder.createStatement()) { lock.execute("LOCK TABLE code_name IN ACCESS EXCLUSIVE MODE"); }
+            SKIP_AFTER_START.set(Duration.ofSeconds(10).toNanos());
+            Future<MvcResult> request = pool.submit(() -> mvc.perform(discord()).andReturn());
+            try {
+                assertThat(request.get(12, TimeUnit.SECONDS).getResponse().getStatus()).isEqualTo(503);
+            } finally {
+                holder.rollback();
+            }
+        }
+        assertThat(WEBHOOK_CALLS).hasValue(0);
     }
 
     @Test

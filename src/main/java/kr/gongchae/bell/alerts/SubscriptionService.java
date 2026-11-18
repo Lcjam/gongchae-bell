@@ -17,6 +17,7 @@ import java.util.UUID;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import kr.gongchae.bell.catalog.CatalogRepository;
+import kr.gongchae.bell.catalog.CatalogViews;
 import kr.gongchae.bell.catalog.JobSearchCriteria;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -84,10 +85,27 @@ public class SubscriptionService {
 
     // ---- input ----
 
+    public long start() { return sender.start(); }
+
+    /** Read once within the POST budget, also reused when invalid input is shown again. */
+    public Map<String, List<CatalogViews.FilterOption>> signupOptions(long start) {
+        Supplier<Duration> waits = () -> sender.waitLimit(start);
+        limits.requirePoolRoom(waits);
+        return tx.execute(status -> {
+            limits.boundWaits(waits.get());
+            return catalog.findFilterOptions();
+        });
+    }
+
     /** Strict subscription conditions (shared allow-lists with the list page, which ignores bad values instead). */
     public Conditions conditions(String ncs, String region, String hire, String career, String q, boolean notifyNew, boolean notifyDeadline) {
+        return conditions(ncs, region, hire, career, q, notifyNew, notifyDeadline, catalog.findFilterOptions());
+    }
+
+    public Conditions conditions(String ncs, String region, String hire, String career, String q, boolean notifyNew,
+            boolean notifyDeadline, Map<String, List<CatalogViews.FilterOption>> options) {
         JobSearchCriteria strict;
-        try { strict = JobSearchCriteria.strict(ncs, region, hire, career, q, catalog.allowedCodeSet(catalog.findFilterOptions())); }
+        try { strict = JobSearchCriteria.strict(ncs, region, hire, career, q, catalog.allowedCodeSet(options)); }
         catch (JobSearchCriteria.InvalidCondition invalid) { throw new InvalidInput(invalid.field()); }
         if (!notifyNew && !notifyDeadline) throw new InvalidInput("kinds");
         return new Conditions(strict.ncs(), strict.region(), strict.hire(), strict.career(), strict.q(), notifyNew, notifyDeadline);
@@ -111,8 +129,7 @@ public class SubscriptionService {
      * Every DB wait before the send is bounded by the request budget (14-4). A wait that runs out throws
      * {@code CannotAcquireLockException}/{@code QueryTimeoutException}, and no part of the sign-up is committed.
      */
-    public State subscribeEmail(String rawEmail, Conditions conditions, boolean agreed, boolean age14, String ip) {
-        long start = sender.start();
+    public State subscribeEmail(String rawEmail, Conditions conditions, boolean agreed, boolean age14, String ip, long start) {
         consent(agreed, age14);
         String email = email(rawEmail);
         Supplier<Duration> waits = () -> sender.waitLimit(start);
@@ -122,6 +139,7 @@ public class SubscriptionService {
         String token = crypto.newConfirmToken();
         byte[] hash = AlertsCrypto.sha256(token);
         byte[] destination = crypto.destination("EMAIL", email);
+        limits.requirePoolRoom(waits);
         Signup signup = tx.execute(status -> signupEmail(email, destination, conditions, hash, waits));
         if (signup != null) deliver(signup.claim(), confirmJob(signup.id(), hash, email, token), start);
         return State.ACCEPTED;
@@ -144,7 +162,10 @@ public class SubscriptionService {
                     .param("conditions", json(conditions)).param("new", conditions.notifyNew()).param("deadline", conditions.notifyDeadline())
                     .param("hash", hash).param("expires", now.plus(CONFIRM_TTL)).param("consent", properties.privacy().policyVersion())
                     .param("now", now).query(UUID.class).optional();
-            if (inserted.isPresent()) return new Signup(inserted.get(), ledger.createSync(inserted.get(), "EMAIL_CONFIRM"));
+            if (inserted.isPresent()) {
+                limits.boundWaits(waits.get());
+                return new Signup(inserted.get(), ledger.createSync(inserted.get(), "EMAIL_CONFIRM"));
+            }
             limits.boundWaits(waits.get());
             var existing = jdbc.sql("""
                     SELECT id, status FROM subscription WHERE channel = 'EMAIL' AND dest_hmac = :dest AND status IN ('PENDING','ACTIVE') FOR UPDATE
@@ -152,6 +173,7 @@ public class SubscriptionService {
             if (existing.isEmpty()) continue;  // deleted between the two statements: try the insert once more
             if (existing.get().getValue().equals("ACTIVE")) return null;  // FR-A1: an active subscription is never overwritten
             UUID id = existing.get().getKey();
+            limits.boundWaits(waits.get());
             jdbc.sql("""
                     UPDATE subscription SET confirm_token_hash = :hash, confirm_expires_at = :expires, conditions = CAST(:conditions AS jsonb),
                       notify_new = :new, notify_deadline = :deadline, consent_version = :consent, consented_at = :now, updated_at = :now
@@ -159,6 +181,7 @@ public class SubscriptionService {
                     """).param("hash", hash).param("expires", now.plus(CONFIRM_TTL)).param("conditions", json(conditions))
                     .param("new", conditions.notifyNew()).param("deadline", conditions.notifyDeadline())
                     .param("consent", properties.privacy().policyVersion()).param("now", now).param("id", id).update();
+            limits.boundWaits(waits.get());
             return new Signup(id, ledger.createSync(id, "EMAIL_CONFIRM"));
         }
         return null;
@@ -286,13 +309,17 @@ public class SubscriptionService {
             return State.RATE_LIMITED;
         byte[] destination = crypto.destination("EMAIL", email);
         record Recovery(UUID id, int version, DeliveryLedger.Claim claim) {}
+        limits.requirePoolRoom(waits);
         Recovery recovery = tx.execute(status -> {
             limits.boundWaits(waits.get());
             return jdbc.sql("""
                     SELECT id, token_version FROM subscription WHERE channel = 'EMAIL' AND dest_hmac = :dest AND status = 'ACTIVE'
                     FOR KEY SHARE
                     """).param("dest", destination).query((rs, row) -> Map.entry(rs.getObject(1, UUID.class), rs.getInt(2))).optional()
-                    .map(row -> new Recovery(row.getKey(), row.getValue(), ledger.createSync(row.getKey(), "EMAIL_RECOVER"))).orElse(null);
+                    .map(row -> {
+                        limits.boundWaits(waits.get());
+                        return new Recovery(row.getKey(), row.getValue(), ledger.createSync(row.getKey(), "EMAIL_RECOVER"));
+                    }).orElse(null);
         });
         if (recovery != null) deliver(recovery.claim(), recoverJob(recovery.id(), recovery.version(), email), start);
         return State.ACCEPTED;
@@ -339,8 +366,7 @@ public class SubscriptionService {
      * success record and its attempts; a failed test stores nothing about the webhook. Budget as in
      * {@link #subscribeEmail}; the final insert gets the CLEANUP share.
      */
-    public Result registerDiscord(String rawUrl, Conditions conditions, boolean agreed, boolean age14, String ip) {
-        long start = sender.start();
+    public Result registerDiscord(String rawUrl, Conditions conditions, boolean agreed, boolean age14, String ip, long start) {
         consent(agreed, age14);
         WebhookUrl url = WebhookUrl.parse(rawUrl).orElseThrow(() -> new InvalidInput("webhook"));
         String target = url.normalized();
@@ -358,8 +384,10 @@ public class SubscriptionService {
             return Result.of(last == SendOutcome.WEBHOOK_404 ? State.WEBHOOK_NOT_FOUND : State.TEST_FAILED);
         UUID id = UUID.randomUUID();
         OffsetDateTime now = now();
+        limits.requirePoolRoom(() -> sender.remaining(start).minus(SyncSender.CLEANUP));
         Boolean inserted = tx.execute(status -> {
-            limits.boundWaits(SyncSender.CLEANUP);
+            Supplier<Duration> cleanup = sender.cleanupWaits(start);
+            limits.boundWaits(cleanup.get());
             boolean created = jdbc.sql("""
                     INSERT INTO subscription(id, channel, status, webhook_enc, webhook_key_id, dest_hmac, conditions, notify_new,
                       notify_deadline, consent_version, consented_at, age_confirmed, confirmed_at, created_at, updated_at)
@@ -371,17 +399,20 @@ public class SubscriptionService {
                     .param("deadline", conditions.notifyDeadline()).param("consent", properties.privacy().policyVersion())
                     .param("now", now).query(UUID.class).optional().isPresent();
             if (!created) return false;  // a concurrent registration of the same webhook won
+            limits.boundWaits(cleanup.get());
             long notification = jdbc.sql("""
                     INSERT INTO notification(subscription_id, kind, batch_key, status, attempts, created_at, finished_at, idempotency_key)
                     VALUES (:id, 'DISCORD_TEST', :batch, 'SENT', :attempts, :now, :now, :key) RETURNING id
                     """).param("id", id).param("batch", UUID.randomUUID().toString()).param("attempts", attempts.size())
                     .param("now", now).param("key", UUID.randomUUID()).query(Long.class).single();
-            for (SyncSender.WebhookAttempt attempt : attempts)
+            for (SyncSender.WebhookAttempt attempt : attempts) {
+                limits.boundWaits(cleanup.get());
                 jdbc.sql("""
                         INSERT INTO notification_attempt(notification_id, attempt_no, started_at, finished_at, outcome, http_status)
                         VALUES (:notification, :no, :now, :now, :outcome, :status)
                         """).param("notification", notification).param("no", attempt.attemptNo()).param("now", now)
                         .param("outcome", attempt.result().outcome().name()).param("status", attempt.result().httpStatus()).update();
+            }
             return true;
         });
         return Boolean.TRUE.equals(inserted) ? new Result(State.REGISTERED, crypto.capability(AlertsCrypto.Purpose.MANAGE, id, 1))
@@ -389,6 +420,7 @@ public class SubscriptionService {
     }
 
     private boolean liveDestination(byte[] destination, Supplier<Duration> waits) {
+        limits.requirePoolRoom(waits);
         return Boolean.TRUE.equals(tx.execute(status -> {
             limits.boundWaits(waits.get());
             return jdbc.sql("""
