@@ -270,7 +270,7 @@ assert_file_contains "$CASE_DIR/out.log" "SNAPSHOT_RETENTION_SUMMARY count=3 old
 assert_file_contains "$MOCK_LOG_DIR/staged_files.txt" "gongchae-bell.dump" "dump staged"
 assert_file_contains "$MOCK_LOG_DIR/staged_files.txt" "erasure.log" "erasure.log staged"
 assert_file_contains "$MOCK_LOG_DIR/staged_files.txt" "backup-meta.txt" "meta staged"
-assert_file_contains "$MOCK_LOG_DIR/commands.log" "forget --tag gongchae-bell --keep-daily 14 --prune" "keep-daily 14 prune ran"
+assert_file_contains "$MOCK_LOG_DIR/commands.log" "forget --tag gongchae-bell --group-by host,tags --keep-daily 14 --prune" "keep-daily 14 prune ran"
 assert_file_contains "$MOCK_LOG_DIR/heartbeat_urls.log" "https://hc-ping.com/deadbeef-1111-2222-3333-444455556666" "success ping sent"
 assert_file_not_contains "$MOCK_LOG_DIR/heartbeat_urls.log" "/fail" "no /fail ping on success"
 assert_file_not_contains "$CASE_DIR/out.log" "COMPOSE_DB_SECRET_DO_NOT_LEAK" "compose DB secret absent"
@@ -301,13 +301,22 @@ rm -f "$CASE_DIR/erasure/erasure.log"
 "$BACKUP_SH" run --env-file "$CASE_DIR/backup.env" >"$CASE_DIR/m1.log" 2>&1
 assert_file_contains "$CASE_DIR/m1.log" "ERASURE_LOG_ABSENT_M1_ONLY" "M1 allows absent erasure.log"
 
-# M2 (ALERTS_ENABLED=true): missing erasure.log fails closed
-sed -i 's/ALERTS_ENABLED=false/ALERTS_ENABLED=true/' "$CASE_DIR/compose.env"
-: >"$MOCK_LOG_DIR/heartbeat_urls.log"
-if "$BACKUP_SH" run --env-file "$CASE_DIR/backup.env" 2>/dev/null; then
-  echo "Expected missing erasure.log with ALERTS_ENABLED=true to fail" >&2; exit 1
-fi
-assert_file_contains "$MOCK_LOG_DIR/heartbeat_urls.log" "/fail" "/fail sent when required erasure.log missing"
+# M2 (ALERTS_ENABLED=true, quoted, or uppercase): missing erasure.log fails closed
+for alerts_line in \
+  'ALERTS_ENABLED=true' \
+  'ALERTS_ENABLED="true"' \
+  "ALERTS_ENABLED='true'" \
+  'ALERTS_ENABLED=TRUE' \
+  'ALERTS_ENABLED="True" # inline comment'; do
+  setup_env erasure_contract_m2
+  rm -f "$CASE_DIR/erasure/erasure.log"
+  printf 'COMPOSE_PROJECT_NAME=gongchae\n%s\n' "$alerts_line" >"$CASE_DIR/compose.env"
+  : >"$MOCK_LOG_DIR/heartbeat_urls.log"
+  if "$BACKUP_SH" run --env-file "$CASE_DIR/backup.env" 2>/dev/null; then
+    echo "Expected missing erasure.log with [$alerts_line] to fail" >&2; exit 1
+  fi
+  assert_file_contains "$MOCK_LOG_DIR/heartbeat_urls.log" "/fail" "/fail sent when required erasure.log missing for [$alerts_line]"
+done
 
 # Empty prepared file (0 bytes) is valid and included
 : >"$CASE_DIR/erasure/erasure.log"
@@ -355,11 +364,67 @@ setup_env secret_redaction
 export MOCK_RESTIC_LEAK_SECRET=1
 export MOCK_RESTIC_BACKUP_FAIL=1
 export MOCK_FAIL_PING_ERROR=1
-"$BACKUP_SH" run --env-file "$CASE_DIR/backup.env" >"$CASE_DIR/redacted.log" 2>&1 || true
+if command -v timeout >/dev/null 2>&1; then
+  timeout 5 "$BACKUP_SH" run --env-file "$CASE_DIR/backup.env" >"$CASE_DIR/redacted.log" 2>&1 || rc=$?
+  if [[ "${rc:-0}" -eq 124 ]]; then
+    echo "ERROR: backup.sh timed out during secret redaction" >&2; exit 1
+  fi
+else
+  "$BACKUP_SH" run --env-file "$CASE_DIR/backup.env" >"$CASE_DIR/redacted.log" 2>&1 || true
+fi
 for secret in 'p@ss/w&rd$1!' 'mock_access_key_placeholder' 'mock_secret_key_placeholder' 'deadbeef-1111-2222-3333-444455556666' 'COMPOSE_DB_SECRET_DO_NOT_LEAK'; do
   assert_file_not_contains "$CASE_DIR/redacted.log" "$secret" "secret [$secret] must be redacted"
 done
 assert_file_contains "$CASE_DIR/redacted.log" "[REDACTED]" "redaction marker present"
+
+# Run edge-case checks directly against redact_stream in backup.sh (extracted safely into subshell, bounded by timeout 5s)
+run_redact_probe() {
+  local label="$1"
+  local restic_pw="$2"
+  local aws_key="$3"
+  local aws_secret="$4"
+  local hc_url="$5"
+  local input_line="$6"
+  local expected_contains="$7"
+  local fn_file="$TMP_ROOT/redact_probe_${label}.sh"
+  sed -n '/^redact_stream()/,/^}/p' "$BACKUP_SH" >"$fn_file"
+  local out
+  local status=0
+  if command -v timeout >/dev/null 2>&1; then
+    out="$(printf '%s\n' "$input_line" | \
+      RESTIC_PASSWORD="$restic_pw" \
+      AWS_ACCESS_KEY_ID="$aws_key" \
+      AWS_SECRET_ACCESS_KEY="$aws_secret" \
+      HEALTHCHECKS_BACKUP_URL="$hc_url" \
+      timeout 5 bash -c 'source "$1"; redact_stream' _ "$fn_file")" || status=$?
+  else
+    out="$(printf '%s\n' "$input_line" | \
+      RESTIC_PASSWORD="$restic_pw" \
+      AWS_ACCESS_KEY_ID="$aws_key" \
+      AWS_SECRET_ACCESS_KEY="$aws_secret" \
+      HEALTHCHECKS_BACKUP_URL="$hc_url" \
+      bash -c 'source "$1"; redact_stream' _ "$fn_file")" || status=$?
+  fi
+  if [[ "$status" -ne 0 ]]; then
+    echo "ERROR: redact_stream probe [$label] failed or timed out (status=$status)" >&2; exit 1
+  fi
+  if [[ "$out" != "$expected_contains" ]]; then
+    echo "ERROR: redact_stream probe [$label] mismatch: got [$out], expected [$expected_contains]" >&2; exit 1
+  fi
+}
+
+run_redact_probe "redacted_char_R" "R" "E" "D" "https://hc-ping.com/token-abc" \
+  "R and E and D and https://hc-ping.com/token-abc and REST" \
+  "[REDACTED] and [REDACTED] and [REDACTED] and [REDACTED] and [REDACTED][REDACTED]ST"
+run_redact_probe "embedded_marker" 'pre[REDACTED]post' 'ak1' 'sk1' 'https://hc-ping.com/tok1' \
+  'leak pre[REDACTED]post ok' \
+  'leak [REDACTED] ok'
+run_redact_probe "backslash_and_regex" 'p@ss\nw&rd$1/\[x]*+' 'key\\slash' 'amp&1\0' 'https://hc-ping.com/u+v' \
+  'a p@ss\nw&rd$1/\[x]*+ b key\\slash c amp&1\0 d' \
+  'a [REDACTED] b [REDACTED] c [REDACTED] d'
+run_redact_probe "longest_match_prefix" 'KEY1' 'KEY1_LONGER' 'OTHER' 'https://hc-ping.com/1111' \
+  'vals KEY1_LONGER and KEY1 end' \
+  'vals [REDACTED] and [REDACTED] end'
 
 echo "=== [10/11] flock concurrency exclusion (exit 20) ==="
 setup_env flock_lock

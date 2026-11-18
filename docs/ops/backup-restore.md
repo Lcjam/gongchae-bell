@@ -9,22 +9,23 @@
 
 - **실행 주체·시각**: OCI 호스트 `ubuntu`(UID/GID `1000:1000`) systemd timer `gongchae-backup.timer`가 매일 `03:00 KST`(`OnCalendar=*-*-* 03:00:00 Asia/Seoul`, UTC 기준 `18:00:00 UTC`, `Persistent=true`)에 `gongchae-backup.service` → `deploy/backup/backup.sh run`을 실행한다.
 - **동시 실행 방지**: `flock` 배타 잠금(`/opt/gongchae-bell/backup/backup.lock`)으로 중복 실행을 막는다(`LOCK_HELD`, exit `20`).
-- **백업 대상 (임시 `0700` 스테이징 디렉터리)**:
+- **백업 대상 (고정 스테이징 디렉터리 `${BACKUP_STAGE_ROOT}/gongchae-backup-stage`, `0700`, `flock` 배타 보호)**:
   1. `gongchae-bell.dump`: 실행 중인 운영 Compose `postgres` 컨테이너 내부에서 `pg_dump -Fc`로 추출한 논리 덤프. 생성 직후 비어 있지 않음과 `pg_restore --list` TOC 검증을 통과해야 한다. (**실행 중인 PostgreSQL 데이터 볼륨 `postgres_data` 파일 직접 복사는 사용하지 않는다.**)
   2. `erasure.log`: ADR-0013 호스트 해지 대장(`/var/lib/gongchae-bell/erasure/erasure.log`).
-     - `REQUIRE_ERASURE_LOG=auto`(기본값)일 때, `/opt/gongchae-bell/.env`에 `ALERTS_ENABLED=true`가 설정되어 있으면 파일이 반드시 정규 파일로 존재해야 하며 없으면 실패 종료한다.
+     - `REQUIRE_ERASURE_LOG=auto`(기본값)일 때, `/opt/gongchae-bell/.env`에 `ALERTS_ENABLED=true`(따옴표·대소문자 포함)가 설정되어 있으면 파일이 반드시 정규 파일로 존재해야 하며 없으면 실패 종료한다. M2(`ALERTS_ENABLED=true`) 전환 시 `backup.env`에 `REQUIRE_ERASURE_LOG=true`를 함께 명시하는 것을 권장한다.
      - M1(`ALERTS_ENABLED=false`) 단계에서는 파일이 아직 없으면 `ERASURE_LOG_ABSENT_M1_ONLY`만 남기고 DB 덤프를 계속 백업하며, 빈 파일이라도 미리 생성되어 있으면 함께 백업한다.
      - 경로에 파일 대신 디렉터리가 있으면 즉시 실패한다.
   3. `backup-meta.txt`: 백업 UTC 시각, 덤프 바이트·SHA-256, TOC 항목 수, 해지 대장 포함 여부·바이트·줄 수(비밀값·UUID 미포함).
-- **암호화·전송**: `restic backup --tag gongchae-bell --tag daily`로 클라이언트 측 암호화 후 OCI Object Storage S3 호환 버킷에 업로드한다.
+- **암호화·전송**: 고정 스테이징 경로에서 `restic backup --tag gongchae-bell --tag daily`로 클라이언트 측 암호화 후 OCI Object Storage S3 호환 버킷에 업로드한다.
 
 ---
 
 ## 2. 보관 주기 및 한계 (`--keep-daily 14 --prune`)
 
-- 백업 성공 직후 `restic forget --tag gongchae-bell --keep-daily 14 --prune`을 실행한다(ADR-0012, ADR-0014 초기 설정).
+- 백업 성공 직후 `restic forget --tag gongchae-bell --group-by host,tags --keep-daily 14 --prune`을 실행한다(ADR-0012, ADR-0014 초기 설정).
+- `--group-by host,tags`로 묶기 때문에 기존 무작위 임시 경로 snapshot을 포함한 동일 `(host, tags)`(`gongchae-bell,daily`) 논리 묶음 전체에 보관 개수가 일관되게 적용된다.
 - 실행 뒤 `restic snapshots --tag gongchae-bell --compact`로 남은 snapshot 수, 가장 오래된 시점(`oldest_utc`), 최신 snapshot ID·시점(`latest_id`, `latest_utc`)을 로그(`SNAPSHOT_RETENTION_SUMMARY`)에 남긴다.
-- **보관 한계**: `--keep-daily 14`는 **백업이 성공한 서로 다른 날짜 기준 최대 14개 일일 snapshot**을 남기는 규칙이다. 백업이 실패해 건너뛴 날이 있으면 더 과거 snapshot이 남을 수 있으므로, 이 설정만으로 "모든 사본이 달력상 14일 뒤 무조건 삭제된다"고 보장하지 않는다. 개인정보처리방침 고지용 사본 삭제 확인은 #17의 OCI 밖 사본 정책과 함께 검증한다.
+- **보관 한계**: `--keep-daily 14`는 **백업이 성공한 서로 다른 날짜 기준 최대 14개 일일 snapshot**을 남기는 규칙이다. 백업이 실패해 건너뛴 날이 있으면 더 과거 snapshot이 남을 수 있으므로, 이 설정만으로 "모든 사본이 달력상 14일 뒤 무조건 삭제된다"고 보장하지 않는다. 달력 기준 사본 파기·해지 대장·OCI 밖 사본 고지 정합성은 #17에서 함께 확정한다.
 
 ---
 
@@ -67,8 +68,9 @@
 
 ## 5. 설치 및 운영 절차 (systemd)
 
-1. 호스트 디렉터리와 권한을 준비한다(소유 `ubuntu:ubuntu`, `0750`):
+1. 호스트 디렉터리와 `ubuntu` 사용자의 Docker 실행 권한을 확인·준비한다(소유 `ubuntu:ubuntu`, `0750`):
    ```bash
+   id -nG ubuntu | grep -qw docker   # 미포함 시 sudo usermod -aG docker ubuntu
    sudo mkdir -p /opt/gongchae-bell/backup
    sudo chown -R ubuntu:ubuntu /opt/gongchae-bell/backup
    sudo chmod 0750 /opt/gongchae-bell/backup
@@ -103,6 +105,7 @@
 ## 6. 실패 경보 (Healthchecks.io, ADR-0006)
 
 - `pg_dump`, `pg_restore --list`, `erasure.log` 검증, `restic backup`, `restic forget --prune` 중 어느 하나라도 실패하면 **성공 ping을 보내지 않고** `${HEALTHCHECKS_BACKUP_URL}/fail`로 실패 요약을 POST한 뒤 비정상 종료(`exit != 0`)한다.
+- `backup.env` 권한 오류(`ENV_PERM_FAIL`), 누락된 필수 키, 도구(`docker`/`restic`/`curl`/`flock`) 누락 등 `backup.env` 적재 완료 전 실패는 `HEALTHCHECKS_BACKUP_URL`을 읽기 전에 중단되므로 `/fail`을 보내지 않으며, Healthchecks.io의 **일정 유예 초과(미수신) 경보**와 `systemd` 실패 상태(`journalctl -u gongchae-backup.service`)로 감지된다.
 - 백업 자체가 성공했더라도 성공 ping 전송이 실패하면 비정상 종료해 systemd 장애 기록으로 남긴다.
 - 설정된 주기(일 1회 + 유예 시간) 안에 성공 ping이 오지 않거나 `/fail`을 수신하면 Healthchecks.io가 운영 채널로 경보를 보낸다.
 
@@ -148,6 +151,6 @@
 
 ### #17로 넘기는 범위
 
-- 사용자 NAS·PC에서 외부 포트 개방 없이 `restic copy` pull 스케줄 실행 및 사본 접근 제한·별도 Healthchecks.io heartbeat 검증
+- 사용자 NAS·PC에서 외부 포트 개방 없이 `restic copy` pull 스케줄 실행 및 사본 접근 제한·별도 Healthchecks.io heartbeat 검증 (pull 쪽 `forget` 시에도 `--group-by host,tags` 묶음 기준을 명시·일치시킨다)
 - 실운영 스키마·키가 포함된 격리 PostgreSQL 복원 리허설, `ERASURE_REAPPLY_COMPLETE` 및 missing/손상 대장 fail-closed 검증, 실측 기반 RTO/RPO 설정
-- `erasure.log` 정리 주기, 허용 복원 최소 시점, 연속 커버리지, 보관·prune 실패 경계 확정
+- `erasure.log` 정리 주기, 허용 복원 최소 시점, 연속 커버리지, 보관·prune 실패 경계 및 처리방침 사본 파기 고지 정합성 확정

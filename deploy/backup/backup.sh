@@ -36,26 +36,59 @@ redact_stream() {
     fi
   fi
 
-  awk \
-    -v p1="${RESTIC_PASSWORD:-}" \
-    -v p2="${AWS_ACCESS_KEY_ID:-}" \
-    -v p3="${AWS_SECRET_ACCESS_KEY:-}" \
-    -v p4="${HEALTHCHECKS_BACKUP_URL:-}" \
-    -v p5="$hc_token" '
-  function mask(line, s,   idx) {
-    if (s == "") return line
-    while ((idx = index(line, s)) > 0) {
-      line = substr(line, 1, idx - 1) "[REDACTED]" substr(line, idx + length(s))
+  # Pass literals via environment (ENVIRON) so awk never interprets backslashes (\n, \t, \\),
+  # and scan single-pass longest-match-first so secrets inside "[REDACTED]" never loop.
+  RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
+  AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-}" \
+  AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-}" \
+  HEALTHCHECKS_BACKUP_URL="${HEALTHCHECKS_BACKUP_URL:-}" \
+  HC_REDACT_TOKEN="$hc_token" \
+  awk '
+  BEGIN {
+    n_raw = 0
+    cand[1] = ENVIRON["RESTIC_PASSWORD"]
+    cand[2] = ENVIRON["AWS_ACCESS_KEY_ID"]
+    cand[3] = ENVIRON["AWS_SECRET_ACCESS_KEY"]
+    cand[4] = ENVIRON["HEALTHCHECKS_BACKUP_URL"]
+    cand[5] = ENVIRON["HC_REDACT_TOKEN"]
+    for (i = 1; i <= 5; i++) {
+      if (cand[i] != "") raw[++n_raw] = cand[i]
     }
-    return line
+    for (i = 2; i <= n_raw; i++) {
+      tmp = raw[i]
+      j = i - 1
+      while (j >= 1 && length(raw[j]) < length(tmp)) {
+        raw[j + 1] = raw[j]
+        j--
+      }
+      raw[j + 1] = tmp
+    }
+  }
+  function mask_all(line,   out, rest, i, idx, best_idx, best_len) {
+    if (n_raw == 0) return line
+    out = ""
+    rest = line
+    while (rest != "") {
+      best_idx = 0
+      best_len = 0
+      for (i = 1; i <= n_raw; i++) {
+        idx = index(rest, raw[i])
+        if (idx > 0 && (best_idx == 0 || idx < best_idx || (idx == best_idx && length(raw[i]) > best_len))) {
+          best_idx = idx
+          best_len = length(raw[i])
+        }
+      }
+      if (best_idx == 0) {
+        out = out rest
+        break
+      }
+      out = out substr(rest, 1, best_idx - 1) "[REDACTED]"
+      rest = substr(rest, best_idx + best_len)
+    }
+    return out
   }
   {
-    line = $0
-    line = mask(line, p1)
-    line = mask(line, p2)
-    line = mask(line, p3)
-    line = mask(line, p4)
-    line = mask(line, p5)
+    line = mask_all($0)
     gsub(/(https?:\/\/)[^[:space:]@\/:]+:[^[:space:]@\/]+@/, "\\1[REDACTED]@", line)
     gsub(/https?:\/\/[^[:space:]\/]*hc-ping[^[:space:]]*/, "[REDACTED_HC_URL]", line)
     print line
@@ -135,6 +168,18 @@ require_tools() {
   done
 }
 
+stat_mode_uid() {
+  local path="$1"
+  local meta
+  if meta="$(stat -c '%a %u' "$path" 2>/dev/null)"; then
+    printf '%s' "$meta"
+  elif meta="$(stat -f '%Lp %u' "$path" 2>/dev/null)"; then
+    printf '%s' "$meta"
+  else
+    fail "Unable to inspect permissions of path: $path"
+  fi
+}
+
 check_env_file_permissions() {
   local path="$1"
   local meta mode owner cur_uid
@@ -143,14 +188,7 @@ check_env_file_permissions() {
   [[ ! -L "$path" ]] || fail "Backup env file must not be a symlink: $path"
   [[ -f "$path" ]] || fail "Backup env file must be a regular file: $path"
 
-  if meta="$(stat -c '%a %u' "$path" 2>/dev/null)"; then
-    :
-  elif meta="$(stat -f '%Lp %u' "$path" 2>/dev/null)"; then
-    :
-  else
-    fail "Unable to inspect permissions of backup env file: $path"
-  fi
-
+  meta="$(stat_mode_uid "$path")"
   mode="${meta%% *}"
   owner="${meta##* }"
   cur_uid="$(id -u)"
@@ -247,7 +285,22 @@ compose_exec_with_tags() {
 
 alerts_enabled_in_compose_env() {
   [[ -f "$COMPOSE_ENV_FILE" ]] || return 1
-  grep -qE '^[[:space:]]*ALERTS_ENABLED=true([[:space:]]|#|$)' "$COMPOSE_ENV_FILE"
+  local val="" line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?ALERTS_ENABLED=(.*)$ ]]; then
+      val="${BASH_REMATCH[2]}"
+      if [[ "$val" =~ ^[[:space:]]*\'([^\']*)\'([[:space:]]*(#.*)?)?$ ]] || [[ "$val" =~ ^[[:space:]]*\"([^\"]*)\"([[:space:]]*(#.*)?)?$ ]]; then
+        val="${BASH_REMATCH[1]}"
+      else
+        val="${val%%#*}"
+        val="${val#"${val%%[![:space:]]*}"}"
+        val="${val%"${val##*[![:space:]]}"}"
+      fi
+    fi
+  done <"$COMPOSE_ENV_FILE"
+  [[ "${val,,}" == "true" ]]
 }
 
 stage_postgres_dump() {
@@ -374,10 +427,30 @@ cmd_snapshots() {
   run_redacted "$RESTIC_BIN" snapshots --tag gongchae-bell --compact || fail "RESTIC_SNAPSHOTS_FAIL"
 }
 
+prepare_stage_dir() {
+  # Fixed path under flock keeps restic snapshot paths stable across runs without relaxing staging permissions.
+  local dir="${BACKUP_STAGE_ROOT%/}/gongchae-backup-stage"
+  [[ ! -L "$dir" ]] || fail "STAGE_DIR_SYMLINK refusing symlink at $dir"
+  if [[ -e "$dir" ]]; then
+    local meta owner
+    meta="$(stat_mode_uid "$dir")"
+    owner="${meta##* }"
+    [[ "$owner" == "$(id -u)" ]] || fail "STAGE_DIR_OWNER unexpected owner uid=$owner for $dir"
+    rm -rf "$dir"
+  fi
+  mkdir -m 0700 "$dir"
+  local meta mode owner
+  meta="$(stat_mode_uid "$dir")"
+  mode="${meta%% *}"
+  owner="${meta##* }"
+  [[ "$owner" == "$(id -u)" ]] || fail "STAGE_DIR_OWNER mismatch on $dir"
+  (( (8#$mode & 077) == 0 )) || fail "STAGE_DIR_PERM unexpected mode=$mode on $dir"
+  STAGE_DIR="$dir"
+}
+
 cmd_run() {
   IN_BACKUP_RUN=1
-  STAGE_DIR="$(mktemp -d "${BACKUP_STAGE_ROOT%/}/gongchae-backup.XXXXXX")"
-  chmod 0700 "$STAGE_DIR"
+  prepare_stage_dir
 
   stage_postgres_dump
   stage_erasure_log
@@ -420,8 +493,8 @@ EOF
     fail "RESTIC_BACKUP_FAIL"
   fi
 
-  log "Applying restic retention policy (--keep-daily $BACKUP_KEEP_DAILY --prune)"
-  if ! run_redacted "$RESTIC_BIN" forget --tag gongchae-bell --keep-daily "$BACKUP_KEEP_DAILY" --prune; then
+  log "Applying restic retention policy (--group-by host,tags --keep-daily $BACKUP_KEEP_DAILY --prune)"
+  if ! run_redacted "$RESTIC_BIN" forget --tag gongchae-bell --group-by host,tags --keep-daily "$BACKUP_KEEP_DAILY" --prune; then
     fail "RESTIC_PRUNE_FAIL"
   fi
 
