@@ -86,7 +86,8 @@ public class DeliveryLedger {
 
     /**
      * R: commits on its own connection. {@code total} is the SEND_TOTAL window to charge, or null for none.
-     * {@code waitLimit} is read after B is taken from the pool: nothing left means nothing is reserved (14-4).
+     * {@code waitLimit} must hold the pool bound before B is requested, and is read again before each statement:
+     * nothing left means nothing is reserved (14-4).
      */
     public Reservation reserve(Claim claim, UUID key, byte[] payloadHash, byte[] totalKey, RateLimiter.Limit total, Supplier<Duration> waitLimit) {
         limits.requirePoolRoom(waitLimit);

@@ -436,6 +436,21 @@ class DeliveryLedgerTest {
         assertThat(requests).hasSize(1);
     }
 
+    /** agy C4-R1: before, the retry slept and then failed the pool admission, and the sign-up answered 503. */
+    @Test
+    void aWebhookRetryThatCouldNotBeAdmittedEndsAsAFailedTestWithoutSleeping() {
+        List<Duration> requests = new ArrayList<>();
+        var discord = new SyncSender(jdbc, manager, ledger, limits, mail,
+                (url, payload, timeout) -> { requests.add(timeout); timer.advance(timeout); return SendOutcome.Result.of(SendOutcome.TIMEOUT); },
+                crypto, timer);
+        long start = timer.nanoTime() - Duration.ofSeconds(1).toNanos();  // the steps before the test took 1 s
+        // 10 s timeout -> 14 s left: after the 2 s wait, R's pool bound + request + final shares (13 s) no longer fit
+        var attempts = discord.testWebhook(WebhookUrl.parse("https://discord.com/api/webhooks/1/token").orElseThrow(), "{}".getBytes(UTF_8), start);
+        assertThat(attempts).extracting(a -> a.result().outcome()).containsExactly(SendOutcome.TIMEOUT);
+        assertThat(requests).containsExactly(Duration.ofSeconds(10));
+        assertThat(timer.nanoTime() - start).as("no sleep for a retry that cannot start").isEqualTo(Duration.ofSeconds(11).toNanos());
+    }
+
     @Test
     void synchronousKindsAreNeverClaimedOrRecoveredByTheAsyncPathAndStaleClaimsAreFenced() {
         Pending confirm = pending();

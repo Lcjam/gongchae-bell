@@ -57,8 +57,8 @@ public class RateLimiter {
     }
 
     /**
-     * {@link #acquire} inside an in-request budget (14-4): {@code waitLimit} is read once the connection is taken and
-     * bounds the lock and statement waits of the count.
+     * {@link #acquire} inside an in-request budget (14-4): {@code waitLimit} must hold the pool bound before the
+     * connection is requested, and is read again to bound the lock and statement waits of the count.
      */
     public boolean acquire(Scope scope, byte[] key, Limit limit, Supplier<Duration> waitLimit) {
         requirePoolRoom(waitLimit);

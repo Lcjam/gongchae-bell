@@ -83,6 +83,16 @@ public class SyncSender {
         return () -> min(CLEANUP.minusNanos(timer.nanoTime() - cleanupStart), remaining(start));
     }
 
+    /**
+     * Whether an attempt after {@code wait} would still be admitted: MIN_START, and the pool bound for the connection
+     * of R (or the Discord count) on top of the request and final shares. Checked before sleeping, so a retry that
+     * could not start ends here instead of failing the admission after the sleep.
+     */
+    private boolean roomForNext(long start, Duration wait) {
+        return remaining(start).minus(wait).compareTo(MIN_START) >= 0
+                && waitLimit(start).minus(wait).minus(MIN_HTTP).compareTo(limits.poolWait()) >= 0;
+    }
+
     private enum Step { DONE, NEXT }
     private record Round(Step step, Duration backoff) {}
     private static final Round DONE = new Round(Step.DONE, null);
@@ -156,7 +166,7 @@ public class SyncSender {
         if (reserved.attemptNo() >= DeliveryLedger.MAX_ATTEMPTS) return finished(claim, "ATTEMPTS_EXHAUSTED", cleanup);
         Duration wait = BACKOFF[Math.min(round, BACKOFF.length - 1)];
         if (sent.retryAfter() != null && sent.retryAfter().compareTo(wait) > 0) return finished(claim, "RATE_LIMITED", cleanup);  // 12 §6
-        if (remaining(start).minus(wait).compareTo(MIN_START) < 0) return finished(claim, "DEADLINE", cleanup);
+        if (!roomForNext(start, wait)) return finished(claim, "DEADLINE", cleanup);
         return new Round(Step.NEXT, wait);
     }
 
@@ -203,7 +213,7 @@ public class SyncSender {
             if (no == DeliveryLedger.MAX_ATTEMPTS) break;
             Duration wait = BACKOFF[no - 1];
             if (result.retryAfter() != null && result.retryAfter().compareTo(wait) > 0) break;
-            if (remaining(start).minus(wait).compareTo(MIN_START) < 0 || !sleep(wait)) break;
+            if (!roomForNext(start, wait) || !sleep(wait)) break;  // agy C4-R1: a failed test (502), not a budget error (503)
         }
         return attempts;
     }
