@@ -6,7 +6,8 @@
 - **코드·테스트·운영문서 수정 커밋 SHA**: `8501539adf5c949b1c68d03c6c4d8ed726e6aec5` (`ops: fix restic forget grouping, log redaction loop, and env parsing (Refs #16)`)
 - **PR**: `https://github.com/Lcjam/gongchae-bell/pull/22` (Draft 유지, `main` 병합 및 `#16` close 미수행)
 - **코드 수정 커밋 CI Run**: [CI Run #44275512026](https://github.com/Lcjam/gongchae-bell/actions/runs/44275512026) (`secrets` / `test` / `backup-verify` 전 항목 `success`)
-- **최종 HEAD 안내**: 이 결과 보고서 커밋(`docs: record PR #22 fix round results (Refs #16)`)이 `ops/#16-backup` 및 PR #22의 최종 HEAD가 되며, 푸시 후 최종 HEAD의 CI 통과까지 확인해 PR #22 본문에 최종 SHA와 함께 갱신합니다.
+- **직전 문서 커밋 SHA / CI Run**: `0760ff0fafee2e0cead23a4d6716d60220bd481a` / [CI Run #44278207418](https://github.com/Lcjam/gongchae-bell/actions/runs/44278207418) (`secrets` / `test` / `backup-verify` 전 항목 `success`)
+- **최종 HEAD 안내**: §3 운영 경로 대조 정정 커밋(`docs: align backup doc install paths with systemd unit (Refs #16)`)이 `ops/#16-backup` 및 PR #22의 최종 HEAD가 되며, 푸시 후 최종 HEAD의 CI 통과까지 확인해 PR #22 본문에 최종 SHA·CI를 갱신합니다.
 
 ---
 
@@ -72,7 +73,7 @@
 
 ## 3. 실제 환경 후속 범위 (`#16` 잔여 및 `#17` 연계)
 
-- OCI VM(`ubuntu`)에 `/usr/local/sbin/gongchae-backup`, `/etc/gongchae-bell/backup.env`(`0600`, `root:root`), `systemd` service/timer 설치 및 `id -nG ubuntu | grep -qw docker`·실제 OCI Object Storage 버킷 초기화·1회 수동 실행·자동 타이머 실행 확인
+- OCI VM(`ubuntu`)에 `/opt/gongchae-bell/deploy/backup/backup.sh` 실행 권한과 `/opt/gongchae-bell/backup` (`0750`, `ubuntu:ubuntu`), `/opt/gongchae-bell/backup/backup.env` (`0600`, `ubuntu:ubuntu`), `systemd` 유닛(`/etc/systemd/system/gongchae-backup.{service,timer}`, `User=ubuntu`, `Group=ubuntu`)을 설치·적용하고, `id -nG ubuntu | grep -qw docker`·실제 OCI Object Storage 버킷 초기화·1회 수동 실행·자동 타이머 실행 확인
 - Healthchecks.io 체크 등록(`HEALTHCHECKS_BACKUP_URL`) 및 미수신/실패(`/fail`) 알림 수신 확인
 - OCI 외부 사본(NAS/PC `restic copy` pull) 및 실제 운영 키·스키마 기준 격리 VM/컨테이너 복원·해지 대장 재적용 리허설(`#17`)
 - `keep-daily 14`와 달력 14일/해지대장/OCI 밖 사본 간 개인정보처리방침·문서 고지 정합성 정리(`#17`과 함께 root 진행)
