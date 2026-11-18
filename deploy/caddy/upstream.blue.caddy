@@ -1,0 +1,5 @@
+(active_upstream) {
+	# Caddy has no trusted_proxies configured at the public edge, so reverse_proxy
+	# automatically strips untrusted client X-Forwarded-For and passes remote_host.
+	reverse_proxy app-blue:8080
+}
