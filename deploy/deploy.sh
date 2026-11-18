@@ -86,13 +86,18 @@ read_state() {
 }
 
 clear_pending_state() {
+  rm -f "$STATE_DIR/pending_deploy_id"
   rm -f \
-    "$STATE_DIR/pending_deploy_id" \
     "$STATE_DIR/pending_action" \
     "$STATE_DIR/pending_from_color" \
     "$STATE_DIR/pending_from_sha" \
+    "$STATE_DIR/pending_from_deploy_id" \
     "$STATE_DIR/pending_color" \
     "$STATE_DIR/pending_sha" \
+    "$STATE_DIR/pending_prev_color" \
+    "$STATE_DIR/pending_prev_sha" \
+    "$STATE_DIR/pending_prev_deploy_id" \
+    "$STATE_DIR/pending_target_prev_tag" \
     "$STATE_DIR/pending_started_at" \
     "$CADDY_RUNTIME_DIR/upstream.caddy.prev"
 }
@@ -102,15 +107,47 @@ write_pending_state() {
   local action="$2"
   local from_color="$3"
   local from_sha="$4"
-  local target_color="$5"
-  local target_sha="$6"
-  atomic_write "$STATE_DIR/pending_deploy_id" "$deploy_id"
+  local from_deploy_id="$5"
+  local target_color="$6"
+  local target_sha="$7"
+  local prev_color="$8"
+  local prev_sha="$9"
+  local prev_deploy_id="${10}"
+  local target_prev_tag="${11}"
+
   atomic_write "$STATE_DIR/pending_action" "$action"
   atomic_write "$STATE_DIR/pending_from_color" "$from_color"
   atomic_write "$STATE_DIR/pending_from_sha" "$from_sha"
+  if [[ -n "$from_deploy_id" ]]; then
+    atomic_write "$STATE_DIR/pending_from_deploy_id" "$from_deploy_id"
+  else
+    rm -f "$STATE_DIR/pending_from_deploy_id"
+  fi
   atomic_write "$STATE_DIR/pending_color" "$target_color"
   atomic_write "$STATE_DIR/pending_sha" "$target_sha"
+  if [[ -n "$prev_color" ]]; then
+    atomic_write "$STATE_DIR/pending_prev_color" "$prev_color"
+  else
+    rm -f "$STATE_DIR/pending_prev_color"
+  fi
+  if [[ -n "$prev_sha" ]]; then
+    atomic_write "$STATE_DIR/pending_prev_sha" "$prev_sha"
+  else
+    rm -f "$STATE_DIR/pending_prev_sha"
+  fi
+  if [[ -n "$prev_deploy_id" ]]; then
+    atomic_write "$STATE_DIR/pending_prev_deploy_id" "$prev_deploy_id"
+  else
+    rm -f "$STATE_DIR/pending_prev_deploy_id"
+  fi
+  if [[ -n "$target_prev_tag" ]]; then
+    atomic_write "$STATE_DIR/pending_target_prev_tag" "$target_prev_tag"
+  else
+    rm -f "$STATE_DIR/pending_target_prev_tag"
+  fi
   atomic_write "$STATE_DIR/pending_started_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # Write pending_deploy_id last so a partial write never exposes a half-populated pending record.
+  atomic_write "$STATE_DIR/pending_deploy_id" "$deploy_id"
 }
 
 read_upstream_color() {
@@ -193,9 +230,43 @@ start_app_color() {
 
 stop_and_remove_color() {
   local color="$1"
+  local existing_ids running_ids
   export_color_tags
-  compose --profile "$color" stop -t "$STOP_GRACE_SECONDS" "app-$color" || true
-  compose --profile "$color" rm -f "app-$color" || true
+
+  if ! existing_ids="$(compose --profile "$color" ps -a -q "app-$color")"; then
+    log "CONTAINER_CHECK_FAIL unable to query app-$color container state" >&2
+    return 1
+  fi
+  if [[ -z "$existing_ids" ]]; then
+    return 0
+  fi
+
+  if ! compose --profile "$color" stop -t "$STOP_GRACE_SECONDS" "app-$color"; then
+    log "CONTAINER_STOP_FAIL failed to stop app-$color" >&2
+    return 1
+  fi
+  if ! running_ids="$(compose --profile "$color" ps --status running -q "app-$color")"; then
+    log "CONTAINER_VERIFY_FAIL unable to verify app-$color stopped state" >&2
+    return 1
+  fi
+  if [[ -n "$running_ids" ]]; then
+    log "CONTAINER_STILL_RUNNING app-$color still running after stop ($running_ids)" >&2
+    return 1
+  fi
+
+  if ! compose --profile "$color" rm -f "app-$color"; then
+    log "CONTAINER_RM_FAIL failed to remove app-$color" >&2
+    return 1
+  fi
+  if ! existing_ids="$(compose --profile "$color" ps -a -q "app-$color")"; then
+    log "CONTAINER_VERIFY_FAIL unable to verify app-$color removal" >&2
+    return 1
+  fi
+  if [[ -n "$existing_ids" ]]; then
+    log "CONTAINER_STILL_PRESENT app-$color container still exists after rm ($existing_ids)" >&2
+    return 1
+  fi
+  return 0
 }
 
 check_internal_app() {
@@ -334,6 +405,7 @@ assert_no_pending_and_consistent_state() {
   upstream="$(read_upstream_color)"
 
   if [[ -z "$active" ]]; then
+    clear_pending_state
     return 0
   fi
   if [[ "$active" != "blue" && "$active" != "green" ]]; then
@@ -342,6 +414,8 @@ assert_no_pending_and_consistent_state() {
   if [[ "$upstream" != "$active" ]]; then
     fail "STATE_MISMATCH active_color='$active' disagrees with upstream.caddy='$upstream'; resolve interrupted state manually before retry"
   fi
+  # Clean any orphaned pending_* files left if clear_pending_state was interrupted after removing pending_deploy_id.
+  clear_pending_state
 }
 
 cmd_status() {
@@ -356,10 +430,17 @@ cmd_status() {
   prev_id="$(read_state prev_deploy_id)"
   upstream="$(read_upstream_color)"
   pending_id="$(read_state pending_deploy_id)"
-  pending_action="$(read_state pending_action)"
-  pending_color="$(read_state pending_color)"
-  pending_sha="$(read_state pending_sha)"
-  pending_started_at="$(read_state pending_started_at)"
+  if [[ -n "$pending_id" ]]; then
+    pending_action="$(read_state pending_action)"
+    pending_color="$(read_state pending_color)"
+    pending_sha="$(read_state pending_sha)"
+    pending_started_at="$(read_state pending_started_at)"
+  else
+    pending_action=""
+    pending_color=""
+    pending_sha=""
+    pending_started_at=""
+  fi
   last_id="$(read_state last_deploy_id)"
   last_result="$(read_state last_deploy_result)"
 
@@ -397,12 +478,12 @@ cmd_bootstrap() {
   compose up -d --wait postgres
 
   if ! start_app_color "blue" "$sha" || ! check_internal_app "blue"; then
-    stop_and_remove_color "blue"
+    stop_and_remove_color "blue" || true
     fail "BOOTSTRAP_APP_FAIL deploy_id=$deploy_id app-blue failed readiness/route checks"
   fi
 
   if ! compose up -d --no-deps caddy || ! compose exec -T caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile; then
-    stop_and_remove_color "blue"
+    stop_and_remove_color "blue" || true
     fail "BOOTSTRAP_CADDY_FAIL deploy_id=$deploy_id caddy startup/validation failed"
   fi
 
@@ -427,21 +508,32 @@ switch_to_target() {
   log "Starting ${action} switch deploy_id=$deploy_id active=${old_color}(${old_sha}) -> target=${target_color}(${target_sha})"
 
   if ! start_app_color "$target_color" "$target_sha" || ! check_internal_app "$target_color"; then
-    stop_and_remove_color "$target_color"
+    stop_and_remove_color "$target_color" || true
     fail "PRE_SWITCH_FAIL deploy_id=$deploy_id target=app-$target_color sha=$target_sha; active=$old_color untouched"
   fi
 
   if ! stage_and_validate_upstream "$target_color"; then
-    stop_and_remove_color "$target_color"
+    stop_and_remove_color "$target_color" || true
     fail "CADDY_VALIDATE_FAIL deploy_id=$deploy_id target=$target_color; active=$old_color untouched"
   fi
 
-  # Record pending deployment identity right before Caddy upstream switch so interrupted runs remain traceable.
-  write_pending_state "$deploy_id" "$action" "$old_color" "$old_sha" "$target_color" "$target_sha"
+  local from_deploy_id prev_color prev_sha prev_deploy_id target_prev_tag
+  from_deploy_id="$(read_state active_deploy_id)"
+  prev_color="$(read_state prev_color)"
+  prev_sha="$(read_state prev_sha)"
+  prev_deploy_id="$(read_state prev_deploy_id)"
+  target_prev_tag="$(read_state "${target_color}_tag")"
+
+  # Record pending deployment identity and prior metadata right before Caddy upstream switch.
+  write_pending_state \
+    "$deploy_id" "$action" \
+    "$old_color" "$old_sha" "$from_deploy_id" \
+    "$target_color" "$target_sha" \
+    "$prev_color" "$prev_sha" "$prev_deploy_id" "$target_prev_tag"
 
   if ! atomic_reload_upstream "$target_color"; then
     clear_pending_state
-    stop_and_remove_color "$target_color"
+    stop_and_remove_color "$target_color" || true
     fail "CADDY_RELOAD_FAIL deploy_id=$deploy_id target=$target_color; active=$old_color kept"
   fi
 
@@ -450,7 +542,11 @@ switch_to_target() {
     if ! rollback_reload_from_prev; then
       fail "ROLLBACK_RELOAD_FAILED deploy_id=$deploy_id manual intervention required; leaving app-$old_color and app-$target_color up"
     fi
-    stop_and_remove_color "$target_color"
+    if ! stop_and_remove_color "$target_color"; then
+      atomic_write "$STATE_DIR/last_deploy_id" "$deploy_id"
+      atomic_write "$STATE_DIR/last_deploy_result" "POST_SWITCH_CLEANUP_FAILED"
+      fail "POST_SWITCH_CLEANUP_FAIL deploy_id=$deploy_id upstream reverted to $old_color but failed to stop/remove app-$target_color"
+    fi
     clear_pending_state
     atomic_write "$STATE_DIR/last_deploy_id" "$deploy_id"
     atomic_write "$STATE_DIR/last_deploy_result" "POST_SWITCH_ROLLED_BACK"
@@ -458,6 +554,20 @@ switch_to_target() {
   fi
 
   log "SWITCH_OK deploy_id=$deploy_id action=$action active_kept=$old_color($old_sha) serving=$target_color($target_sha)"
+}
+
+resolve_pending_from_deploy_id() {
+  local pending_id="$1"
+  local from_id active_id
+  from_id="$(read_state pending_from_deploy_id)"
+  if [[ -n "$from_id" ]]; then
+    printf '%s' "$from_id"
+    return 0
+  fi
+  active_id="$(read_state active_deploy_id)"
+  if [[ -n "$active_id" && "$active_id" != "$pending_id" ]]; then
+    printf '%s' "$active_id"
+  fi
 }
 
 finalize_pending_internal() {
@@ -475,19 +585,26 @@ finalize_pending_internal() {
   old_sha="$(read_state pending_from_sha)"
   new_color="$(read_state pending_color)"
   new_sha="$(read_state pending_sha)"
-  old_deploy_id="$(read_state active_deploy_id)"
+  old_deploy_id="$(resolve_pending_from_deploy_id "$pending_id")"
   upstream="$(read_upstream_color)"
 
+  [[ -n "$old_color" && -n "$new_color" ]] || fail "FINALIZE_CORRUPT missing pending color state for deploy_id=$pending_id"
   [[ "$upstream" == "$new_color" ]] || fail "STATE_MISMATCH upstream_color='$upstream' does not match pending_color='$new_color' for deploy_id=$pending_id"
 
   log "Finalizing deploy_id=$pending_id action=${pending_action:-bluegreen}: draining old app-$old_color (grace=${STOP_GRACE_SECONDS}s)"
-  stop_and_remove_color "$old_color"
+  if ! stop_and_remove_color "$old_color"; then
+    atomic_write "$STATE_DIR/last_deploy_id" "$pending_id"
+    atomic_write "$STATE_DIR/last_deploy_result" "FINALIZE_STOP_FAILED"
+    fail "FINALIZE_STOP_FAIL deploy_id=$pending_id old_color=app-$old_color failed to stop/remove; resolve and retry finalize or abort"
+  fi
 
   atomic_write "$STATE_DIR/${new_color}_tag" "$new_sha"
   atomic_write "$STATE_DIR/prev_color" "$old_color"
   atomic_write "$STATE_DIR/prev_sha" "$old_sha"
   if [[ -n "$old_deploy_id" ]]; then
     atomic_write "$STATE_DIR/prev_deploy_id" "$old_deploy_id"
+  else
+    rm -f "$STATE_DIR/prev_deploy_id"
   fi
   atomic_write "$STATE_DIR/active_sha" "$new_sha"
   atomic_write "$STATE_DIR/active_color" "$new_color"
@@ -510,7 +627,8 @@ finalize_pending_internal() {
 abort_pending_internal() {
   local expected_id="$1"
   local if_pending="$2"
-  local pending_id old_color old_sha new_color new_sha
+  local pending_id old_color old_sha old_deploy_id new_color new_sha
+  local prev_color prev_sha prev_deploy_id target_prev_tag
 
   pending_id="$(read_state pending_deploy_id)"
   if [[ -z "$pending_id" ]]; then
@@ -527,8 +645,13 @@ abort_pending_internal() {
 
   old_color="$(read_state pending_from_color)"
   old_sha="$(read_state pending_from_sha)"
+  old_deploy_id="$(resolve_pending_from_deploy_id "$pending_id")"
   new_color="$(read_state pending_color)"
   new_sha="$(read_state pending_sha)"
+  prev_color="$(read_state pending_prev_color)"
+  prev_sha="$(read_state pending_prev_sha)"
+  prev_deploy_id="$(read_state pending_prev_deploy_id)"
+  target_prev_tag="$(read_state pending_target_prev_tag)"
 
   [[ -n "$old_color" && -n "$new_color" ]] || fail "ABORT_CORRUPT missing pending color state for deploy_id=$pending_id"
 
@@ -554,12 +677,53 @@ abort_pending_internal() {
     fail "ABORT_POST_CHECK_FAIL upstream reverted to $old_color but post_switch_check failed (deploy_id=$pending_id)"
   fi
 
-  stop_and_remove_color "$new_color"
-  clear_pending_state
+  if ! stop_and_remove_color "$new_color"; then
+    atomic_write "$STATE_DIR/last_deploy_id" "$pending_id"
+    atomic_write "$STATE_DIR/last_deploy_result" "ABORT_STOP_FAILED"
+    fail "ABORT_STOP_FAIL deploy_id=$pending_id upstream reverted to $old_color but failed to stop/remove app-$new_color; retry abort"
+  fi
+
+  # Restore active and previous metadata in case an interrupted finalize already modified active_*/prev_*.
+  atomic_write "$STATE_DIR/${old_color}_tag" "$old_sha"
+  atomic_write "$STATE_DIR/active_sha" "$old_sha"
+  atomic_write "$STATE_DIR/active_color" "$old_color"
+  if [[ -n "$old_deploy_id" ]]; then
+    atomic_write "$STATE_DIR/active_deploy_id" "$old_deploy_id"
+  else
+    rm -f "$STATE_DIR/active_deploy_id"
+  fi
+
+  if [[ -n "$prev_color" ]]; then
+    atomic_write "$STATE_DIR/prev_color" "$prev_color"
+    atomic_write "$STATE_DIR/prev_sha" "$prev_sha"
+    if [[ -n "$prev_deploy_id" ]]; then
+      atomic_write "$STATE_DIR/prev_deploy_id" "$prev_deploy_id"
+    else
+      rm -f "$STATE_DIR/prev_deploy_id"
+    fi
+  else
+    rm -f "$STATE_DIR/prev_color" "$STATE_DIR/prev_sha" "$STATE_DIR/prev_deploy_id"
+  fi
+
+  if [[ -n "$target_prev_tag" ]]; then
+    atomic_write "$STATE_DIR/${new_color}_tag" "$target_prev_tag"
+  else
+    rm -f "$STATE_DIR/${new_color}_tag"
+  fi
+
   atomic_write "$STATE_DIR/last_deploy_id" "$pending_id"
   atomic_write "$STATE_DIR/last_deploy_result" "ABORTED_TO_${old_color^^}"
+  clear_pending_state
 
   log "ABORT_OK deploy_id=$pending_id restored_active=$old_color($old_sha) stopped_pending=$new_color($new_sha)"
+}
+
+require_g4_hook() {
+  local context="$1"
+  [[ -n "${G4_HOOK:-}" ]] || fail "G4_HOOK_REQUIRED $context --phase full requires external G4_HOOK; for two-phase external G4 use --phase switch followed by g4-probe.sh and finalize/abort"
+  if [[ -d "$G4_HOOK" ]] || { [[ ! -x "$G4_HOOK" ]] && ! command -v "$G4_HOOK" >/dev/null 2>&1; }; then
+    fail "G4_HOOK_INVALID G4_HOOK='$G4_HOOK' is not executable"
+  fi
 }
 
 cmd_bluegreen() {
@@ -583,18 +747,20 @@ cmd_bluegreen() {
   [[ -n "$old_sha" ]] || old_sha="$(read_state "${old_color}_tag")"
   new_color="$(opposite_color "$old_color")"
 
+  if [[ "$phase" == "full" ]]; then
+    require_g4_hook "bluegreen"
+  fi
+
   switch_to_target "bluegreen" "$old_color" "$old_sha" "$new_color" "$sha" "$deploy_id"
 
   if [[ "$phase" == "switch" ]]; then
     return 0
   fi
 
-  if [[ -n "${G4_HOOK:-}" ]]; then
-    if ! "$G4_HOOK" "$deploy_id"; then
-      log "G4_HOOK failed for deploy_id=$deploy_id; aborting back to running $old_color" >&2
-      abort_pending_internal "$deploy_id" "0"
-      fail "G4_HOOK_FAIL_ROLLED_BACK deploy_id=$deploy_id active=$old_color"
-    fi
+  if ! "$G4_HOOK" "$deploy_id"; then
+    log "G4_HOOK failed for deploy_id=$deploy_id; aborting back to running $old_color" >&2
+    abort_pending_internal "$deploy_id" "0"
+    fail "G4_HOOK_FAIL_ROLLED_BACK deploy_id=$deploy_id active=$old_color"
   fi
 
   finalize_pending_internal "$deploy_id"
@@ -628,6 +794,10 @@ cmd_rollback() {
   [[ "$target_color" != "$cur_color" ]] || fail "ROLLBACK_REJECTED prev_color equals active_color ($cur_color)"
   validate_identifier "target image tag/SHA" "$target_sha"
 
+  if [[ "$phase" == "full" ]]; then
+    require_g4_hook "rollback"
+  fi
+
   if [[ -z "$deploy_id" ]]; then
     deploy_id="$(default_deploy_id "rollback")"
   else
@@ -640,12 +810,10 @@ cmd_rollback() {
     return 0
   fi
 
-  if [[ -n "${G4_HOOK:-}" ]]; then
-    if ! "$G4_HOOK" "$deploy_id"; then
-      log "G4_HOOK failed during rollback deploy_id=$deploy_id; reverting to $cur_color" >&2
-      abort_pending_internal "$deploy_id" "0"
-      fail "ROLLBACK_G4_HOOK_FAIL deploy_id=$deploy_id active=$cur_color"
-    fi
+  if ! "$G4_HOOK" "$deploy_id"; then
+    log "G4_HOOK failed during rollback deploy_id=$deploy_id; reverting to $cur_color" >&2
+    abort_pending_internal "$deploy_id" "0"
+    fail "ROLLBACK_G4_HOOK_FAIL deploy_id=$deploy_id active=$cur_color"
   fi
 
   finalize_pending_internal "$deploy_id"
@@ -661,6 +829,10 @@ Usage:
   deploy.sh rollback [--phase full|switch] [--deploy-id ID]
   deploy.sh status
   deploy.sh <image_tag>    (shorthand for: deploy <image_tag> --mode auto --phase full)
+
+Notes:
+  --phase full for bluegreen/post-commit rollback requires G4_HOOK (external G4 check).
+  Without G4_HOOK, use --phase switch, run g4-probe.sh outside the VM, then finalize or abort.
 EOF
 }
 

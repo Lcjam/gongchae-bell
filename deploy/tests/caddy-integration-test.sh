@@ -130,4 +130,33 @@ if [[ "$resp_green" != *"color=green"* ]]; then
   exit 1
 fi
 
+# 5. Stop active upstream -> real 502 error logger redaction check (stdout + stderr)
+docker rm -f "$GREEN_NAME" >/dev/null
+err_auth_header="Authorization: Bearer error-auth-secret"
+err_cookie_header="Cookie: session=error-cookie-secret"
+err_referer_header="Referer: https://evil.error.example/leak?t=ERROR_REF_TOKEN"
+status_502="$(docker run --rm --network "$NET_NAME" caddy:2-alpine \
+  curl -sS -o /dev/null -w '%{http_code}' -H "Host: localhost" \
+  -H "$err_referer_header" \
+  -H "$err_auth_header" \
+  -H "$err_cookie_header" \
+  "http://edge-caddy/subscriptions/manage?t=ERROR_SECRET_TOKEN&keep=1")"
+if [[ "$status_502" != "502" ]]; then
+  echo "ERROR: expected 502 when upstream is stopped, got: $status_502" >&2
+  exit 1
+fi
+
+sleep 1
+docker logs "$CADDY_NAME" >"$TMP_DIR/caddy.stdout" 2>"$TMP_DIR/caddy.stderr"
+cat "$TMP_DIR/caddy.stdout" "$TMP_DIR/caddy.stderr" >"$TMP_DIR/caddy.all.log"
+grep -q "http.log.error" "$TMP_DIR/caddy.all.log"
+grep -q "keep=1" "$TMP_DIR/caddy.all.log"
+for secret in "ERROR_SECRET_TOKEN" "ERROR_REF_TOKEN" "evil.error.example" "error-auth-secret" "error-cookie-secret"; do
+  if grep -qF "$secret" "$TMP_DIR/caddy.stdout" || grep -qF "$secret" "$TMP_DIR/caddy.stderr"; then
+    echo "ERROR: sensitive value '$secret' leaked in Caddy 502 stdout/stderr!" >&2
+    cat "$TMP_DIR/caddy.all.log" >&2
+    exit 1
+  fi
+done
+
 echo "CADDY_INTEGRATION_TEST_PASSED"

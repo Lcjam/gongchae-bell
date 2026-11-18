@@ -91,21 +91,67 @@ if [[ "${1:-}" == "compose" ]]; then
       fi
       if [[ "$*" == *"app-blue"* ]]; then
         [[ "${MOCK_FAIL_START_BLUE:-0}" == "1" ]] && exit 1
-        touch "$LOG_DIR/running_app-blue"
+        touch "$LOG_DIR/container_app-blue" "$LOG_DIR/running_app-blue"
       fi
       if [[ "$*" == *"app-green"* ]]; then
         [[ "${MOCK_FAIL_START_GREEN:-0}" == "1" ]] && exit 1
-        touch "$LOG_DIR/running_app-green"
+        touch "$LOG_DIR/container_app-green" "$LOG_DIR/running_app-green"
       fi
       exit 0
       ;;
     pull)
       exit 0
       ;;
-    stop|rm)
+    ps)
+      running_only=0
+      target_svc=""
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --status)
+            [[ "${2:-}" == "running" ]] && running_only=1
+            shift 2
+            ;;
+          -a|-q)
+            shift
+            ;;
+          app-blue|app-green)
+            target_svc="$1"
+            shift
+            ;;
+          *)
+            shift
+            ;;
+        esac
+      done
+      [[ "${MOCK_FAIL_PS:-0}" == "1" ]] && exit 44
+      for svc in app-blue app-green; do
+        if [[ -z "$target_svc" || "$target_svc" == "$svc" ]]; then
+          if [[ "$running_only" -eq 1 ]]; then
+            [[ -f "$LOG_DIR/running_$svc" ]] && echo "mock-$svc"
+          else
+            [[ -f "$LOG_DIR/container_$svc" ]] && echo "mock-$svc"
+          fi
+        fi
+      done
+      exit 0
+      ;;
+    stop)
+      [[ "${MOCK_FAIL_STOP:-0}" == "1" ]] && exit 42
+      if [[ "${MOCK_FAIL_STOP_SILENT:-0}" == "1" ]]; then
+        exit 0
+      fi
       for svc in app-blue app-green; do
         if [[ "$*" == *"$svc"* ]]; then
           rm -f "$LOG_DIR/running_$svc"
+        fi
+      done
+      exit 0
+      ;;
+    rm)
+      [[ "${MOCK_FAIL_RM:-0}" == "1" ]] && exit 43
+      for svc in app-blue app-green; do
+        if [[ "$*" == *"$svc"* ]]; then
+          rm -f "$LOG_DIR/container_$svc" "$LOG_DIR/running_$svc"
         fi
       done
       exit 0
@@ -206,14 +252,15 @@ EOF
   unset MOCK_FAIL_CADDY_UP MOCK_FAIL_START_BLUE MOCK_FAIL_START_GREEN \
         MOCK_FAIL_CADDY_VALIDATE MOCK_FAIL_CADDY_RELOAD MOCK_FAIL_ROLLBACK_RELOAD \
         MOCK_FAIL_READY_BLUE MOCK_FAIL_READY_GREEN MOCK_FAIL_ROUTE_GREEN \
+        MOCK_FAIL_STOP MOCK_FAIL_STOP_SILENT MOCK_FAIL_RM MOCK_FAIL_PS \
         MOCK_POST_SWITCH_FAIL MOCK_G4_STATUS_SEQUENCE POST_SWITCH_HOOK G4_HOOK || true
 }
 
-echo "=== [1/12] bash -n syntax check ==="
+echo "=== [1/15] bash -n syntax check ==="
 bash -n "$DEPLOY_SH"
 bash -n "$G4_SH"
 
-echo "=== [2/12] bootstrap vs bluegreen separation & two-phase ADR-0005 happy path ==="
+echo "=== [2/15] bootstrap vs bluegreen separation & two-phase ADR-0005 happy path ==="
 setup_env happy_twophase
 if "$DEPLOY_SH" deploy sha-111 --mode bluegreen --deploy-id dep-bad 2>/dev/null; then
   echo "Expected bluegreen before bootstrap to fail" >&2
@@ -260,7 +307,7 @@ assert_file_contains "$MOCK_LOG_DIR/commands.log" "stop -t 40 app-blue" "old blu
 [[ ! -f "$MOCK_LOG_DIR/running_app-blue" ]] || { echo "app-blue should be stopped after finalize" >&2; exit 1; }
 [[ ! -f "$DEPLOY_STATE_DIR/pending_deploy_id" ]] || { echo "pending_deploy_id should be cleared after finalize" >&2; exit 1; }
 
-echo "=== [3/12] external G4 failure triggers instant abort to still-running old color ==="
+echo "=== [3/15] external G4 failure triggers instant abort to still-running old color ==="
 setup_env g4_fail_abort
 "$DEPLOY_SH" bootstrap sha-111 --deploy-id boot-1 >/dev/null
 "$DEPLOY_SH" deploy sha-222 --mode bluegreen --phase switch --deploy-id dep-fail >/dev/null
@@ -286,7 +333,7 @@ assert_file_contains "$MOCK_LOG_DIR/commands.log" "stop -t 40 app-green" "failed
 "$DEPLOY_SH" abort --deploy-id dep-fail --if-pending
 assert_file_not_contains "$MOCK_LOG_DIR/commands.log" "caddy reload" "abort --if-pending no-op when clean"
 
-echo "=== [4/12] interrupted pending deploy blocks new deploys & allows manual rollback rescue ==="
+echo "=== [4/15] interrupted pending deploy blocks new deploys & allows manual rollback rescue ==="
 setup_env interrupted_pending
 "$DEPLOY_SH" bootstrap sha-111 --deploy-id boot-1 >/dev/null
 "$DEPLOY_SH" deploy sha-222 --mode bluegreen --phase switch --deploy-id dep-int >/dev/null
@@ -317,7 +364,7 @@ assert_eq "blue" "$(cat "$DEPLOY_STATE_DIR/active_color")" "manual rollback rest
 assert_file_contains "$CADDY_RUNTIME_DIR/upstream.caddy" "app-blue:8080" "manual rollback restores blue upstream"
 [[ ! -f "$DEPLOY_STATE_DIR/pending_deploy_id" ]] || { echo "pending cleared after manual rollback" >&2; exit 1; }
 
-echo "=== [5/12] pre-switch failure preserves active color & never reloads Caddy ==="
+echo "=== [5/15] pre-switch failure preserves active color & never reloads Caddy ==="
 setup_env pre_fail
 "$DEPLOY_SH" bootstrap sha-111 >/dev/null
 : >"$MOCK_LOG_DIR/commands.log"
@@ -332,7 +379,7 @@ assert_file_contains "$CADDY_RUNTIME_DIR/upstream.caddy" "app-blue:8080" "upstre
 assert_file_contains "$MOCK_LOG_DIR/commands.log" "stop -t 40 app-green" "failed green stopped"
 assert_file_not_contains "$MOCK_LOG_DIR/commands.log" "caddy reload" "Caddy reload must NOT run on pre-switch failure"
 
-echo "=== [6/12] Caddy validate failure reverts staged file & preserves active ==="
+echo "=== [6/15] Caddy validate failure reverts staged file & preserves active ==="
 setup_env validate_fail
 "$DEPLOY_SH" bootstrap sha-111 >/dev/null
 export MOCK_FAIL_CADDY_VALIDATE=1
@@ -345,7 +392,7 @@ assert_file_contains "$CADDY_RUNTIME_DIR/upstream.caddy" "app-blue:8080" "upstre
 [[ ! -f "$CADDY_RUNTIME_DIR/upstream.caddy.next" ]] || { echo "upstream.caddy.next leaked" >&2; exit 1; }
 [[ ! -f "$DEPLOY_STATE_DIR/pending_deploy_id" ]] || { echo "pending_deploy_id leaked on validate fail" >&2; exit 1; }
 
-echo "=== [7/12] Caddy reload failure restores upstream.caddy & clears pending ==="
+echo "=== [7/15] Caddy reload failure restores upstream.caddy & clears pending ==="
 setup_env reload_fail
 "$DEPLOY_SH" bootstrap sha-111 >/dev/null
 export MOCK_FAIL_CADDY_RELOAD=1
@@ -357,7 +404,7 @@ assert_eq "blue" "$(cat "$DEPLOY_STATE_DIR/active_color")" "active remains blue"
 assert_file_contains "$CADDY_RUNTIME_DIR/upstream.caddy" "app-blue:8080" "upstream restored to blue"
 [[ ! -f "$DEPLOY_STATE_DIR/pending_deploy_id" ]] || { echo "pending_deploy_id leaked on reload fail" >&2; exit 1; }
 
-echo "=== [8/12] post-switch local failure rolls back Caddy immediately & keeps active ==="
+echo "=== [8/15] post-switch local failure rolls back Caddy immediately & keeps active ==="
 setup_env post_fail
 "$DEPLOY_SH" bootstrap sha-111 >/dev/null
 export MOCK_POST_SWITCH_FAIL=1
@@ -371,7 +418,7 @@ assert_file_contains "$CADDY_RUNTIME_DIR/upstream.caddy" "app-blue:8080" "upstre
 assert_file_contains "$MOCK_LOG_DIR/commands.log" "stop -t 40 app-green" "failed green cleaned up"
 [[ ! -f "$DEPLOY_STATE_DIR/pending_deploy_id" ]] || { echo "pending_deploy_id leaked on post-switch fail" >&2; exit 1; }
 
-echo "=== [9/12] state mismatch without pending_deploy_id fails closed ==="
+echo "=== [9/15] state mismatch without pending_deploy_id fails closed ==="
 setup_env mismatch
 "$DEPLOY_SH" bootstrap sha-111 >/dev/null
 cp -f "$REPO_ROOT/deploy/caddy/upstream.green.caddy" "$CADDY_RUNTIME_DIR/upstream.caddy"
@@ -385,10 +432,11 @@ if grep -qE "up -d|stop|caddy reload" "$MOCK_LOG_DIR/commands.log"; then
   exit 1
 fi
 
-echo "=== [10/12] post-commit two-phase rollback restores prev_color after G4 finalize ==="
+echo "=== [10/15] post-commit two-phase rollback restores prev_color after G4 finalize ==="
 setup_env post_rollback
 "$DEPLOY_SH" bootstrap sha-111 --deploy-id boot-1 >/dev/null
-"$DEPLOY_SH" deploy sha-222 --mode bluegreen --phase full --deploy-id dep-2 >/dev/null
+"$DEPLOY_SH" deploy sha-222 --mode bluegreen --phase switch --deploy-id dep-2 >/dev/null
+"$DEPLOY_SH" finalize --deploy-id dep-2 >/dev/null
 : >"$MOCK_LOG_DIR/commands.log"
 "$DEPLOY_SH" rollback --phase switch --deploy-id rb-3
 assert_file_contains "$CADDY_RUNTIME_DIR/upstream.caddy" "app-blue:8080" "rollback switch serves blue"
@@ -399,7 +447,7 @@ assert_eq "sha-111" "$(cat "$DEPLOY_STATE_DIR/active_sha")" "rolled back to sha-
 assert_eq "rb-3" "$(cat "$DEPLOY_STATE_DIR/active_deploy_id")" "rollback deploy_id recorded"
 assert_file_contains "$MOCK_LOG_DIR/commands.log" "stop -t 40 app-green" "green stopped after rollback finalize"
 
-echo "=== [11/12] standalone G4_HOOK failure aborts before stopping old color ==="
+echo "=== [11/15] standalone G4_HOOK failure aborts before stopping old color ==="
 setup_env g4_hook_fail
 "$DEPLOY_SH" bootstrap sha-111 --deploy-id boot-1 >/dev/null
 cat >"$CASE_DIR/fail-g4.sh" <<'EOF'
@@ -416,7 +464,7 @@ assert_eq "blue" "$(cat "$DEPLOY_STATE_DIR/active_color")" "active remains blue 
 assert_file_contains "$CADDY_RUNTIME_DIR/upstream.caddy" "app-blue:8080" "upstream reverted to blue"
 assert_file_not_contains "$MOCK_LOG_DIR/commands.log" "stop -t 40 app-blue" "old blue never stopped"
 
-echo "=== [12/12] flock concurrency exclusion & G4 external probe checks ==="
+echo "=== [12/15] flock concurrency exclusion & G4 external probe checks ==="
 setup_env flock_and_g4
 "$DEPLOY_SH" bootstrap sha-111 >/dev/null
 export LOCK_WAIT_SECONDS=0
@@ -449,5 +497,269 @@ for bad_seq in "200,502,200" "200,TIMEOUT,200" "200,TLS_ERR,200" "200,404,200"; 
     exit 1
   fi
 done
+
+echo "=== [13/15] interrupted finalize metadata recovery (abort, finalize retry, duplicate calls, next deploy) ==="
+REAL_MV="$(command -v mv)"
+REAL_RM="$(command -v rm)"
+
+make_interrupt_bins() {
+  mkdir -p "$CASE_DIR/failbin"
+  cat >"$CASE_DIR/failbin/mv" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+"$REAL_MV" "\$@"
+target="\${@: -1}"
+if [[ -n "\${INJECT_MV_FAIL_ON:-}" && "\$target" == *"/\${INJECT_MV_FAIL_ON}" ]]; then
+  exit 99
+fi
+EOF
+  cat >"$CASE_DIR/failbin/rm" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n "\${INJECT_RM_FAIL_BEFORE:-}" && "\$*" == *"\${INJECT_RM_FAIL_BEFORE}"* ]]; then
+  exit 98
+fi
+if [[ -n "\${INJECT_RM_FAIL_AFTER_ID:-}" && "\$*" == *"pending_color"* ]]; then
+  exit 97
+fi
+"$REAL_RM" "\$@"
+EOF
+  chmod +x "$CASE_DIR/failbin/mv" "$CASE_DIR/failbin/rm"
+}
+
+# 13a: interrupt after active_color update, then abort -> must restore active_*, prev_*, upstream, old container, and allow next deploy
+setup_env interrupt_abort_active
+make_interrupt_bins
+"$DEPLOY_SH" bootstrap sha-111 --deploy-id boot-1 >/dev/null
+"$DEPLOY_SH" deploy sha-222 --mode bluegreen --phase switch --deploy-id dep-2 >/dev/null
+set +e
+PATH="$CASE_DIR/failbin:$PATH" INJECT_MV_FAIL_ON="active_color" "$DEPLOY_SH" finalize --deploy-id dep-2 2>/dev/null
+rc=$?
+set -e
+assert_eq "99" "$rc" "finalize interrupted after active_color"
+assert_eq "green" "$(cat "$DEPLOY_STATE_DIR/active_color")" "active_color temporarily green before abort"
+assert_eq "dep-2" "$(cat "$DEPLOY_STATE_DIR/pending_deploy_id")" "pending_deploy_id preserved"
+
+"$DEPLOY_SH" abort --deploy-id dep-2
+assert_eq "blue" "$(cat "$DEPLOY_STATE_DIR/active_color")" "abort restores active_color=blue"
+assert_eq "sha-111" "$(cat "$DEPLOY_STATE_DIR/active_sha")" "abort restores active_sha=sha-111"
+assert_eq "boot-1" "$(cat "$DEPLOY_STATE_DIR/active_deploy_id")" "abort restores active_deploy_id=boot-1"
+assert_eq "sha-111" "$(cat "$DEPLOY_STATE_DIR/blue_tag")" "abort restores blue_tag"
+[[ ! -f "$DEPLOY_STATE_DIR/prev_color" ]] || { echo "prev_color should be absent after aborting first deploy" >&2; exit 1; }
+[[ ! -f "$DEPLOY_STATE_DIR/green_tag" ]] || { echo "green_tag should be absent after aborting first deploy" >&2; exit 1; }
+assert_file_contains "$CADDY_RUNTIME_DIR/upstream.caddy" "app-blue:8080" "abort restores upstream to blue"
+[[ -f "$MOCK_LOG_DIR/running_app-blue" ]] || { echo "app-blue running after abort" >&2; exit 1; }
+[[ ! -f "$MOCK_LOG_DIR/running_app-green" ]] || { echo "app-green stopped after abort" >&2; exit 1; }
+[[ ! -f "$DEPLOY_STATE_DIR/pending_deploy_id" ]] || { echo "pending cleared after abort" >&2; exit 1; }
+if "$DEPLOY_SH" abort --deploy-id dep-2 2>/dev/null; then
+  echo "Expected duplicate abort to fail" >&2
+  exit 1
+fi
+"$DEPLOY_SH" abort --deploy-id dep-2 --if-pending
+"$DEPLOY_SH" deploy sha-333 --mode bluegreen --phase switch --deploy-id dep-3 >/dev/null
+"$DEPLOY_SH" finalize --deploy-id dep-3 >/dev/null
+assert_eq "green" "$(cat "$DEPLOY_STATE_DIR/active_color")" "next deploy after abort succeeds"
+
+# 13b: interrupt after active_deploy_id overwrite on deploy #3, verify BOTH finalize retry and abort restore prev_* cleanly
+setup_env interrupt_retry_and_abort_prev
+make_interrupt_bins
+"$DEPLOY_SH" bootstrap sha-111 --deploy-id boot-1 >/dev/null
+"$DEPLOY_SH" deploy sha-222 --mode bluegreen --phase switch --deploy-id dep-2 >/dev/null
+"$DEPLOY_SH" finalize --deploy-id dep-2 >/dev/null
+"$DEPLOY_SH" deploy sha-333 --mode bluegreen --phase switch --deploy-id dep-3 >/dev/null
+
+# Fail right after active_deploy_id is overwritten to dep-3, then retry finalize
+set +e
+PATH="$CASE_DIR/failbin:$PATH" INJECT_MV_FAIL_ON="active_deploy_id" "$DEPLOY_SH" finalize --deploy-id dep-3 2>/dev/null
+rc=$?
+set -e
+assert_eq "99" "$rc" "finalize interrupted after active_deploy_id"
+"$DEPLOY_SH" finalize --deploy-id dep-3
+assert_eq "blue" "$(cat "$DEPLOY_STATE_DIR/active_color")" "finalize retry sets active_color=blue"
+assert_eq "sha-333" "$(cat "$DEPLOY_STATE_DIR/active_sha")" "finalize retry sets active_sha=sha-333"
+assert_eq "dep-3" "$(cat "$DEPLOY_STATE_DIR/active_deploy_id")" "finalize retry sets active_deploy_id=dep-3"
+assert_eq "green" "$(cat "$DEPLOY_STATE_DIR/prev_color")" "finalize retry preserves prev_color=green"
+assert_eq "sha-222" "$(cat "$DEPLOY_STATE_DIR/prev_sha")" "finalize retry preserves prev_sha=sha-222"
+assert_eq "dep-2" "$(cat "$DEPLOY_STATE_DIR/prev_deploy_id")" "finalize retry preserves prev_deploy_id=dep-2 (not dep-3)"
+if "$DEPLOY_SH" finalize --deploy-id dep-3 2>/dev/null; then
+  echo "Expected duplicate finalize to fail" >&2
+  exit 1
+fi
+
+# Now deploy dep-4, interrupt after active_deploy_id, and abort -> must restore active=blue/dep-3 AND prev=green/dep-2
+"$DEPLOY_SH" deploy sha-444 --mode bluegreen --phase switch --deploy-id dep-4 >/dev/null
+set +e
+PATH="$CASE_DIR/failbin:$PATH" INJECT_MV_FAIL_ON="active_deploy_id" "$DEPLOY_SH" finalize --deploy-id dep-4 2>/dev/null
+rc=$?
+set -e
+assert_eq "99" "$rc" "finalize dep-4 interrupted after active_deploy_id"
+"$DEPLOY_SH" abort --deploy-id dep-4
+assert_eq "blue" "$(cat "$DEPLOY_STATE_DIR/active_color")" "abort restores active_color=blue"
+assert_eq "sha-333" "$(cat "$DEPLOY_STATE_DIR/active_sha")" "abort restores active_sha=sha-333"
+assert_eq "dep-3" "$(cat "$DEPLOY_STATE_DIR/active_deploy_id")" "abort restores active_deploy_id=dep-3"
+assert_eq "green" "$(cat "$DEPLOY_STATE_DIR/prev_color")" "abort restores prev_color=green"
+assert_eq "sha-222" "$(cat "$DEPLOY_STATE_DIR/prev_sha")" "abort restores prev_sha=sha-222"
+assert_eq "dep-2" "$(cat "$DEPLOY_STATE_DIR/prev_deploy_id")" "abort restores prev_deploy_id=dep-2"
+assert_eq "sha-222" "$(cat "$DEPLOY_STATE_DIR/green_tag")" "abort restores green_tag=sha-222"
+assert_file_contains "$CADDY_RUNTIME_DIR/upstream.caddy" "app-blue:8080" "abort restores blue upstream"
+[[ -f "$MOCK_LOG_DIR/running_app-blue" ]] || { echo "blue running after abort" >&2; exit 1; }
+[[ ! -f "$MOCK_LOG_DIR/running_app-green" ]] || { echo "green stopped after abort" >&2; exit 1; }
+
+# 13c: interrupt clear_pending_state before and after pending_deploy_id removal
+setup_env interrupt_clear_pending
+make_interrupt_bins
+"$DEPLOY_SH" bootstrap sha-111 --deploy-id boot-1 >/dev/null
+"$DEPLOY_SH" deploy sha-222 --mode bluegreen --phase switch --deploy-id dep-2 >/dev/null
+set +e
+PATH="$CASE_DIR/failbin:$PATH" INJECT_RM_FAIL_BEFORE="pending_deploy_id" "$DEPLOY_SH" finalize --deploy-id dep-2 2>/dev/null
+rc=$?
+set -e
+assert_eq "98" "$rc" "rm interrupted before pending_deploy_id"
+assert_eq "dep-2" "$(cat "$DEPLOY_STATE_DIR/pending_deploy_id")" "pending_deploy_id still present"
+"$DEPLOY_SH" finalize --deploy-id dep-2
+assert_eq "green" "$(cat "$DEPLOY_STATE_DIR/active_color")" "retry after rm failure succeeds"
+
+"$DEPLOY_SH" deploy sha-333 --mode bluegreen --phase switch --deploy-id dep-3 >/dev/null
+set +e
+PATH="$CASE_DIR/failbin:$PATH" INJECT_RM_FAIL_AFTER_ID="1" "$DEPLOY_SH" finalize --deploy-id dep-3 2>/dev/null
+rc=$?
+set -e
+assert_eq "97" "$rc" "rm interrupted after pending_deploy_id removal"
+[[ ! -f "$DEPLOY_STATE_DIR/pending_deploy_id" ]] || { echo "pending_deploy_id removed" >&2; exit 1; }
+[[ -f "$DEPLOY_STATE_DIR/pending_color" ]] || { echo "orphaned pending_color remains" >&2; exit 1; }
+"$DEPLOY_SH" status >"$CASE_DIR/orphan-status.txt"
+assert_file_contains "$CASE_DIR/orphan-status.txt" "pending_deploy_id=none" "status ignores orphaned pending files"
+assert_file_contains "$CASE_DIR/orphan-status.txt" "pending_color=none" "status reports pending_color=none"
+"$DEPLOY_SH" deploy sha-444 --mode bluegreen --phase switch --deploy-id dep-4 >/dev/null
+"$DEPLOY_SH" finalize --deploy-id dep-4 >/dev/null
+assert_eq "green" "$(cat "$DEPLOY_STATE_DIR/active_color")" "next deploy cleans orphans and succeeds"
+
+echo "=== [14/15] CLI full deploy & post-commit rollback enforce G4_HOOK (bootstrap & pending abort preserved) ==="
+setup_env cli_g4_required
+# Shorthand on fresh server uses bootstrap without G4_HOOK
+"$DEPLOY_SH" sha-111 >/dev/null
+assert_eq "blue" "$(cat "$DEPLOY_STATE_DIR/active_color")" "shorthand bootstrap succeeds without G4_HOOK"
+
+# Shorthand, --mode auto, and --mode bluegreen --phase full all reject missing G4_HOOK without touching containers
+: >"$MOCK_LOG_DIR/commands.log"
+for cmd_args in "sha-222" "deploy sha-222 --mode auto --phase full" "deploy sha-222 --mode bluegreen --phase full"; do
+  set +e
+  # shellcheck disable=SC2086
+  "$DEPLOY_SH" $cmd_args 2>/dev/null
+  rc=$?
+  set -e
+  [[ "$rc" -ne 0 ]] || { echo "Expected '$cmd_args' without G4_HOOK to fail" >&2; exit 1; }
+done
+assert_eq "blue" "$(cat "$DEPLOY_STATE_DIR/active_color")" "active remains blue when G4_HOOK missing"
+assert_file_contains "$CADDY_RUNTIME_DIR/upstream.caddy" "app-blue:8080" "upstream untouched when G4_HOOK missing"
+[[ -f "$MOCK_LOG_DIR/running_app-blue" ]] || { echo "app-blue still running when G4_HOOK missing" >&2; exit 1; }
+[[ ! -f "$DEPLOY_STATE_DIR/pending_deploy_id" ]] || { echo "no pending_deploy_id left when G4_HOOK missing" >&2; exit 1; }
+assert_file_not_contains "$MOCK_LOG_DIR/commands.log" "up -d" "missing G4_HOOK fails before starting new container"
+
+# Passing G4_HOOK sees both colors running, then finalize stops old blue
+cat >"$CASE_DIR/pass-g4.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+[[ -f "$MOCK_LOG_DIR/running_app-blue" && -f "$MOCK_LOG_DIR/running_app-green" ]] || exit 1
+EOF
+chmod +x "$CASE_DIR/pass-g4.sh"
+export G4_HOOK="$CASE_DIR/pass-g4.sh"
+"$DEPLOY_SH" deploy sha-222 --mode bluegreen --phase full --deploy-id dep-full-ok >/dev/null
+assert_eq "green" "$(cat "$DEPLOY_STATE_DIR/active_color")" "full deploy with G4_HOOK commits green"
+[[ ! -f "$MOCK_LOG_DIR/running_app-blue" ]] || { echo "old blue stopped after G4_HOOK pass" >&2; exit 1; }
+
+# Post-commit rollback without G4_HOOK fails closed and keeps green running
+unset G4_HOOK
+if "$DEPLOY_SH" rollback 2>/dev/null; then
+  echo "Expected post-commit rollback without G4_HOOK to fail" >&2
+  exit 1
+fi
+assert_eq "green" "$(cat "$DEPLOY_STATE_DIR/active_color")" "active remains green when rollback lacks G4_HOOK"
+[[ -f "$MOCK_LOG_DIR/running_app-green" ]] || { echo "green stays running when rollback lacks G4_HOOK" >&2; exit 1; }
+[[ ! -f "$DEPLOY_STATE_DIR/pending_deploy_id" ]] || { echo "no pending_deploy_id when rollback lacks G4_HOOK" >&2; exit 1; }
+
+# Post-commit rollback with failing G4_HOOK aborts back to green; passing G4_HOOK commits blue
+cat >"$CASE_DIR/fail-g4.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$CASE_DIR/fail-g4.sh"
+export G4_HOOK="$CASE_DIR/fail-g4.sh"
+if "$DEPLOY_SH" rollback --deploy-id rb-fail 2>/dev/null; then
+  echo "Expected rollback with failing G4_HOOK to fail" >&2
+  exit 1
+fi
+assert_eq "green" "$(cat "$DEPLOY_STATE_DIR/active_color")" "active remains green after rollback G4_HOOK failure"
+[[ -f "$MOCK_LOG_DIR/running_app-green" ]] || { echo "green kept running after rollback G4_HOOK failure" >&2; exit 1; }
+[[ ! -f "$MOCK_LOG_DIR/running_app-blue" ]] || { echo "blue stopped after rollback G4_HOOK failure" >&2; exit 1; }
+
+export G4_HOOK="$CASE_DIR/pass-g4.sh"
+"$DEPLOY_SH" rollback --deploy-id rb-pass >/dev/null
+assert_eq "blue" "$(cat "$DEPLOY_STATE_DIR/active_color")" "rollback with passing G4_HOOK commits blue"
+[[ ! -f "$MOCK_LOG_DIR/running_app-green" ]] || { echo "green stopped after rollback G4_HOOK pass" >&2; exit 1; }
+
+# Pending deploy rollback still works WITHOUT G4_HOOK
+unset G4_HOOK
+"$DEPLOY_SH" deploy sha-333 --mode bluegreen --phase switch --deploy-id dep-pend >/dev/null
+"$DEPLOY_SH" rollback >/dev/null
+assert_eq "blue" "$(cat "$DEPLOY_STATE_DIR/active_color")" "pending rollback works without G4_HOOK"
+[[ ! -f "$DEPLOY_STATE_DIR/pending_deploy_id" ]] || { echo "pending cleared after pending rollback" >&2; exit 1; }
+
+echo "=== [15/15] stop/rm error propagation, idempotency, and finalize retry ==="
+# 15a: stop failure (and silent no-op stop leaving container running) -> non-zero, pending kept, active unchanged, retry succeeds
+setup_env stop_rm_failures
+"$DEPLOY_SH" bootstrap sha-111 --deploy-id boot-1 >/dev/null
+"$DEPLOY_SH" deploy sha-222 --mode bluegreen --phase switch --deploy-id dep-2 >/dev/null
+export MOCK_FAIL_STOP_SILENT=1
+if "$DEPLOY_SH" finalize --deploy-id dep-2 2>/dev/null; then
+  echo "Expected finalize to fail when container stays running after stop" >&2
+  exit 1
+fi
+assert_eq "blue" "$(cat "$DEPLOY_STATE_DIR/active_color")" "active remains blue when still running"
+assert_eq "dep-2" "$(cat "$DEPLOY_STATE_DIR/pending_deploy_id")" "pending kept when still running"
+unset MOCK_FAIL_STOP_SILENT
+
+export MOCK_FAIL_STOP=1
+if "$DEPLOY_SH" finalize --deploy-id dep-2 2>/dev/null; then
+  echo "Expected finalize to fail when stop fails" >&2
+  exit 1
+fi
+assert_eq "blue" "$(cat "$DEPLOY_STATE_DIR/active_color")" "active remains blue on stop fail"
+assert_eq "dep-2" "$(cat "$DEPLOY_STATE_DIR/pending_deploy_id")" "pending kept on stop fail"
+assert_eq "FINALIZE_STOP_FAILED" "$(cat "$DEPLOY_STATE_DIR/last_deploy_result")" "last_deploy_result records stop fail"
+[[ -f "$MOCK_LOG_DIR/running_app-blue" ]] || { echo "app-blue still running" >&2; exit 1; }
+unset MOCK_FAIL_STOP
+
+# 15b: rm failure (stop succeeds) -> non-zero, pending kept, retry succeeds idempotently
+export MOCK_FAIL_RM=1
+if "$DEPLOY_SH" finalize --deploy-id dep-2 2>/dev/null; then
+  echo "Expected finalize to fail when rm fails" >&2
+  exit 1
+fi
+assert_eq "blue" "$(cat "$DEPLOY_STATE_DIR/active_color")" "active remains blue on rm fail"
+assert_eq "dep-2" "$(cat "$DEPLOY_STATE_DIR/pending_deploy_id")" "pending kept on rm fail"
+assert_eq "FINALIZE_STOP_FAILED" "$(cat "$DEPLOY_STATE_DIR/last_deploy_result")" "last_deploy_result records rm fail"
+[[ ! -f "$MOCK_LOG_DIR/running_app-blue" ]] || { echo "app-blue stopped even though rm failed" >&2; exit 1; }
+[[ -f "$MOCK_LOG_DIR/container_app-blue" ]] || { echo "app-blue container still present after rm fail" >&2; exit 1; }
+unset MOCK_FAIL_RM
+"$DEPLOY_SH" finalize --deploy-id dep-2 >/dev/null
+assert_eq "green" "$(cat "$DEPLOY_STATE_DIR/active_color")" "finalize retry succeeds after rm recovery"
+[[ ! -f "$DEPLOY_STATE_DIR/pending_deploy_id" ]] || { echo "pending cleared after retry" >&2; exit 1; }
+
+# 15c: both stop and rm fail, then recover & retry; plus already-removed container idempotency
+"$DEPLOY_SH" deploy sha-333 --mode bluegreen --phase switch --deploy-id dep-3 >/dev/null
+export MOCK_FAIL_STOP=1 MOCK_FAIL_RM=1
+if "$DEPLOY_SH" finalize --deploy-id dep-3 2>/dev/null; then
+  echo "Expected finalize to fail when both stop and rm fail" >&2
+  exit 1
+fi
+assert_eq "green" "$(cat "$DEPLOY_STATE_DIR/active_color")" "active remains green on stop+rm fail"
+assert_eq "dep-3" "$(cat "$DEPLOY_STATE_DIR/pending_deploy_id")" "pending kept on stop+rm fail"
+unset MOCK_FAIL_STOP MOCK_FAIL_RM
+# Remove container manually beforehand to test idempotent finalize when container is already gone
+rm -f "$MOCK_LOG_DIR/running_app-green" "$MOCK_LOG_DIR/container_app-green"
+"$DEPLOY_SH" finalize --deploy-id dep-3 >/dev/null
+assert_eq "blue" "$(cat "$DEPLOY_STATE_DIR/active_color")" "finalize succeeds idempotently when container already removed"
+[[ ! -f "$DEPLOY_STATE_DIR/pending_deploy_id" ]] || { echo "pending cleared after idempotent finalize" >&2; exit 1; }
 
 echo "ALL_DEPLOY_TESTS_PASSED"

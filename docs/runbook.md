@@ -39,6 +39,7 @@ sudo chown -R ubuntu:ubuntu /opt/gongchae-bell
 sudo chown -R 1000:1000 /var/lib/gongchae-bell/erasure
 sudo chmod 0750 /opt/gongchae-bell /opt/gongchae-bell/deploy/state /var/lib/gongchae-bell/erasure
 ```
+- M2 알림(`ALERTS_ENABLED=true`)을 처음 켜기 전에는 운영자가 빈 해지 대장 파일을 미리 생성해야 한다(`sudo install -o 1000 -g 1000 -m 600 /dev/null /var/lib/gongchae-bell/erasure/erasure.log && sync`). 앱은 이 파일을 자동 생성하지 않으며, `ALERTS_ENABLED=true` 상태에서 파일이 없으면 `ALERTS_ERASURE_LOG_MISSING`으로 시작하지 않는다. (`ALERTS_ENABLED=false` 상태에서는 디렉터리 준비만으로 기동된다.)
 
 ### 1.4 GitHub Secrets / Variables / GHCR 설정
 1. Repository / `production` Environment **Secrets** (값은 GitHub Secrets에만 저장, 로그·문서·코드 출력 금지):
@@ -151,28 +152,36 @@ sudo chmod 0750 /opt/gongchae-bell /opt/gongchae-bell/deploy/state /var/lib/gong
 | **기동 전 실패** (`PRE_SWITCH_FAIL`) | 새 색 `stop -t 40` 후 종료 | 기존 색·Caddy·`active_color` 무변경 | 새 버전 로그 확인 후 재시도 |
 | **Caddy 검증/리로드 실패** (`CADDY_VALIDATE_FAIL`, `CADDY_RELOAD_FAIL`) | `upstream.caddy` 원복, 새 색 중지, `pending_*` 정리 | 기존 색 계속 서빙 | `Caddyfile`·런타임 마운트 점검 |
 | **전환 직후/외부 G4 실패** (`POST_SWITCH_FAIL`, `G4_FAIL`) | 실행 중인 구 색으로 즉시 `caddy reload` 복귀 후 새 색 중지 | 기존 색·`active_color` 유지 (콜드 스타트 없음) | Actions 아티팩트 `g4-probe-report` 및 앱 로그 확인 |
-| **중단된 배포 잔류** (`PENDING_DEPLOY_EXISTS`, `STATE_MISMATCH`) | 새 배포 **fail-closed** 거부 | 실행 중 컨테이너를 건드리지 않음 | 아래 `중단 복구` 절차 수행 |
-| **사후 롤백** (`rollback`) | `prev_color`/`prev_sha` 기동 → G4 검증 → 현재 색 `stop -t 40` | 이전 정상 버전으로 복귀 | `workflow_dispatch(action=rollback)` 또는 서버 CLI |
+| **중단된 배포·종료 실패 잔류** (`PENDING_DEPLOY_EXISTS`, `STATE_MISMATCH`, `FINALIZE_STOP_FAILED`) | 새 배포 **fail-closed** 거부 (`finalize` 종료 실패 시에도 `pending_*` 유지) | 실행 중 컨테이너·기존 `active_color` 보호 | 아래 `중단 복구` 절차로 `finalize` 재시도 또는 `abort` 수행 |
+| **사후 롤백** (`rollback`) | `prev_color`/`prev_sha` 기동 → 외부 G4 검증 → 현재 색 `stop -t 40` | 이전 정상 버전으로 복귀 | `workflow_dispatch(action=rollback)` 또는 아래 2단계/G4_HOOK 절차 |
 
 ### 중단된 배포 및 사후 롤백 수동 명령
 ```bash
 cd /opt/gongchae-bell
 ./deploy/deploy.sh status
 ```
-- `pending_deploy_id`가 남아 있는 중단 상태라면:
-  - 기존 활성 색(`active_color`)으로 되돌리려면:
+- `pending_deploy_id`가 남아 있는 중단 상태(`switch` 중단, `finalize` 중간 중단, `FINALIZE_STOP_FAILED` 포함)라면:
+  - 기존 활성 색(`active_color`, `prev_*` 포함)으로 되돌리려면(`pending_deploy_id`가 있을 때는 `G4_HOOK` 없이 즉시 복구):
     ```bash
     ./deploy/deploy.sh abort --deploy-id <pending_deploy_id>
     # 또는 deploy_id 지정 없이 수동 긴급 복구:
     ./deploy/deploy.sh rollback
     ```
-  - 외부 G4와 실제 응답이 새 색(`pending_color`)에서 정상임을 이미 확인했고 구 색만 종료하면 되는 경우:
+  - 외부 G4와 실제 응답이 새 색(`pending_color`)에서 정상임을 확인했고 구 색 종료·커밋을 완료하거나 재시도하려면:
     ```bash
     ./deploy/deploy.sh finalize --deploy-id <pending_deploy_id>
     ```
-- 이미 커밋된 정상 배포를 이전 버전(`prev_color`/`prev_sha`)으로 되돌리려면:
+- 이미 커밋된 정상 배포(`pending_deploy_id=none`)를 이전 버전(`prev_color`/`prev_sha`)으로 되돌리려면:
   - 권장(외부 G4 포함): GitHub Actions `Deploy` 워크플로에서 `workflow_dispatch` → `action: rollback` 실행.
-  - 서버 단독 복구: `./deploy/deploy.sh rollback` (`--phase full` 기본 동작).
+  - 서버 CLI 단독 실행 시 `deploy.sh rollback`·`deploy.sh deploy <tag> --phase full`·단축 `deploy.sh <tag>` 모두 외부 판정 수단(`G4_HOOK`)이 필수이며, `G4_HOOK`가 없으면 전환 전에 fail-closed로 거부된다. `G4_HOOK` 없이 수동 2단계로 복구하려면 아래 순서를 따른다:
+    ```bash
+    ./deploy/deploy.sh rollback --phase switch --deploy-id manual-rb-$(date -u +%Y%m%dT%H%M%SZ)
+    # VM 밖 호스트에서 ./deploy/g4-probe.sh --base-url https://gongchae.enjoylcjworld.com --duration 15 --min-requests 15 실행
+    # 통과 시:
+    ./deploy/deploy.sh finalize --deploy-id <위에서 지정한 ID>
+    # 실패 시:
+    ./deploy/deploy.sh abort --deploy-id <위에서 지정한 ID>
+    ```
 
 ---
 
@@ -194,7 +203,7 @@ docker compose -f compose.prod.yml --profile blue --profile green ps
   ```
 - Caddy 보안 헤더·토큰 경로 헤더·로그 마스킹 확인:
   - `/subscriptions*` 응답은 `Referrer-Policy: no-referrer`, `Cache-Control: no-store`, `X-Robots-Tag: noindex`가 포함되어야 한다.
-  - Caddy JSON stdout 로그는 `t` 쿼리 파라미터, `Referer`, `Authorization`, `Cookie`를 제거한다:
+  - Caddy JSON 로그(접근 로그 `stdout` 및 기본/오류 로그 `stderr`)는 `t` 쿼리 파라미터, `Referer`, `Authorization`, `Cookie`를 제거한다:
     ```bash
     docker compose -f compose.prod.yml logs --tail=100 caddy
     ```
@@ -220,7 +229,7 @@ docker compose -f compose.prod.yml --profile blue --profile green ps
 ## 8. 현재 검증 범위와 남은 운영 실행 조건
 
 - **소스·구문·대역 검증 (본 브랜치 `ops/#14-bluegreen-deploy`)**:
-  - `deploy/tests/deploy-test.sh` (모의 `docker`/`curl` + 실제 `flock` 기반 12개 시나리오), `deploy/tests/caddy-integration-test.sh` (실제 `caddy:2-alpine` 기반 헤더·마스킹·IP 경계·reload 전환), `docker compose -f compose.prod.yml --profile blue --profile green config -q`, `Dockerfile` ARM64/컨테이너 빌드, `./gradlew check bootJar`(`DeploymentConfigIntegrationTest` 포함), Gitleaks 스캔으로 검증한다.
+  - `deploy/tests/deploy-test.sh` (모의 `docker`/`curl` + 실제 `flock` 기반 15개 시나리오), `deploy/tests/caddy-integration-test.sh` (실제 `caddy:2-alpine` 기반 헤더·access/502 error 로그 마스킹·IP 경계·reload 전환), `docker compose -f compose.prod.yml --profile blue --profile green config -q`, `Dockerfile` ARM64/컨테이너 빌드, `./gradlew check bootJar`(`DeploymentConfigIntegrationTest` 포함), Gitleaks 스캔으로 검증한다.
 - **남은 실서버 운영 실행 조건 (후속 실행 단계에서 기록)**:
   1. OCI VM 최초 준비 및 `bootstrap` 실행, HTTPS(`https://gongchae.enjoylcjworld.com`) 확인
   2. 실제 `main` 머지 자동 배포(`bluegreen`)의 G4 외부 시험 0건 실측 기록 (CI `g4-probe-report`)

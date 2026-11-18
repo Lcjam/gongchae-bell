@@ -1,3 +1,26 @@
+(redacted_log_format) {
+	format filter {
+		wrap json
+		fields {
+			request>uri query {
+				delete t
+			}
+			request>raw_uri query {
+				delete t
+			}
+			request>headers>Referer delete
+			request>headers>Authorization delete
+			request>headers>Cookie delete
+		}
+	}
+}
+
+{
+	log {
+		import redacted_log_format
+	}
+}
+
 (security_headers) {
 	header {
 		Strict-Transport-Security "max-age=31536000"
@@ -25,20 +48,7 @@ import /etc/caddy/runtime/upstream.caddy
 
 	log {
 		output stdout
-		format filter {
-			wrap json
-			fields {
-				request>uri query {
-					delete t
-				}
-				request>raw_uri query {
-					delete t
-				}
-				request>headers>Referer delete
-				request>headers>Authorization delete
-				request>headers>Cookie delete
-			}
-		}
+		import redacted_log_format
 	}
 
 	import active_upstream
