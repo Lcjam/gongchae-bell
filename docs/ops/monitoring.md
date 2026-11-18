@@ -160,6 +160,7 @@
 |---|---|---|
 | 2026-11-18 11:45:34~11:50:29 | 로컬 Docker Desktop(Windows, linux/amd64 엔진), `alert-e2e.sh` 1회, 시험 DB, 디스코드 대역 | 웹훅 없이 Grafana 기동 5초, 앱 scrape 23초, 대시보드 쿼리 19개 성공, 발동 메시지 2건(경고·차단)이 삽입 뒤 131초에, 해제 메시지 2건이 삭제 뒤 120초에 도착 |
 | 2026-11-18 12:00:56~12:04:12 | GitHub Actions `ubuntu-24.04-arm`(ARM64), [run 44227246661](https://github.com/Lcjam/gongchae-bell/actions/runs/44227246661), 커밋 `f872549`, 같은 스크립트 | Grafana 기동 5초, scrape 26초, 대시보드 쿼리 19개 성공, 발동 99초, 해제 62초. 메시지 4건(발동 2, 해제 2) |
+| 2026-11-18 19:17:21~19:21:35 | GitHub Actions `ubuntu-24.04-arm`(ARM64), [run 44283945764](https://github.com/Lcjam/gongchae-bell/actions/runs/44283945764), 커밋 `c36c557`(#14·#6 병합, 버킷 30초), 같은 스크립트 | Grafana 기동 6초, scrape 26초, 발동 104초, 해제 57초. 메시지 4건(발동 2, 해제 2) |
 
 규칙의 임계값을 바꾸면(8100→9000, ≥2→≥3, 5%→50%) `promtool test rules`가 실패하는 것도 확인했다. 운영 서버의 Prometheus·Grafana 메모리와 1년 보존 디스크 사용량은 아직 재지 않았다. 설치 뒤 `docker stats`와 볼륨 `du -sh`로 재서 기록한다.
 
