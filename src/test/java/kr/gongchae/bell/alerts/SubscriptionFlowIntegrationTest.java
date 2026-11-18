@@ -513,6 +513,28 @@ class SubscriptionFlowIntegrationTest extends IntegrationTestSupport {
         return result;
     }
 
+    /** Codex PR13: a full pool ends at Hikari's bound with the fixed 503 (before: a generic 500) and writes nothing. */
+    @Test
+    void aFullPoolAnswersBusyWithinItsBoundAndWritesNothing() throws Exception {
+        int size = dataSource.unwrap(com.zaxxer.hikari.HikariDataSource.class).getMaximumPoolSize();
+        List<Connection> held = new java.util.ArrayList<>();
+        try (var pool = Executors.newSingleThreadExecutor()) {
+            try {
+                for (int i = 0; i < size; i++) held.add(dataSource.getConnection());
+                long t0 = System.nanoTime();
+                MvcResult result = pool.submit(() -> mvc.perform(signup("full@example.com")).andReturn()).get(12, TimeUnit.SECONDS);
+                assertThat(result.getResponse().getStatus()).isEqualTo(503);
+                assertThat(result.getResponse().getContentAsString(UTF_8)).contains("잠시 뒤 다시 시도해 주세요");
+                assertThat(Duration.ofNanos(System.nanoTime() - t0)).isBetween(Duration.ofMillis(4_000), Duration.ofMillis(10_000));
+            } finally {
+                for (Connection connection : held) connection.close();  // free the pool before the executor waits
+            }
+        }
+        assertThat(MAILS).isEmpty();
+        assertThat(jdbc.sql("SELECT count(*) FROM subscription").query(Integer.class).single()).isZero();
+        assertThat(jdbc.sql("SELECT count(*) FROM rate_limit").query(Integer.class).single()).isZero();
+    }
+
     @Test
     void anUnsubscribeWithoutItsJournalFileDeletesNothing() throws Exception {
         confirmed("stay@example.com");

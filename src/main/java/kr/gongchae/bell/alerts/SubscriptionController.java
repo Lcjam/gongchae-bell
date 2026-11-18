@@ -10,8 +10,12 @@ import kr.gongchae.bell.catalog.CatalogViews;
 import kr.gongchae.bell.catalog.FreshnessModelInterceptor;
 import kr.gongchae.bell.catalog.FreshnessService;
 import kr.gongchae.bell.catalog.JobSearchCriteria;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.core.NestedExceptionUtils;
 import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.dao.QueryTimeoutException;
+import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Controller;
@@ -24,6 +28,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 /** FR-A1~A3, A6~A8 pages. GET never changes state; every change is a POST (PRD alerts rule). */
 @Controller
 public class SubscriptionController {
+    private static final Logger log = LoggerFactory.getLogger(SubscriptionController.class);
     private final SubscriptionService service;
     private final AlertsProperties properties;
     private final CatalogRepository catalog;
@@ -309,11 +314,15 @@ public class SubscriptionController {
     // ---- shared pages ----
 
     /**
-     * A lock or statement wait bounded by the in-request budget ran out (14-4). Nothing of the step that timed out was
-     * committed. Counted requests and reserved sends stay counted, as always.
+     * A lock or statement wait bounded by the in-request budget ran out (14-4), or no pooled connection could be taken
+     * within the pool's bound (it surfaces as CannotCreateTransactionException, the transaction never began). Nothing
+     * of that step was committed. Counted requests and reserved sends stay counted, as always. Logged by class only:
+     * the cause tells a full pool from a database that refuses connections, without addresses in the log.
      */
-    @ExceptionHandler({CannotAcquireLockException.class, QueryTimeoutException.class})
-    String busy(Model model, HttpServletResponse response) {
+    @ExceptionHandler({CannotAcquireLockException.class, QueryTimeoutException.class, CannotCreateTransactionException.class})
+    String busy(Exception failure, Model model, HttpServletResponse response) {
+        log.warn("ALERT_REQUEST_BUSY {} cause={}", failure.getClass().getSimpleName(),
+                NestedExceptionUtils.getMostSpecificCause(failure).getClass().getSimpleName());
         response.setStatus(503);
         return notice(model, "지금은 요청을 처리하지 못했습니다", "요청이 몰려 제한 시간 안에 처리하지 못했습니다. 잠시 뒤 다시 시도해 주세요.", null);
     }

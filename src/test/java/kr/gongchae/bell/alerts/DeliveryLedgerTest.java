@@ -36,6 +36,7 @@ import org.springframework.dao.QueryTimeoutException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.support.JdbcTransactionManager;
+import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.TransactionStatus;
@@ -81,8 +82,9 @@ class DeliveryLedgerTest {
     final class SlowPool implements PlatformTransactionManager {
         final Deque<Duration> waits = new ArrayDeque<>();
         int acquisitions;
+        int failAt;  // this acquisition (1-based) times out like a full Hikari pool; 0 = never
         @Override public TransactionStatus getTransaction(TransactionDefinition definition) {
-            acquisitions++;
+            if (++acquisitions == failAt) throw new CannotCreateTransactionException("pool timeout (test)");
             Duration wait = waits.pollFirst();
             if (wait != null) timer.advance(wait);
             return manager.getTransaction(definition);
@@ -290,6 +292,23 @@ class DeliveryLedgerTest {
         assertThat(mail.timeouts).isEmpty();
         assertThat(attempts(q.claim().id())).containsExactly("NOT_SENT");
         assertThat(job(q.claim().id())).isEqualTo("FAILED|DEADLINE|1");
+    }
+
+    /** Codex PR13: a connection the pool cannot hand over (for A, or for R inside A) ends the job, not left SENDING. */
+    @Test
+    void aConnectionThePoolCannotHandOverEndsTheJobAsDeadline() {
+        for (int failAt : new int[]{1, 2}) {  // 1 = A's connection, 2 = R's own connection B
+            var pool = new SlowPool();
+            var poolLimits = new RateLimiter(jdbc, clock, pool);
+            sender = new SyncSender(jdbc, pool, new DeliveryLedger(jdbc, clock, poolLimits, pool), poolLimits, mail, NO_WEBHOOK, crypto, timer);
+            pool.failAt = failAt;
+            Pending p = pending();
+            deliver(p);
+            assertThat(job(p.claim().id())).as("failAt=%d", failAt).isEqualTo("FAILED|DEADLINE|0");
+            assertThat(attempts(p.claim().id())).isEmpty();
+        }
+        assertThat(mail.keys).isEmpty();
+        assertThat(emailTotal()).isZero();
     }
 
     @Test

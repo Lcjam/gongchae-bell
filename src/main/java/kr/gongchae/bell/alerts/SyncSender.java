@@ -10,6 +10,7 @@ import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.dao.QueryTimeoutException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -109,8 +110,9 @@ public class SyncSender {
             try {
                 limits.requirePoolRoom(() -> waitLimit(start));
                 next = tx.execute(status -> attempt(claim, job, payload, hash, totalKey, start, current));
-            } catch (CannotAcquireLockException | QueryTimeoutException outOfTime) {
-                end(claim, "DEADLINE", start);  // A rolled back; an R already committed stays (its NULL attempt is unknown)
+            } catch (CannotAcquireLockException | QueryTimeoutException | CannotCreateTransactionException outOfTime) {
+                // A rolled back (or never got its connection, or R did not get B); an R already committed stays (NULL = unknown)
+                end(claim, "DEADLINE", start);
                 return;
             }
             if (next == null || next.step() == Step.DONE) return;
