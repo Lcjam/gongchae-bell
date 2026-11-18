@@ -18,6 +18,8 @@ spring:
     timeout-per-shutdown-phase: 30s
   task:
     scheduling:
+      pool:
+        size: 4
       shutdown:
         # ADR-0014: let a running collection finish for up to 30s on shutdown instead of cutting it off.
         await-termination: true
@@ -62,6 +64,10 @@ alerts:
   webhook-key: ${ALERTS_WEBHOOK_KEY:}
   webhook-key-id: ${ALERTS_WEBHOOK_KEY_ID:}
   erasure-log: ${ALERTS_ERASURE_LOG:}
+  dispatch:
+    worker-concurrency: ${ALERTS_WORKER_CONCURRENCY:2}
+    batch-size: ${ALERTS_BATCH_SIZE:20}
+    scheduler-enabled: ${ALERTS_SCHEDULER_ENABLED:true}
   mail:
     api-key: ${RESEND_API_KEY:}
     from: ${ALERTS_MAIL_FROM:}
@@ -73,3 +79,6 @@ alerts:
     hosting-location: ${PRIVACY_HOSTING_LOCATION:}
     overseas-basis: ${PRIVACY_OVERSEAS_BASIS:}
     resend-retention: ${PRIVACY_RESEND_RETENTION:}
+
+heartbeat:
+  digest-url: ${HEARTBEAT_DIGEST_URL:}

@@ -12,14 +12,14 @@
 | FR-W1~W4 | 필터/정렬/페이징, 홈, 상세, 3년 기관 통계, 원문 이동 | 구현 완료 (`#5` / `catalog`, [PR #10](https://github.com/Lcjam/gongchae-bell/pull/10) 머지. `detail` 단계·첨부 표시 테스트는 공식 swagger 문서 계약 fixture 기준이며, 공식 `detail` 실응답 표본으로 수집 빈 → DB → 화면까지 잇는 통합 테스트는 #4 PR에 합쳤다(Sol `OfficialFixtureIntegrationTest`)) |
 | FR-W5~W8 | 기준 시각, escaping/URL 검사, 메타데이터/robots, 360px 조작 | 구현 완료 (`#5` / `catalog`) |
 | FR-A1~A3 | 이메일 확인, Discord SSRF/암호화, 목적별 토큰, 수정/해지/복구 | #6 구현·로컬 대역 검증(PR 리뷰 대기): 이메일 신청·확인(유효 확인 POST만 활성), 디스코드 URL 검사·주소 검사·AES-GCM·테스트 성공 시 등록, 목적별 토큰, 조건 수정·해지·관리 링크 복구, Origin 예외와 토큰 실패 제한([계약](../collab/2026-11-16-implementation/claude-subscriptions-contract.md), [운영](ops/alerts.md)). 실제 Resend·Discord 발송과 실제 HTTPS 브라우저 관측은 미검증 |
-| FR-A4~A5 | 트랜잭션 outbox, 일별 묶음, 재확인/선점/경합/복구/429/404 테스트 | 기반만 #6에 있음: 발송 작업·시도 테이블, 예약 R·펜싱·종결 규칙, 비동기 선점·회수 SQL과 테스트. 매칭·outbox·묶음·비동기 워커·디스코드 404 비활성화는 #7(미구현) |
+| FR-A4~A5 | 트랜잭션 outbox, 일별 묶음, 재확인/선점/경합/복구/429/404 테스트 | **#7 구현·로컬 대역 검증 완료(PR 리뷰 대기)**: 정기 수집 동일 TX `DISCORD_NEW` outbox, 08:00/09:00 KST 슬롯 선점·만회(`EMAIL_DIGEST`·`DISCORD_DEADLINE`) 및 `digestHeartbeat`, 비동기 워커(`TX1`~`TX3`·5분 회수·23시간 수명), `R` 전·후 KST 자격/해시 재검사, Discord 404 비활성화·429 `retry_after`·5xx 재시도, RFC 8058 헤더, Prometheus M2 지표 및 Testcontainers 회귀. 실제 양 채널 수신·SPF/DKIM·운영 관측은 실사용 전 게이트 |
 | FR-A6~A8 | 고지/14세/파기/대장/처리방침/국외이전, 요청·발송 제한 | #6 구현·로컬 대역 검증: 신청 전 고지·필수 동의·만 14세 확인(서버 검사), 동의 버전·시각 저장, 처리방침 화면(운영 값은 필수 설정, 없으면 '미정'), 상태별 정리 주기, 해지 대장 fsync와 fail-closed 복원, 요청 제한과 발송 상한, RFC 8058 원클릭 해지 경로. 실제 고지 값·국외 이전 근거·공급자 계약·백업 사본 삭제·대장 정리 시점은 실사용 전 게이트 |
 | 운영 기반 | 이미지, 자동 blue/green 배포/롤백, 모니터링, 백업/NAS pull | 미구현 |
 | 공개 출시 | HTTPS 핵심 화면, 실제 양 채널 수신/해지/SPF/DKIM, 실제 API 최초 적재 | 실제 API 최초 적재는 로컬 개발 DB에서만 실측(FR-C1). 나머지는 미검증 |
 | 운영 증거 | G4 성공/실패 배포, 경보 수신, 격리 복원, 부하/자원, 훈련 회고 | 미검증 |
 | 문서/프로세스 | 이슈/PR/두 리뷰, runbook, CHANGELOG, sprint 리뷰, 홍보 규정 | 진행 중 |
 
-**M1 수집·웹 이슈(#2~#5)는 이 표의 범위까지다. M2 알림은 #6(구독·보안, 리뷰 대기)까지이고 #7(매칭·발송)이 남았다. M3 운영과 PRD §7 공개 출시 게이트는 미완료다.**
+**M1 수집·웹(#2~#5)과 #14 배포는 `main`에 병합됐고, M2 알림은 #6 병합 뒤 #7(매칭·발송, 대역 검증) 리뷰 대기 중이다. M3 운영과 PRD §7 공개 출시 게이트는 미완료다.**
 
 공개 AJAX `list` 표본과 공식 OpenAPI `list`·`detail`·빈 기간·시작일 하한 1페이지 응답(2026-11-15 각 1회 취득)은 [fixtures](../fixtures/README.md)에 있다. 공식 응답 표본은 #4 테스트가 쓴다. 3년 적재의 근거는 표본이 아니라 FR-C1 행의 실행 기록이다. #5의 `detail` 단계(`steps`)·첨부(`files`) 화면 출력 테스트는 공식 swagger 문서 계약에 맞춘 fixture 기준이다.
 

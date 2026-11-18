@@ -20,7 +20,7 @@
 | `POST /subscriptions/discord` | URL 검증([ADR-0009](../adr/0009-webhook-storage-ssrf.md)) → 제한 → 이미 PENDING·ACTIVE인 웹훅이면 테스트 없이 '이미 등록' → 요청 안에서 테스트 메시지(`wait=true`) → 2xx면 `ACTIVE`와 `DISCORD_TEST` 성공 기록을 함께 넣고 관리 링크를 한 번 보여 준다. 실패하면 아무것도 저장하지 않는다 |
 | `GET /subscriptions/manage?t=` → `POST /subscriptions/manage` | 조건과 알림 종류 수정(`action=update`, ACTIVE만) 또는 해지(`action=unsubscribe`). 관리 토큰(MANAGE)만 통과 |
 | `GET /subscriptions/unsubscribe?t=` → `POST /subscriptions/unsubscribe` | 해지 확인 → 해지(대장 기록·fsync 뒤 즉시 삭제). 해지 토큰(UNSUBSCRIBE)만 통과 |
-| `POST /subscriptions/unsubscribe/one-click?t=` | RFC 8058 원클릭 해지. 본문 `List-Unsubscribe=One-Click`이 있어야 한다. 헤더를 메일에 넣는 일은 #7(묶음 메일) |
+| `POST /subscriptions/unsubscribe/one-click?t=` | RFC 8058 원클릭 해지. 본문 `List-Unsubscribe=One-Click`이 있어야 한다. #7 `EMAIL_DIGEST` 메일 헤더에 포함 |
 | `GET /subscriptions/recover` | 관리 링크 다시 받기 화면 |
 | `POST /subscriptions/recover/email` | ACTIVE 이메일이면 요청 안에서 관리·해지 링크 메일(`EMAIL_RECOVER`)을 보낸다. 응답은 항상 같다 |
 | `POST /subscriptions/recover/discord` | 웹훅 URL을 다시 입력 → `dest_hmac`이 PENDING·ACTIVE 구독과 일치하면 관리 링크를 한 번 보여 준다(URL이 곧 자격) |
