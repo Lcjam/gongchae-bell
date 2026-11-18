@@ -77,3 +77,59 @@
 - `COLLECTOR_ENABLED=true` 뒤 첫 정기 수집 패널 전환 확인(설치 7번)
 - Prometheus·Grafana 메모리와 1년 보존 디스크 실측, UptimeRobot·Healthchecks.io 현재 무료 범위 재확인
 - M2 발송 지표와 묶음 heartbeat는 #7. 백업 heartbeat는 #16이 main에 병합됐고 Healthchecks 계정 연결은 후속
+
+## 3라운드: 공유 임시 upstream 경합과 cp·mv 실패 (2026-11-18)
+
+요청은 root `collab/2026-11-18-implementation/claude-monitoring-concurrency-request.md`, 근거는 `collab/reviews/pr-21-codex-round2.md`, `pr-21-sol-round2.md`(P2)다. 검수자의 `.tools/pr21-round2/` 진단은 읽지 않았다. 아래 시험은 이 브랜치의 운영 코드 경로를 직접 실행한다.
+
+| 항목 | 값 |
+|---|---|
+| 시작 head | `bee2be2` (빈 태그 단언 수정. root가 compose-integration success를 확인했고 다시 만들지 않았다) |
+| 코드·시험·문서 커밋 | `25c9fbb` |
+| CI (`25c9fbb`) | CI [44287466328](https://github.com/Lcjam/gongchae-bell/actions/runs/44287466328) test(`check bootJar`, ARM64)·deploy-verify(`[17/17]` 포함 `ALL_DEPLOY_TESTS_PASSED`, Caddy 통합, ARM64 이미지)·backup-verify·secrets 성공. Monitoring [44287466430](https://github.com/Lcjam/gongchae-bell/actions/runs/44287466430) rules·compose-integration(`COMPOSE_INTEGRATION_TEST_PASSED`)·alert-e2e(발동 93초, 해제 57초) 성공 |
+| 최종 head | 이 파일을 담은 다음 커밋(문서만). PR #21 head로 확인 |
+
+### 원인
+
+- `main`이 하위 명령 분기·잠금 획득 전에 거는 EXIT trap이 공유 경로 `upstream.caddy.next`를 **모든 종료에서** 지웠다. 배포 잠금을 쥔 switch가 검증과 이동 사이에 있을 때 잠금 없이 도는 `monitoring`(2라운드에서 추가), `status`, 도움말, 잠금을 얻지 못하고 끝나는 실행이 그 파일을 지울 수 있었다.
+- `atomic_reload_upstream`, `stage_and_validate_upstream`, `rollback_reload_from_prev`는 `if ! ...` 문맥에서 불려 errexit가 꺼진다. 사라진 파일의 `mv` 실패가 가려지고 구 설정의 reload 성공이 `SWITCH_OK`로 보고됐다. 같은 문맥의 `rollback_reload_from_prev`는 `.prev` 이동이 실패하면 새 색 설정을 "성공적으로" 다시 읽고 호출자가 그 새 색을 멈추는 더 나쁜 경로가 있어 함께 고쳤다.
+
+### 수정 (`deploy/deploy.sh`)
+
+- `cleanup_on_exit`: `upstream.caddy.next`는 그 파일을 준비한 실행(`stage_and_validate_upstream`, 배포 잠금 아래)만 지운다(`OWNS_STAGED_UPSTREAM`). 잠금을 새로 잡지 않으며 `monitoring`·`status`의 동작과 모니터링 설치·exec·restart 경로는 그대로다. 실행별 `*.tmp.$$` 정리는 그대로다.
+- `stage_and_validate_upstream`의 복사, `atomic_reload_upstream`의 `.prev` 보관과 `.next` 이동을 각각 확인한다. 실패하면 `CADDY_STAGE_FAIL`로 `upstream.caddy`를 바꾸지 않은 채 실패를 돌려준다. 호출자의 기존 처리대로 pending을 정리하고 새 색을 지우며 구 색이 계속 서빙한다.
+- reload 실패 뒤 `.prev` 원복 이동이 실패하면 파일이 새 색을 가리키므로 `CADDY_RELOAD_REVERT_FAIL`로 즉시 끝내고 새 색과 pending을 남긴다(abort로 복구). `rollback_reload_from_prev`의 `.prev` 이동 실패는 `ROLLBACK_RELOAD_FAILED`로 돌려줘 기존처럼 두 색을 남긴다.
+- finalize의 `upstream == pending` 색 비교 guard, 정지·제거·복원 실패 처리, 원자 전환 순서는 바꾸지 않았다.
+- `compose.monitoring.yml` 머리말 예시를 `deploy/deploy.sh monitoring up -d prometheus grafana`로 맞췄다. runbook §5 실패 표에 `CADDY_STAGE_FAIL`, `CADDY_RELOAD_REVERT_FAIL`, `.prev` 복귀 실패를 넣고 §7·§8과 모니터링 문서를 고쳤다.
+
+### 회귀 시험 `deploy-test.sh` [17/17] (모의 docker·curl, 실제 `flock`, 전체 CLI)
+
+모의 docker에 Caddy 검증 시점 훅(`MOCK_VALIDATE_HOOK`)을 더했다. 실제 switch가 배포 잠금을 쥔 채 검증과 이동 사이에 있을 때 다른 `deploy.sh` 프로세스를 실행한다. `failbin` 모의 `mv`에는 원본 경로로 실제로 아무것도 옮기지 않고 실패하는 주입(`INJECT_MV_FAIL_FROM`)을 더했다.
+
+| 사례 | 확인 |
+|---|---|
+| 17a | 다른 프로세스가 배포 잠금을 쥐고 `upstream.caddy.next`를 둔 상태에서 `monitoring config`, `status`, `--help`, 잠금 실패로 끝나는 `finalize`(LOCK_HELD) 뒤에도 파일 내용이 그대로 |
+| 17b | 검수자 재현과 같은 끼어들기: 실제 `deploy --phase switch`의 검증과 이동 사이에 `monitoring config`와 `status`를 실행해도 `SWITCH_OK`, `upstream.caddy`가 실제로 green, pending green, finalize 성공 |
+| 17c | 이동 직전에 준비 파일이 사라지면 switch가 실패(`CADDY_STAGE_FAIL ... could not be moved`), `SWITCH_OK` 없음, upstream·active 무변경, pending 없음, 구 색 실행·새 색 제거, 다음 배포 정상 |
+| 17d | 전환 뒤 확인 실패 + `.prev` 복귀 이동 실패 → `ROLLBACK_RELOAD_FAILED ... could not restore`, `POST_SWITCH_ROLLED_BACK` 없음, 두 색 실행, pending 유지, abort가 blue로 복구 |
+| 17e | upstream이 pending 색과 다른 상태(예전 거짓 성공이 남기던 상태)에서 finalize가 `STATE_MISMATCH`로 거부, 두 색·pending 유지, abort 복구 |
+
+변이 확인(Ubuntu 24.04 컨테이너에서 복사본만 바꿈, 원본 무변경):
+
+| 변이 | 결과 |
+|---|---|
+| M1 공유 trap 복원(모든 종료가 `.next` 삭제) | 17a 실패: `expected=[staged by another deploy] actual=[]` |
+| M2 `.next` 이동 확인 제거 | 17c 실패: switch가 성공으로 끝남 |
+| M3 `.prev` 복귀 이동 확인 제거 | 17d 실패: `ROLLBACK_RELOAD_FAILED could not restore` 없음 |
+| M1+M2(원래 코드 모양) + 17a 생략 | 17b 실패: 로그에 `SWITCH_OK deploy_id=dep-2 ... serving=green`인데 `upstream.caddy`에 `app-green:8080` 없음. 검수자가 재현한 거짓 성공과 같다 |
+
+### 검증
+
+| 시험 | 결과 |
+|---|---|
+| `deploy-test.sh` 17개 시나리오 (로컬 `ubuntu:24.04`) | `ALL_DEPLOY_TESTS_PASSED` |
+| `compose-integration.sh` (로컬, 수정된 `deploy.sh`) | `COMPOSE_INTEGRATION_TEST_PASSED` |
+| 로컬 `./gradlew check bootJar` | 154 tests, 0 failures (Java 변경 없음) |
+| CI (`25c9fbb`) | CI [44287466328](https://github.com/Lcjam/gongchae-bell/actions/runs/44287466328) test(`check bootJar`, ARM64)·deploy-verify(`[17/17]` 포함 `ALL_DEPLOY_TESTS_PASSED`, Caddy 통합, ARM64 이미지)·backup-verify·secrets 성공. Monitoring [44287466430](https://github.com/Lcjam/gongchae-bell/actions/runs/44287466430) rules·compose-integration(`COMPOSE_INTEGRATION_TEST_PASSED`)·alert-e2e(발동 93초, 해제 57초) 성공 |
+
+30초 p95·합성 20초 Timer·promtool 쿼리, 실제 Compose 결합·모니터링 컨테이너 유지·heartbeat 전달 시험은 그대로 두었다. Gradle·실제 Compose 시험은 로컬에서 다시 통과했고 promtool은 CI `rules`로 확인한다. 실제 서버·SSH·OCI·DNS·계정·`.env` 실제 값·키·provider·개발 DB와 다른 작성자 브랜치에는 접근하지 않았다.
