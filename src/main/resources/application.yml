@@ -23,6 +23,8 @@ app:
   base-url: ${APP_BASE_URL:http://localhost:8080}
 server:
   shutdown: graceful
+  # ADR-0010: client address comes from the reverse proxy (Caddy) on the internal network only.
+  forward-headers-strategy: ${SERVER_FORWARD_HEADERS_STRATEGY:native}
   error:
     include-message: never
     include-stacktrace: never

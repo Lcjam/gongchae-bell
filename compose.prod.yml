@@ -1,0 +1,107 @@
+name: gongchae-bell-prod
+
+# Defaults for optional variables are defined here (and documented in docs/runbook.md);
+# deploy/.env.prod.example intentionally contains key names only.
+#
+# #16 backup interface (ADR-0012 / ADR-0013):
+# - Daily logical backup takes `pg_dump -Fc` from the running `postgres` container
+#   plus `${ERASURE_HOST_DIR}/erasure.log` via restic.
+# - Never file-copy the live `postgres_data` Docker volume as a daily logical backup.
+
+x-app-common: &app-common
+  restart: unless-stopped
+  stop_grace_period: 40s
+  depends_on:
+    postgres:
+      condition: service_healthy
+  environment:
+    DB_URL: jdbc:postgresql://postgres:5432/${DB_NAME:-gongchae}
+    DB_USER: ${DB_USER:?Set DB_USER}
+    DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD}
+    APP_BASE_URL: ${APP_BASE_URL:-https://gongchae.enjoylcjworld.com}
+    # #15 observability interface: bind management port (:8081) on internal Docker network only (no host port published).
+    MANAGEMENT_ADDRESS: 0.0.0.0
+    SERVER_FORWARD_HEADERS_STRATEGY: native
+    JAVA_TOOL_OPTIONS: ${JAVA_TOOL_OPTIONS:--Xms256m -Xmx512m -XX:+ExitOnOutOfMemoryError}
+    COLLECTOR_ENABLED: ${COLLECTOR_ENABLED:-false}
+    COLLECTOR_SERVICE_KEY: ${COLLECTOR_SERVICE_KEY:-}
+    COLLECTOR_WARNING_LIMIT: ${COLLECTOR_WARNING_LIMIT:-500}
+    COLLECTOR_STOP_LIMIT: ${COLLECTOR_STOP_LIMIT:-900}
+    # M2 (#6) compatibility keys (all alerts disabled by default until M2 rollout)
+    ALERTS_ENABLED: ${ALERTS_ENABLED:-false}
+    ALERTS_TOKEN_KEY: ${ALERTS_TOKEN_KEY:-}
+    ALERTS_HMAC_KEY: ${ALERTS_HMAC_KEY:-}
+    ALERTS_WEBHOOK_KEY: ${ALERTS_WEBHOOK_KEY:-}
+    ALERTS_WEBHOOK_KEY_ID: ${ALERTS_WEBHOOK_KEY_ID:-}
+    ALERTS_ERASURE_LOG: ${ALERTS_ERASURE_LOG:-/var/lib/gongchae-bell/erasure/erasure.log}
+    RESEND_API_KEY: ${RESEND_API_KEY:-}
+    ALERTS_MAIL_FROM: ${ALERTS_MAIL_FROM:-}
+    PRIVACY_OFFICER: ${PRIVACY_OFFICER:-}
+    PRIVACY_CONTACT: ${PRIVACY_CONTACT:-}
+    PRIVACY_POLICY_VERSION: ${PRIVACY_POLICY_VERSION:-}
+    PRIVACY_EFFECTIVE_DATE: ${PRIVACY_EFFECTIVE_DATE:-}
+    PRIVACY_HOSTING_LOCATION: ${PRIVACY_HOSTING_LOCATION:-}
+    PRIVACY_OVERSEAS_BASIS: ${PRIVACY_OVERSEAS_BASIS:-}
+    PRIVACY_RESEND_RETENTION: ${PRIVACY_RESEND_RETENTION:-}
+  volumes:
+    # ADR-0013 erasure journal directory, kept separate from postgres_data volume.
+    - ${ERASURE_HOST_DIR:-/var/lib/gongchae-bell/erasure}:/var/lib/gongchae-bell/erasure
+  networks:
+    - edge
+    - backend
+
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-gongchae}
+      POSTGRES_USER: ${DB_USER:?Set DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks:
+      - backend
+
+  app-blue:
+    <<: *app-common
+    profiles: ["blue"]
+    image: ${APP_IMAGE:?Set APP_IMAGE}:${APP_BLUE_TAG:?Set APP_BLUE_TAG}
+
+  app-green:
+    <<: *app-common
+    profiles: ["green"]
+    image: ${APP_IMAGE:?Set APP_IMAGE}:${APP_GREEN_TAG:?Set APP_GREEN_TAG}
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SITE_DOMAIN: ${SITE_DOMAIN:-gongchae.enjoylcjworld.com}
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${CADDY_RUNTIME_DIR:-./deploy/state/caddy}:/etc/caddy/runtime
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - edge
+
+networks:
+  edge:
+    driver: bridge
+  backend:
+    driver: bridge
+    internal: true
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:

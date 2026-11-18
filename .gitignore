@@ -2,9 +2,11 @@
 review/
 .env.*
 !.env.example
+!deploy/.env.prod.example
 .tools/
 .gradle/
 build/
+deploy/state/
 *.log
 .idea/
 *.iml
