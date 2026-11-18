@@ -32,23 +32,31 @@
 
 **경보 흐름.** Prometheus가 규칙을 평가하고, Grafana 규칙 하나(`GongchaePrometheusAlert`)가 `ALERTS{alertstate="firing"}`을 30초마다 읽어 경보마다 운영 디스코드로 보낸다. 경보가 풀리면 해제 메시지도 보낸다. Alertmanager는 쓰지 않는다(ADR-0006). 임계값을 Prometheus 규칙에 둔 이유는 `promtool`로 CI에서 발동·복구를 시험할 수 있어서다. Grafana는 `alertname`을 자기 규칙 이름으로 덮어쓰므로 Prometheus 경보 이름은 `prom_alert` 라벨로 옮긴다. 알림 정책은 `prom_alert`별로 묶는다. 처음 대기 30초, 묶음 간격 1분, 계속 발동 중이면 4시간마다 다시 보낸다. Prometheus를 조회하지 못하면 Grafana 자체 경보(`DatasourceError`)가 같은 채널로 간다. VM 전체나 Docker가 멈추면 Grafana도 멈추므로, 그때는 외부 감시(UptimeRobot, Healthchecks.io)만 울린다. 그래서 둘을 따로 둔다.
 
-**전송은 기본 꺼짐.** `OPS_DISCORD_WEBHOOK_URL`이 비어 있으면 compose가 `http://127.0.0.1:9/alerts-off`(Grafana 컨테이너 자신의 닫힌 포트)를 넣는다. Grafana는 웹훅 URL이 비어 있으면 시작하지 않기 때문이다(13.0.2에서 확인: `could not find webhook url property in settings`). 이 상태에서도 경보는 평가되고, 전송은 컨테이너 안에서 실패하며, 밖으로는 아무것도 나가지 않는다. 앱 heartbeat도 `HEARTBEAT_COLLECTOR_URL`이 비어 있으면 아무것도 보내지 않는다.
+**전송은 기본 꺼짐.** `OPS_DISCORD_WEBHOOK_URL`이 비어 있으면 compose가 `http://127.0.0.1:9/alerts-off`(Grafana 컨테이너 자신의 닫힌 포트)를 넣는다. Grafana는 웹훅 URL이 비어 있으면 시작하지 않기 때문이다(13.0.2에서 확인: `could not find webhook url property in settings`). 이 상태로 대시보드와 Prometheus를 먼저 띄울 수 있다. 운영자가 보는 실제 동작은 이렇다.
+- 경보는 평가되고 Grafana 경보 목록에 발동으로 보인다. 받는 곳은 없다.
+- 발동 중인 경보가 있으면 Grafana 로그에 로컬 전송 실패(`connection refused`, 대상 `127.0.0.1:9`)가 반복해 남는다. 밖으로는 아무것도 나가지 않는다.
+- 웹훅을 넣었다고 끝난 것이 아니다. `.env`에 값을 넣고 `deploy.sh monitoring up -d grafana`로 다시 만든 뒤(환경값은 `restart`로 바뀌지 않는다), 아래 "실제 수신 확인" 1번 훈련으로 발동·수신·복구를 확인해야 전환 완료다.
+
+앱 heartbeat도 `HEARTBEAT_COLLECTOR_URL`이 비어 있으면 아무것도 보내지 않는다.
 
 ## 설치 (운영 서버, 후속 실행)
 
-#14가 머지되고 서버에 `compose.prod.yml`이 있다는 전제다. 아직 실행하지 않았다.
+#14는 main에 병합됐다(`be30f69`). 서버 적용은 아직 하지 않았다. 아래 명령은 모두 `/opt/gongchae-bell`에서 실행한다.
 
-1. 서버의 `compose.prod.yml` 옆(`/opt/gongchae-bell`)에 `compose.monitoring.yml`과 `deploy/monitoring/`을 둔다. 앱 배포 파일과 같은 방법으로 옮긴다.
-2. `/opt/gongchae-bell/.env`(0600)에 키를 넣는다. 키 이름은 [`deploy/monitoring/.env.example`](../../deploy/monitoring/.env.example)에 있다.
-   - `GRAFANA_ADMIN_PASSWORD`: 필수. 비밀번호 관리자에서 만든다. Grafana는 이 값을 **처음 기동할 때만** 쓴다. 나중에 바꾸려면 `... exec grafana grafana cli admin reset-admin-password <새 값>`을 쓴다.
-   - `OPS_DISCORD_WEBHOOK_URL`: 운영 디스코드 채널 웹훅. 비워 두면 전송 꺼짐.
-   - `HEARTBEAT_COLLECTOR_URL`: 앱 설정이다. #14의 `compose.prod.yml` 앱 환경에 이 키를 전달하는 한 줄이 들어가야 앱에 닿는다([통합 대기](#14와-합칠-때)).
-3. 기동: `docker compose -f compose.prod.yml -f compose.monitoring.yml up -d prometheus grafana`
-4. 접속: 내 PC에서 `ssh -L 3000:127.0.0.1:3000 <서버>` → `http://localhost:3000` (계정 `admin`). Prometheus 화면은 Grafana Explore로 본다. 대상 상태는 `docker compose -f compose.prod.yml -f compose.monitoring.yml exec prometheus wget -qO- localhost:9090/api/v1/targets`.
-5. 설정을 바꾼 뒤: 규칙·scrape 설정은 `... kill -s SIGHUP prometheus`, Grafana 프로비저닝은 `... restart grafana`.
+**모니터링 명령은 `deploy/deploy.sh monitoring <docker compose 인자>`로 실행한다.** `compose.prod.yml`은 `APP_BLUE_TAG`·`APP_GREEN_TAG`를 필수로 요구하는데, #14 계약에서 이 값은 `.env`가 아니라 `deploy/state/{blue,green}_tag`에 있다(`.env`에서는 빈 값). 그래서 `docker compose -f compose.prod.yml -f compose.monitoring.yml ...`을 직접 치면 `required variable APP_BLUE_TAG is missing a value`로 실패한다(agy가 재현, `compose-integration.sh` 1단계). `deploy.sh monitoring`은 다른 `deploy.sh` compose 호출과 같은 방법으로 태그 상태를 읽고(배포 전이면 자리표시 `unset`), 같은 `.env`와 같은 프로젝트에 `-f compose.monitoring.yml`을 더해 나머지 인자를 그대로 compose에 넘긴다. 앱·Caddy·배포 상태를 건드리지 않으므로 배포 잠금은 잡지 않는다.
+
+1. 파일 배치: `main` 배포 워크플로(`deploy.yml`)가 `compose.prod.yml`, `compose.monitoring.yml`, `deploy/`(→ `deploy/monitoring/` 포함)를 서버에 동기화한다. 동기화만으로 실행 중인 Prometheus·Grafana가 바뀌지는 않는다(아래 5번).
+2. `/opt/gongchae-bell/.env`(0600)에 키를 넣는다. 키 이름은 [`deploy/.env.prod.example`](../../deploy/.env.prod.example)에 있다.
+   - `GRAFANA_ADMIN_PASSWORD`: 필수. 비밀번호 관리자에서 만든다. Grafana는 이 값을 **처음 기동할 때만** 쓴다. 나중에 바꾸려면 `deploy/deploy.sh monitoring exec grafana grafana cli admin reset-admin-password <새 값>`을 쓴다.
+   - `OPS_DISCORD_WEBHOOK_URL`: 운영 디스코드 채널 웹훅. 비워 두면 전송 꺼짐(위 설명).
+   - `HEARTBEAT_COLLECTOR_URL`: 앱 설정이다. `compose.prod.yml`이 두 색 앱 환경으로 넘긴다. 값을 바꾸면 다음 앱 배포부터 적용된다.
+3. 기동: `deploy/deploy.sh monitoring up -d prometheus grafana`
+4. 접속: 내 PC에서 `ssh -L 3000:127.0.0.1:3000 <서버>` → `http://localhost:3000` (계정 `admin`). Prometheus 화면은 Grafana Explore로 본다. 대상 상태는 `deploy/deploy.sh monitoring exec prometheus wget -qO- localhost:9090/api/v1/targets`.
+5. 설정을 바꾼 뒤: 규칙·scrape 설정은 `deploy/deploy.sh monitoring kill -s SIGHUP prometheus`, Grafana 프로비저닝은 `deploy/deploy.sh monitoring restart grafana`, `.env` 값(웹훅·비밀번호)은 `deploy/deploy.sh monitoring up -d grafana`(다시 만듦).
 6. 외부 비공개 확인: 서버 밖에서 `curl -m 5 http://<공개 IP>:3000/`, `:9090`, `:8081`이 모두 연결 실패여야 한다. 서버에서 `ss -ltnp`로 3000이 `127.0.0.1`에만 열린 것을 본다. 결과를 아래 "실제 수신 확인" 기록에 같이 남긴다.
+7. **첫 정기 수집 확인.** 설치 시점에 수집이 꺼져 있으면(`COLLECTOR_ENABLED=false`, 최초 적재 전) 대시보드의 "마지막 완전 수집 경과"는 `No data`이고 수집 경보 둘은 울리지 않는다. 의도된 초기 상태다. [수집 운영](collector.md#운영-순서와-남은-게이트) 절차대로 `COLLECTOR_ENABLED=true`로 앱을 배포한 뒤 첫 매시 7분 슬롯이 지나고 1분쯤(scrape 30초) 뒤에 이 패널이 `No data`에서 분 단위 숫자로 바뀌고, Explore에서 `max(collector_last_complete_epoch) > 0`인지 본다. 이때부터 `GongchaeRegularCollectionStale`이 동작한다. 두 슬롯이 지나도 `No data`이면 첫 회차가 완료되지 못한 것이다. "미완료 회차" 패널, 앱 로그의 `COLLECTION_FAILED`, [수집 운영](collector.md#설정과-정기-수집)을 확인한다. 이 확인은 첫 성공 전에는 경보가 없는 구간을 사람이 메우는 단계이며 결과(시각, 패널 값)를 "실제 수신 확인" 표 아래에 적는다. heartbeat를 켰다면 같은 회차의 ping이 Healthchecks 체크에 찍히는지도 함께 본다.
 
-**배포와의 관계.** #14의 `deploy.sh`는 `compose.prod.yml` 하나로 앱만 다룬다. 그때 compose가 `Found orphan containers (prometheus, grafana)` 경고를 내지만 지우지는 않는다. `--remove-orphans`나 `compose.prod.yml`만으로 `down`을 하면 두 컨테이너가 지워진다(볼륨은 `-v` 없이는 남는다).
+**배포와의 관계.** #14의 `deploy.sh`는 `compose.prod.yml` 하나로 앱만 다룬다(`up -d --no-deps app-<색>`, `stop`, `rm`). 그때 compose가 `Found orphan containers (prometheus, grafana)` 경고를 내지만 지우지는 않는다. `compose-integration.sh`가 실제 Docker Compose에서 `deploy.sh`가 app-blue를 만들고 멈추고 지우는 동안 두 컨테이너가 같은 ID로 계속 실행되는 것을 확인한다. `--remove-orphans`나 `compose.prod.yml`만으로 `down`을 하면 두 컨테이너가 지워진다(볼륨은 `-v` 없이는 남는다).
 
 ## 지표
 
@@ -56,7 +64,7 @@
 
 | 지표 | 집계 시점과 분모 | blue/green |
 |---|---|---|
-| `http_server_requests_seconds_{bucket,count,sum}{uri,method,status,outcome,exception}` | 요청 처리가 끝날 때 앱 메모리에서 센다. 재시작하면 0부터. 버킷 5ms~10s. 패널과 규칙은 `uri=~"/actuator.*"`를 뺀다 | 색마다 `rate` 후 `sum`. 한 요청은 한 색만 처리한다 |
+| `http_server_requests_seconds_{bucket,count,sum}{uri,method,status,outcome,exception}` | 요청 처리가 끝날 때 앱 메모리에서 센다. 재시작하면 0부터. 버킷 5ms~30s(아래 "p95 읽는 법"). 패널과 규칙은 `uri=~"/actuator.*"`를 뺀다 | 색마다 `rate` 후 `sum`. 한 요청은 한 색만 처리한다 |
 | `gongchae_page_views_total{page,traffic}` | 화면 컨트롤러가 그 화면을 그리기로 했을 때(없는 공고 404는 세지 않음). `traffic=user`만 방문으로 본다. `bot`, `internal`(UptimeRobot·Healthchecks·G4 프로브)은 따로 센다. 고유 방문자가 아니라 요청 수다 | 색마다 `increase` 후 `sum` |
 | `gongchae_source_redirects_total{generic,traffic}` | 원문으로 302를 보낼 때. `generic=true`는 기관 공통 채용 페이지 | 위와 같다 |
 | `collector_*` (아래) | scrape할 때마다 DB를 읽는다. 재시작해도 값이 이어진다 | 두 색이 같은 값을 낸다. **`max`로만 읽는다** |
@@ -64,6 +72,8 @@
 | `up{job="gongchae-app",instance}` | Prometheus가 scrape할 때. 꺼진 색은 0 | 둘 중 하나라도 1이면 정상 |
 
 `collector_*` 게이지의 뜻은 [수집 운영](collector.md#운영-지표)에 있다. 경보에 쓰는 것은 `collector_regular_incomplete_consecutive`(최근 완전 수집 뒤의 정기 회차 수, 진행 중 포함), `collector_last_complete_epoch`(마지막 정기 완전 수집의 종료 시각, 없으면 0), `collector_api_attempts_today`(KST 오늘 예약 수)다.
+
+**p95 읽는 법.** 패널은 `histogram_quantile(0.95, …)`로 버킷 사이를 직선 보간한다. 버킷 상한은 30초다. 앱이 지원하는 가장 긴 요청이 25초 예산의 알림 신청·관리 링크 재발송 POST이고, 종료 유예가 30초라서다. 마지막 유한 버킷(30초)을 넘는 요청이 p95를 차지하면 값은 30으로 고정된다. 이것은 "30초 이상"이라는 뜻이며 예산을 넘긴 요청(GC·OS 정지, DB 불응)이 있었다는 신호다. 그 이상의 길이는 이 지표로 알 수 없다. 이전 상한 10초에서는 정상 범위의 10~25초 요청도 10으로 고정됐다(root P2). 30초 안의 값도 버킷 경계 사이의 보간값이다(예: 20초 요청만 있으면 17.18~22.91초 버킷 안에서 22.62). 시험: `MonitoringContractIntegrationTest`가 실제 scrape의 버킷 경계를, `gongchae.test.yml`이 패널 쿼리 그대로의 결과를 확인한다.
 
 **집계의 한계.** 카운터는 앱이 멈출 때 마지막 scrape 뒤의 증가분(최대 30초)을 잃는다. `increase()`는 구간 끝을 보간하므로 정수로 떨어지지 않는 근사다. 방문 수를 기록에 쓸 때는 이 조건을 같이 적는다. 보존 기간은 1년이다(ADR-0014).
 
@@ -124,12 +134,13 @@
 - 모두 DB 게이지라 두 색이 같은 값을 낸다. `max`로 읽는다. 라벨은 고정 집합인 `kind`(6종)만 쓴다. 구독 ID, 수신 주소, 웹훅, `last_error` 원문은 라벨에 넣지 않는다.
 - 묶음 heartbeat: #7이 `Heartbeat` 빈을 하나 더 만든다(예: `digestHeartbeat`, 설정 `heartbeat.digest-url` ← `HEARTBEAT_DIGEST_URL`). `collect_run(DIGEST, 날짜)`를 선점한 앱이 묶음 생성을 완료한 뒤에만 `ping()`한다. `RegularCollector`의 생성자 인자 이름이 `collectorHeartbeat`이라 빈이 둘이 되어도 주입이 모호해지지 않는다.
 
-## #14와 합칠 때
+## #14 통합 (2026-11-18)
 
-#14(PR #20)가 아직 main에 없어서 이 PR은 겹치는 파일을 고치지 않았다. 둘 다 머지된 뒤 한 번에 할 일:
-- `compose.prod.yml`의 앱 공통 환경에 `HEARTBEAT_COLLECTOR_URL: ${HEARTBEAT_COLLECTOR_URL:-}` 한 줄, `deploy/.env.prod.example`에 키 이름. 그 전에는 운영 앱에 heartbeat URL이 닿지 않는다(기본 꺼짐과 같다).
-- `docs/runbook.md`에 이 문서의 "설치"로 가는 링크, `CHANGELOG.md`에 모니터링 항목.
-- 실제 `compose.prod.yml` 위에서 `docker compose -f compose.prod.yml -f compose.monitoring.yml config`가 통과하는지와 `deploy.sh` 배포 뒤 두 컨테이너가 남는지 확인한다. 지금은 같은 망 구성을 흉내 낸 시험용 base(`deploy/monitoring/tests/compose.e2e.yml`) 위에서만 확인했다.
+#14가 main에 병합된 뒤(`be30f69`) 이 브랜치에 받아 합쳤다.
+- `compose.prod.yml`의 앱 공통 환경에 `HEARTBEAT_COLLECTOR_URL: ${HEARTBEAT_COLLECTOR_URL:-}`, `deploy/.env.prod.example`에 `HEARTBEAT_COLLECTOR_URL`·`GRAFANA_ADMIN_PASSWORD`·`OPS_DISCORD_WEBHOOK_URL` 키 이름(따로 있던 `deploy/monitoring/.env.example`은 지웠다)
+- `deploy.sh monitoring` 하위 명령(위 "설치"), `deploy.yml` 동기화 대상에 `compose.monitoring.yml`
+- `docs/runbook.md` §7에 이 문서 링크, `CHANGELOG.md`에 항목
+- 검증: `compose-integration.sh`가 실제 `compose.prod.yml` + overlay + `deploy.sh`로 합성 값만 써서 위 내용을 확인한다(아래 "시험"). 경보 대역 시험(`alert-e2e.sh`)은 그대로 망 구성을 흉내 낸 시험용 base(`compose.e2e.yml`)에서 실제 앱 jar로 돈다. 운영 서버 적용은 하지 않았다.
 
 ## 시험
 
@@ -137,8 +148,10 @@
 |---|---|---|
 | `HeartbeatTest` | 꺼짐이면 요청 없음, 성공 GET 1회, 500·302·연결 실패는 예외 없이 URL 없는 로그, 잘못된 URL은 URL 없는 오류 | `./gradlew check` |
 | `RuntimeDatabaseTest` | 두 앱이 같은 슬롯을 동시에 돌려도 ping 1회, 실패 회차는 ping 없음, 같은 슬롯 재실행은 ping 없음 | `./gradlew check` (Testcontainers) |
-| `MonitoringContractIntegrationTest` | 규칙·대시보드·시험 파일이 읽는 모든 앱 지표가 실제 `/actuator/prometheus`에 있음, `/jobs` 히스토그램 버킷, 한도 게이지 500·900, 검색어·원래 경로가 scrape에 없음 | `./gradlew check` |
-| `gongchae.test.yml` | 규칙 6개의 발동·비발동·복구, 두 색 중복(경보 1개), 수집 전 0, 한도 설정을 낮춘 경우, 낮은 트래픽의 오류 1건 | CI `Monitoring / rules` |
+| `MonitoringContractIntegrationTest` | 규칙·대시보드·시험 파일이 읽는 모든 앱 지표가 실제 `/actuator/prometheus`에 있음, `/jobs` 히스토그램 버킷, 한도 게이지 500·900, 검색어·원래 경로가 scrape에 없음. 실제 `http.server.requests` 미터에 합성 20초 요청을 기록해 scrape의 마지막 유한 버킷이 25초 이상이고 p95가 10초에 고정되지 않음, 대시보드 p95 쿼리와 버킷 경계가 promtool 시험에 그대로 있음 | `./gradlew check` |
+| `gongchae.test.yml` | 규칙 6개의 발동·비발동·복구, 두 색 중복(경보 1개), 수집 전 0, 한도 설정을 낮춘 경우, 낮은 트래픽의 오류 1건. 대시보드 p95 쿼리(그대로)가 20초 요청에 22.62, 30초를 넘는 요청에 30을 냄 | CI `Monitoring / rules` |
+| `compose-integration.sh` | 실제 Docker Compose, 실제 `compose.prod.yml`·overlay·`deploy.sh`, 합성 값과 대체 이미지. ① `.env` 규약(빈 태그)으로 직접 compose하면 보간 실패 ② `deploy.sh monitoring config`가 두 파일을 합치고 두 색 앱에 heartbeat URL, Grafana는 `127.0.0.1` 포트만, Prometheus는 포트 없음, 공개 포트는 Caddy와 Grafana 루프백뿐 ③ `deploy.sh monitoring up`으로 두 컨테이너 기동, 앱 컨테이너에 heartbeat URL 전달, `deploy.sh bootstrap`이 app-blue를 만들고 준비 실패로 멈추고 지우는 동안 두 컨테이너가 같은 ID로 실행, `deploy.sh monitoring restart grafana` | CI `Monitoring / compose-integration` |
+| `deploy-test.sh` [16/16] | `deploy.sh monitoring`: 태그를 `deploy/state`에서 읽음(배포 전 `unset`), 같은 프로젝트·`.env`, 배포 잠금을 쥔 상태에서도 실행, 앱·배포 상태 무변경, 인자 없음·overlay 없음은 docker 호출 전에 실패. 이 분기가 없으면 `monitoring`이 이미지 태그로 읽혀 bootstrap이 실행되는 것을 변이로 확인 | CI `CI / deploy-verify` |
 | `alert-e2e.sh` | 실제 앱 jar + 새 DB + 이 저장소의 Prometheus·Grafana 설정 + 디스코드 대역: 웹훅 없이 Grafana 기동, scrape, 대시보드 쿼리 전부 오류 없음, `api_budget`을 950으로 넣어 경고·차단이 각각 발동 메시지로 대역에 닿고, 지우면 각각 해제 메시지가 닿음 | CI `Monitoring / alert-e2e` |
 
 ### 대역 시험 기록

@@ -15,6 +15,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="${DEPLOY_ROOT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 COMPOSE_FILE="${COMPOSE_FILE:-$ROOT_DIR/compose.prod.yml}"
+MONITORING_COMPOSE_FILE="${MONITORING_COMPOSE_FILE:-$ROOT_DIR/compose.monitoring.yml}"
 ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env}"
 CADDY_TEMPLATES_DIR="${CADDY_TEMPLATES_DIR:-$ROOT_DIR/deploy/caddy}"
 STATE_DIR="${DEPLOY_STATE_DIR:-$ROOT_DIR/deploy/state}"
@@ -828,6 +829,7 @@ Usage:
   deploy.sh abort --deploy-id ID [--if-pending]
   deploy.sh rollback [--phase full|switch] [--deploy-id ID]
   deploy.sh status
+  deploy.sh monitoring <docker compose args>   (#15 overlay, e.g. monitoring up -d prometheus grafana)
   deploy.sh <image_tag>    (shorthand for: deploy <image_tag> --mode auto --phase full)
 
 Notes:
@@ -935,6 +937,17 @@ main() {
           ;;
         *) fail "Invalid --mode: $mode" ;;
       esac
+      return 0
+      ;;
+    monitoring)
+      # #15 overlay on the same Compose project (docs/ops/monitoring.md). compose.prod.yml requires APP_BLUE_TAG and
+      # APP_GREEN_TAG, which live in deploy/state, not in .env: read them like every other compose call here. No deploy
+      # lock: these commands do not touch the apps, Caddy or the deploy state.
+      shift
+      [[ $# -gt 0 ]] || fail "monitoring requires docker compose arguments, e.g. 'monitoring up -d prometheus grafana'"
+      [[ -f "$MONITORING_COMPOSE_FILE" ]] || fail "MONITORING_FILE_MISSING $MONITORING_COMPOSE_FILE"
+      export_color_tags
+      compose -f "$MONITORING_COMPOSE_FILE" "$@"
       return 0
       ;;
     -h|--help)

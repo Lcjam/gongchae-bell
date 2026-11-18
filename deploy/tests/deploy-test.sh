@@ -73,6 +73,9 @@ EOF
 set -euo pipefail
 LOG_DIR="${MOCK_LOG_DIR:?}"
 echo "docker $*" >>"$LOG_DIR/commands.log"
+if [[ "$*" == *compose.monitoring.yml* ]]; then
+  echo "monitoring-tags blue=${APP_BLUE_TAG:-} green=${APP_GREEN_TAG:-}" >>"$LOG_DIR/commands.log"
+fi
 
 if [[ "${1:-}" == "compose" ]]; then
   shift
@@ -253,14 +256,14 @@ EOF
         MOCK_FAIL_CADDY_VALIDATE MOCK_FAIL_CADDY_RELOAD MOCK_FAIL_ROLLBACK_RELOAD \
         MOCK_FAIL_READY_BLUE MOCK_FAIL_READY_GREEN MOCK_FAIL_ROUTE_GREEN \
         MOCK_FAIL_STOP MOCK_FAIL_STOP_SILENT MOCK_FAIL_RM MOCK_FAIL_PS \
-        MOCK_POST_SWITCH_FAIL MOCK_G4_STATUS_SEQUENCE POST_SWITCH_HOOK G4_HOOK || true
+        MOCK_POST_SWITCH_FAIL MOCK_G4_STATUS_SEQUENCE POST_SWITCH_HOOK G4_HOOK MONITORING_COMPOSE_FILE || true
 }
 
-echo "=== [1/15] bash -n syntax check ==="
+echo "=== [1/16] bash -n syntax check ==="
 bash -n "$DEPLOY_SH"
 bash -n "$G4_SH"
 
-echo "=== [2/15] bootstrap vs bluegreen separation & two-phase ADR-0005 happy path ==="
+echo "=== [2/16] bootstrap vs bluegreen separation & two-phase ADR-0005 happy path ==="
 setup_env happy_twophase
 if "$DEPLOY_SH" deploy sha-111 --mode bluegreen --deploy-id dep-bad 2>/dev/null; then
   echo "Expected bluegreen before bootstrap to fail" >&2
@@ -307,7 +310,7 @@ assert_file_contains "$MOCK_LOG_DIR/commands.log" "stop -t 40 app-blue" "old blu
 [[ ! -f "$MOCK_LOG_DIR/running_app-blue" ]] || { echo "app-blue should be stopped after finalize" >&2; exit 1; }
 [[ ! -f "$DEPLOY_STATE_DIR/pending_deploy_id" ]] || { echo "pending_deploy_id should be cleared after finalize" >&2; exit 1; }
 
-echo "=== [3/15] external G4 failure triggers instant abort to still-running old color ==="
+echo "=== [3/16] external G4 failure triggers instant abort to still-running old color ==="
 setup_env g4_fail_abort
 "$DEPLOY_SH" bootstrap sha-111 --deploy-id boot-1 >/dev/null
 "$DEPLOY_SH" deploy sha-222 --mode bluegreen --phase switch --deploy-id dep-fail >/dev/null
@@ -333,7 +336,7 @@ assert_file_contains "$MOCK_LOG_DIR/commands.log" "stop -t 40 app-green" "failed
 "$DEPLOY_SH" abort --deploy-id dep-fail --if-pending
 assert_file_not_contains "$MOCK_LOG_DIR/commands.log" "caddy reload" "abort --if-pending no-op when clean"
 
-echo "=== [4/15] interrupted pending deploy blocks new deploys & allows manual rollback rescue ==="
+echo "=== [4/16] interrupted pending deploy blocks new deploys & allows manual rollback rescue ==="
 setup_env interrupted_pending
 "$DEPLOY_SH" bootstrap sha-111 --deploy-id boot-1 >/dev/null
 "$DEPLOY_SH" deploy sha-222 --mode bluegreen --phase switch --deploy-id dep-int >/dev/null
@@ -364,7 +367,7 @@ assert_eq "blue" "$(cat "$DEPLOY_STATE_DIR/active_color")" "manual rollback rest
 assert_file_contains "$CADDY_RUNTIME_DIR/upstream.caddy" "app-blue:8080" "manual rollback restores blue upstream"
 [[ ! -f "$DEPLOY_STATE_DIR/pending_deploy_id" ]] || { echo "pending cleared after manual rollback" >&2; exit 1; }
 
-echo "=== [5/15] pre-switch failure preserves active color & never reloads Caddy ==="
+echo "=== [5/16] pre-switch failure preserves active color & never reloads Caddy ==="
 setup_env pre_fail
 "$DEPLOY_SH" bootstrap sha-111 >/dev/null
 : >"$MOCK_LOG_DIR/commands.log"
@@ -379,7 +382,7 @@ assert_file_contains "$CADDY_RUNTIME_DIR/upstream.caddy" "app-blue:8080" "upstre
 assert_file_contains "$MOCK_LOG_DIR/commands.log" "stop -t 40 app-green" "failed green stopped"
 assert_file_not_contains "$MOCK_LOG_DIR/commands.log" "caddy reload" "Caddy reload must NOT run on pre-switch failure"
 
-echo "=== [6/15] Caddy validate failure reverts staged file & preserves active ==="
+echo "=== [6/16] Caddy validate failure reverts staged file & preserves active ==="
 setup_env validate_fail
 "$DEPLOY_SH" bootstrap sha-111 >/dev/null
 export MOCK_FAIL_CADDY_VALIDATE=1
@@ -392,7 +395,7 @@ assert_file_contains "$CADDY_RUNTIME_DIR/upstream.caddy" "app-blue:8080" "upstre
 [[ ! -f "$CADDY_RUNTIME_DIR/upstream.caddy.next" ]] || { echo "upstream.caddy.next leaked" >&2; exit 1; }
 [[ ! -f "$DEPLOY_STATE_DIR/pending_deploy_id" ]] || { echo "pending_deploy_id leaked on validate fail" >&2; exit 1; }
 
-echo "=== [7/15] Caddy reload failure restores upstream.caddy & clears pending ==="
+echo "=== [7/16] Caddy reload failure restores upstream.caddy & clears pending ==="
 setup_env reload_fail
 "$DEPLOY_SH" bootstrap sha-111 >/dev/null
 export MOCK_FAIL_CADDY_RELOAD=1
@@ -404,7 +407,7 @@ assert_eq "blue" "$(cat "$DEPLOY_STATE_DIR/active_color")" "active remains blue"
 assert_file_contains "$CADDY_RUNTIME_DIR/upstream.caddy" "app-blue:8080" "upstream restored to blue"
 [[ ! -f "$DEPLOY_STATE_DIR/pending_deploy_id" ]] || { echo "pending_deploy_id leaked on reload fail" >&2; exit 1; }
 
-echo "=== [8/15] post-switch local failure rolls back Caddy immediately & keeps active ==="
+echo "=== [8/16] post-switch local failure rolls back Caddy immediately & keeps active ==="
 setup_env post_fail
 "$DEPLOY_SH" bootstrap sha-111 >/dev/null
 export MOCK_POST_SWITCH_FAIL=1
@@ -418,7 +421,7 @@ assert_file_contains "$CADDY_RUNTIME_DIR/upstream.caddy" "app-blue:8080" "upstre
 assert_file_contains "$MOCK_LOG_DIR/commands.log" "stop -t 40 app-green" "failed green cleaned up"
 [[ ! -f "$DEPLOY_STATE_DIR/pending_deploy_id" ]] || { echo "pending_deploy_id leaked on post-switch fail" >&2; exit 1; }
 
-echo "=== [9/15] state mismatch without pending_deploy_id fails closed ==="
+echo "=== [9/16] state mismatch without pending_deploy_id fails closed ==="
 setup_env mismatch
 "$DEPLOY_SH" bootstrap sha-111 >/dev/null
 cp -f "$REPO_ROOT/deploy/caddy/upstream.green.caddy" "$CADDY_RUNTIME_DIR/upstream.caddy"
@@ -432,7 +435,7 @@ if grep -qE "up -d|stop|caddy reload" "$MOCK_LOG_DIR/commands.log"; then
   exit 1
 fi
 
-echo "=== [10/15] post-commit two-phase rollback restores prev_color after G4 finalize ==="
+echo "=== [10/16] post-commit two-phase rollback restores prev_color after G4 finalize ==="
 setup_env post_rollback
 "$DEPLOY_SH" bootstrap sha-111 --deploy-id boot-1 >/dev/null
 "$DEPLOY_SH" deploy sha-222 --mode bluegreen --phase switch --deploy-id dep-2 >/dev/null
@@ -447,7 +450,7 @@ assert_eq "sha-111" "$(cat "$DEPLOY_STATE_DIR/active_sha")" "rolled back to sha-
 assert_eq "rb-3" "$(cat "$DEPLOY_STATE_DIR/active_deploy_id")" "rollback deploy_id recorded"
 assert_file_contains "$MOCK_LOG_DIR/commands.log" "stop -t 40 app-green" "green stopped after rollback finalize"
 
-echo "=== [11/15] standalone G4_HOOK failure aborts before stopping old color ==="
+echo "=== [11/16] standalone G4_HOOK failure aborts before stopping old color ==="
 setup_env g4_hook_fail
 "$DEPLOY_SH" bootstrap sha-111 --deploy-id boot-1 >/dev/null
 cat >"$CASE_DIR/fail-g4.sh" <<'EOF'
@@ -464,7 +467,7 @@ assert_eq "blue" "$(cat "$DEPLOY_STATE_DIR/active_color")" "active remains blue 
 assert_file_contains "$CADDY_RUNTIME_DIR/upstream.caddy" "app-blue:8080" "upstream reverted to blue"
 assert_file_not_contains "$MOCK_LOG_DIR/commands.log" "stop -t 40 app-blue" "old blue never stopped"
 
-echo "=== [12/15] flock concurrency exclusion & G4 external probe checks ==="
+echo "=== [12/16] flock concurrency exclusion & G4 external probe checks ==="
 setup_env flock_and_g4
 "$DEPLOY_SH" bootstrap sha-111 >/dev/null
 export LOCK_WAIT_SECONDS=0
@@ -498,7 +501,7 @@ for bad_seq in "200,502,200" "200,TIMEOUT,200" "200,TLS_ERR,200" "200,404,200"; 
   fi
 done
 
-echo "=== [13/15] interrupted finalize metadata recovery (abort, finalize retry, duplicate calls, next deploy) ==="
+echo "=== [13/16] interrupted finalize metadata recovery (abort, finalize retry, duplicate calls, next deploy) ==="
 REAL_MV="$(command -v mv)"
 REAL_RM="$(command -v rm)"
 
@@ -634,7 +637,7 @@ assert_file_contains "$CASE_DIR/orphan-status.txt" "pending_color=none" "status 
 "$DEPLOY_SH" finalize --deploy-id dep-4 >/dev/null
 assert_eq "green" "$(cat "$DEPLOY_STATE_DIR/active_color")" "next deploy cleans orphans and succeeds"
 
-echo "=== [14/15] CLI full deploy & post-commit rollback enforce G4_HOOK (bootstrap & pending abort preserved) ==="
+echo "=== [14/16] CLI full deploy & post-commit rollback enforce G4_HOOK (bootstrap & pending abort preserved) ==="
 setup_env cli_g4_required
 # Shorthand on fresh server uses bootstrap without G4_HOOK
 "$DEPLOY_SH" sha-111 >/dev/null
@@ -705,7 +708,7 @@ unset G4_HOOK
 assert_eq "blue" "$(cat "$DEPLOY_STATE_DIR/active_color")" "pending rollback works without G4_HOOK"
 [[ ! -f "$DEPLOY_STATE_DIR/pending_deploy_id" ]] || { echo "pending cleared after pending rollback" >&2; exit 1; }
 
-echo "=== [15/15] stop/rm error propagation, idempotency, and finalize retry ==="
+echo "=== [15/16] stop/rm error propagation, idempotency, and finalize retry ==="
 # 15a: stop failure (and silent no-op stop leaving container running) -> non-zero, pending kept, active unchanged, retry succeeds
 setup_env stop_rm_failures
 "$DEPLOY_SH" bootstrap sha-111 --deploy-id boot-1 >/dev/null
@@ -761,5 +764,33 @@ rm -f "$MOCK_LOG_DIR/running_app-green" "$MOCK_LOG_DIR/container_app-green"
 "$DEPLOY_SH" finalize --deploy-id dep-3 >/dev/null
 assert_eq "blue" "$(cat "$DEPLOY_STATE_DIR/active_color")" "finalize succeeds idempotently when container already removed"
 [[ ! -f "$DEPLOY_STATE_DIR/pending_deploy_id" ]] || { echo "pending cleared after idempotent finalize" >&2; exit 1; }
+
+echo "=== [16/16] monitoring overlay: deploy/state tags, same project, no deploy lock or state change ==="
+setup_env monitoring_overlay
+export MONITORING_COMPOSE_FILE="$CASE_DIR/compose.monitoring.yml"
+printf '# dummy overlay for mock docker
+' >"$MONITORING_COMPOSE_FILE"
+# Before any deploy there is no tag state: the placeholder keeps compose.prod.yml's required tags satisfied.
+"$DEPLOY_SH" monitoring config -q
+assert_file_contains "$MOCK_LOG_DIR/commands.log" "docker compose -f $COMPOSE_FILE --env-file $ENV_FILE -f $MONITORING_COMPOSE_FILE config -q" "overlay on the same project and env file"
+assert_file_contains "$MOCK_LOG_DIR/commands.log" "monitoring-tags blue=unset green=unset" "placeholder tags before bootstrap"
+"$DEPLOY_SH" bootstrap sha-111 --deploy-id boot-1 >/dev/null
+state_before="$(cd "$DEPLOY_STATE_DIR" && for f in active_color active_sha blue_tag; do printf '%s=%s;' "$f" "$(cat "$f")"; done)"
+: >"$MOCK_LOG_DIR/commands.log"
+# Holding the deploy lock does not block it: monitoring never takes the lock (it touches no app, Caddy or state).
+( exec 8>"$DEPLOY_LOCK_FILE"; flock 8; "$DEPLOY_SH" monitoring up -d prometheus grafana )
+assert_file_contains "$MOCK_LOG_DIR/commands.log" "$ENV_FILE -f $MONITORING_COMPOSE_FILE up -d prometheus grafana" "monitoring up passes compose args"
+assert_file_contains "$MOCK_LOG_DIR/commands.log" "monitoring-tags blue=sha-111 green=unset" "tags come from deploy/state, not .env"
+assert_file_not_contains "$MOCK_LOG_DIR/commands.log" "app-" "monitoring never starts or stops an app"
+state_after="$(cd "$DEPLOY_STATE_DIR" && for f in active_color active_sha blue_tag; do printf '%s=%s;' "$f" "$(cat "$f")"; done)"
+assert_eq "$state_before" "$state_after" "deploy state unchanged by monitoring"
+[[ ! -f "$DEPLOY_STATE_DIR/pending_deploy_id" ]] || { echo "monitoring must not create a pending deploy" >&2; exit 1; }
+# Fail closed before any docker call: no arguments, or no overlay file.
+: >"$MOCK_LOG_DIR/commands.log"
+if "$DEPLOY_SH" monitoring 2>/dev/null; then echo "Expected monitoring without arguments to fail" >&2; exit 1; fi
+rm -f "$MONITORING_COMPOSE_FILE"
+if "$DEPLOY_SH" monitoring ps 2>/dev/null; then echo "Expected monitoring without the overlay file to fail" >&2; exit 1; fi
+[[ ! -s "$MOCK_LOG_DIR/commands.log" ]] || { echo "no docker call expected on a refused monitoring command" >&2; cat "$MOCK_LOG_DIR/commands.log" >&2; exit 1; }
+unset MONITORING_COMPOSE_FILE
 
 echo "ALL_DEPLOY_TESTS_PASSED"

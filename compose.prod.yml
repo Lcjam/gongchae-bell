@@ -27,6 +27,8 @@ x-app-common: &app-common
     COLLECTOR_SERVICE_KEY: ${COLLECTOR_SERVICE_KEY:-}
     COLLECTOR_WARNING_LIMIT: ${COLLECTOR_WARNING_LIMIT:-500}
     COLLECTOR_STOP_LIMIT: ${COLLECTOR_STOP_LIMIT:-900}
+    # #15 Healthchecks.io ping after each complete regular run (secret URL; blank = off).
+    HEARTBEAT_COLLECTOR_URL: ${HEARTBEAT_COLLECTOR_URL:-}
     # M2 (#6) compatibility keys (all alerts disabled by default until M2 rollout)
     ALERTS_ENABLED: ${ALERTS_ENABLED:-false}
     ALERTS_TOKEN_KEY: ${ALERTS_TOKEN_KEY:-}

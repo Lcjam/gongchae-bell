@@ -17,6 +17,13 @@ jobs:
             -v "$PWD/deploy/monitoring/prometheus/rules:/etc/prometheus/rules:ro" -w "$1" --entrypoint promtool prom/prometheus:v3.16.0 "${@:2}"; }
           promtool /w check config prometheus.yml
           promtool /w/tests test rules gongchae.test.yml
+  compose-integration:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Overlay on the real compose.prod.yml through deploy.sh (synthetic values, stand-in app image)
+        run: deploy/monitoring/tests/compose-integration.sh
   alert-e2e:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 25

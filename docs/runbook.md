@@ -219,6 +219,8 @@ docker compose -f compose.prod.yml --profile blue --profile green ps
 ## 7. 후속 연동 인터페이스 (#15 관측 · #16 백업)
 
 - **#15 관측**: `app-blue`/`app-green`은 `MANAGEMENT_ADDRESS=0.0.0.0`으로 Docker 내부망 `:8081`(`/actuator/health/readiness`, `/actuator/prometheus`)만 노출한다. 호스트 포트는 열지 않는다.
+  - Prometheus·Grafana는 `compose.monitoring.yml` overlay로 같은 프로젝트에 띄운다. 설치·재기동·점검 명령은 **`deploy/deploy.sh monitoring <docker compose 인자>`**로 실행한다(예: `deploy/deploy.sh monitoring up -d prometheus grafana`). 앱 태그를 `deploy/state`에서 읽기 때문이며, `docker compose -f compose.prod.yml -f compose.monitoring.yml`을 직접 치면 `APP_BLUE_TAG` 보간 오류로 실패한다. 앱 배포(`deploy.sh` 본 명령)는 모니터링 컨테이너를 지우지 않는다. 절차·경보·첫 정기 수집 확인은 [모니터링과 경보](ops/monitoring.md#설치-운영-서버-후속-실행)를 따른다.
+  - 앱 heartbeat `HEARTBEAT_COLLECTOR_URL`과 모니터링 키(`GRAFANA_ADMIN_PASSWORD`, `OPS_DISCORD_WEBHOOK_URL`)는 같은 `/opt/gongchae-bell/.env`에 둔다(키 이름은 `deploy/.env.prod.example`).
 - **#16 백업 (ADR-0012 / ADR-0013)**:
   - 일일 논리 백업 대상은 **실행 중인 `postgres` 컨테이너에서 추출한 `pg_dump -Fc` 결과물**과 **호스트의 `${ERASURE_HOST_DIR}/erasure.log`(해지 대장)**이다. 이를 `restic`으로 암호화해 OCI Object Storage에 보관한다.
   - **실행 중인 PostgreSQL 데이터 볼륨(`postgres_data`) 파일 직접 복사는 일일 논리 백업 인터페이스로 사용하지 않는다.**
@@ -229,7 +231,7 @@ docker compose -f compose.prod.yml --profile blue --profile green ps
 ## 8. 현재 검증 범위와 남은 운영 실행 조건
 
 - **소스·구문·대역 검증 (본 브랜치 `ops/#14-bluegreen-deploy`)**:
-  - `deploy/tests/deploy-test.sh` (모의 `docker`/`curl` + 실제 `flock` 기반 15개 시나리오), `deploy/tests/caddy-integration-test.sh` (실제 `caddy:2-alpine` 기반 헤더·access/502 error 로그 마스킹·IP 경계·reload 전환), `docker compose -f compose.prod.yml --profile blue --profile green config -q`, `Dockerfile` ARM64/컨테이너 빌드, `./gradlew check bootJar`(`DeploymentConfigIntegrationTest` 포함), Gitleaks 스캔으로 검증한다.
+  - `deploy/tests/deploy-test.sh` (모의 `docker`/`curl` + 실제 `flock` 기반 16개 시나리오, 16번은 `deploy.sh monitoring`), `deploy/tests/caddy-integration-test.sh` (실제 `caddy:2-alpine` 기반 헤더·access/502 error 로그 마스킹·IP 경계·reload 전환), `docker compose -f compose.prod.yml --profile blue --profile green config -q`, `Dockerfile` ARM64/컨테이너 빌드, `./gradlew check bootJar`(`DeploymentConfigIntegrationTest` 포함), Gitleaks 스캔으로 검증한다.
 - **남은 실서버 운영 실행 조건 (후속 실행 단계에서 기록)**:
   1. OCI VM 최초 준비 및 `bootstrap` 실행, HTTPS(`https://gongchae.enjoylcjworld.com`) 확인
   2. 실제 `main` 머지 자동 배포(`bluegreen`)의 G4 외부 시험 0건 실측 기록 (CI `g4-probe-report`)

@@ -48,12 +48,14 @@ management:
   metrics:
     distribution:
       # Buckets for the Prometheus p95 (docs/ops/monitoring.md); the range bounds how many buckets each series gets.
+      # 30 s: the longest supported request is an alert POST with its 25 s budget, and graceful shutdown waits 30 s.
+      # Past the last finite bucket the p95 reads as that bound (histogram_quantile), meaning "30 s or more".
       percentiles-histogram:
         "[http.server.requests]": true
       minimum-expected-value:
         "[http.server.requests]": 5ms
       maximum-expected-value:
-        "[http.server.requests]": 10s
+        "[http.server.requests]": 30s
 
 heartbeat:
   # Healthchecks.io ping URL (ADR-0006). Blank = off. The URL contains the check id: env/Secrets only, never logged.
