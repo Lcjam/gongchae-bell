@@ -449,6 +449,13 @@ class DeliveryLedgerTest {
         assertThat(attempts).extracting(a -> a.result().outcome()).containsExactly(SendOutcome.TIMEOUT);
         assertThat(requests).containsExactly(Duration.ofSeconds(10));
         assertThat(timer.nanoTime() - start).as("no sleep for a retry that cannot start").isEqualTo(Duration.ofSeconds(11).toNanos());
+
+        // Exactly 13 s fit before the sleep, but the sleep overruns by 1 ms: measured again, the retry still does not start.
+        requests.clear();
+        timer.onSleep = () -> timer.advance(Duration.ofMillis(1));
+        attempts = discord.testWebhook(WebhookUrl.parse("https://discord.com/api/webhooks/1/token").orElseThrow(), "{}".getBytes(UTF_8), timer.nanoTime());
+        assertThat(attempts).extracting(a -> a.result().outcome()).containsExactly(SendOutcome.TIMEOUT);
+        assertThat(requests).containsExactly(Duration.ofSeconds(10));
     }
 
     @Test

@@ -202,7 +202,8 @@ public class SyncSender {
         List<WebhookAttempt> attempts = new ArrayList<>();
         byte[] totalKey = crypto.limitKey("SEND_TOTAL", "discord");
         for (int no = 1; no <= DeliveryLedger.MAX_ATTEMPTS; no++) {
-            if (remaining(start).compareTo(MIN_START) < 0) break;
+            // A retry is measured again after its sleep, which may overrun: still a failed test, not a 503 (agy C4 round 2)
+            if (no > 1 ? !roomForNext(start, Duration.ZERO) : remaining(start).compareTo(MIN_START) < 0) break;
             if (!limits.acquire(RateLimiter.Scope.SEND_TOTAL, totalKey, RateLimiter.DISCORD_TOTAL, () -> waitLimit(start).minus(MIN_HTTP))) break;
             Duration timeout = min(HTTP_MAX, waitLimit(start));  // DNS check and request share it (C5)
             if (timeout.compareTo(MIN_HTTP) < 0) break;
