@@ -9,7 +9,7 @@
 | 웹 생존 | UptimeRobot 외부 HTTP(5분) | 계정 설정 전 |
 | 정기 수집 | Healthchecks.io heartbeat(앱이 보냄) + Prometheus 경보 | 앱 쪽 구현, 기본 꺼짐 |
 | 이메일 묶음 | Healthchecks.io heartbeat | #7 구현 뒤 ([M2 통합 계약](#m2-발송-지표-통합-계약-7-대기)) |
-| 백업, NAS·PC 가져오기 | Healthchecks.io heartbeat(호스트 스크립트가 보냄) | #16, #17 |
+| 백업, NAS·PC 가져오기 | Healthchecks.io heartbeat(호스트 스크립트가 보냄) | 백업 #16 구현(계정 연결 전), NAS·PC #17 |
 | HTTP p95·오류율, 화면 요청·원문 이동, 마지막 완전 수집, 연속 미완료, API 일 예산 | Prometheus → Grafana 대시보드, Prometheus 규칙 → Grafana → 운영 디스코드 | 구현, 대역 시험 통과 |
 | 발송 적체·실패·결과 불명확 | Prometheus | #7 구현 뒤. 지금은 지표가 없다 |
 
@@ -108,7 +108,7 @@
 |---|---|---|---|---|
 | `gongchae-collector` | 앱 `RegularCollector`, `HEARTBEAT_COLLECTOR_URL` | cron `7 * * * *` | 70분: 한 슬롯을 놓치면 다음 슬롯까지 기다리고, 두 슬롯을 놓치면 울린다 | 구현, 기본 꺼짐 |
 | `gongchae-digest` | 앱 묶음 생성(#7), `HEARTBEAT_DIGEST_URL`(안) | cron `0 8 * * *` | #7에서 정한다(당일 만회 1회를 고려) | 미구현 |
-| `gongchae-backup` | 호스트 `backup.sh`(#16) 성공 뒤 | cron `0 3 * * *` | 2시간(안) | 미구현 |
+| `gongchae-backup` | 호스트 `deploy/backup/backup.sh`(#16), `HEALTHCHECKS_BACKUP_URL`. 성공 뒤 ping, 실패 시 `/fail` | cron `0 3 * * *` | 2시간(안) | 구현(#16 병합), 계정 연결 전 |
 | `gongchae-nas-pull` | NAS·PC의 `restic copy`(#17) 성공 뒤 | #17의 실행 주기 | "며칠"(ADR-0012) → 1일 주기 + 2일 유예(안) | 미구현 |
 
 앱 heartbeat의 동작:
@@ -116,7 +116,7 @@
 - `GET` 한 번, 연결·응답 5초 제한, 리다이렉트는 따르지 않고, 재시도하지 않는다. 실패는 `HEARTBEAT_FAILED collector <HTTP_상태|예외 이름>`으로만 로그에 남기고 수집 결과를 바꾸지 않는다. 놓친 ping은 Healthchecks의 유예가 흡수하고, 이어지면 Healthchecks가 울린다.
 - URL은 http·https만 받는다. 형식이 틀리면 `INVALID_HEARTBEAT_URL`로 시작하지 않으며 오류에 URL을 넣지 않는다.
 
-호스트 스크립트(#16, #17)는 성공한 뒤에만 `curl -fsS -m 10 --retry 3 -o /dev/null "$HC_BACKUP_URL"` 형태로 보낸다. URL을 명령 인자로 출력하지 않는다.
+호스트 백업(#16)은 덤프 검증·restic 백업·보관 정리가 모두 성공한 뒤에만 성공 ping을, 그 외에는 `/fail`을 보낸다(`curl -fsS --connect-timeout 5 --max-time 10 -X POST`, 재시도 없음, 로그에서 URL 마스킹). 설정 파일을 읽기 전의 실패는 `/fail` 없이 미수신 경보로 드러난다. 상세는 [백업과 복구](backup-restore.md). #17의 NAS·PC pull도 같은 방식으로 붙인다.
 
 ## M2 발송 지표 통합 계약 (#7 대기)
 
