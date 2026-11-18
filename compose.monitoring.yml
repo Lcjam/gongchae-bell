@@ -1,5 +1,6 @@
-# #15 monitoring overlay (ADR-0006). Use it on top of compose.prod.yml, same project, never alone:
-#   docker compose -f compose.prod.yml -f compose.monitoring.yml up -d prometheus grafana
+# #15 monitoring overlay (ADR-0006). Use it on top of compose.prod.yml, same project, never alone, through deploy.sh
+# (it reads the app tags from deploy/state, which raw `docker compose -f ... -f ...` cannot interpolate):
+#   deploy/deploy.sh monitoring up -d prometheus grafana
 # It adds no app setting: deploy.sh keeps managing app-blue/app-green with compose.prod.yml only.
 # Nothing is reachable from the internet: Prometheus has no host port, Grafana listens on the host loopback for an
 # SSH tunnel only. Steps, thresholds and the alert test are in docs/ops/monitoring.md.

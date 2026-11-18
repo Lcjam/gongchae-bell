@@ -187,7 +187,17 @@ default_deploy_id() {
 
 ensure_dirs_and_cleanup_trap() {
   mkdir -p "$STATE_DIR" "$CADDY_RUNTIME_DIR"
-  trap 'rm -f "$CADDY_RUNTIME_DIR/upstream.caddy.next" "$STATE_DIR"/*.tmp.$$' EXIT
+  trap cleanup_on_exit EXIT
+}
+
+# upstream.caddy.next is shared: only the run that staged it (under the deploy lock) removes it. A lock-free command
+# (monitoring, status, help) or a run that failed to take the lock must not delete a deploy's staged file mid-switch.
+OWNS_STAGED_UPSTREAM=0
+cleanup_on_exit() {
+  if [[ "$OWNS_STAGED_UPSTREAM" -eq 1 ]]; then
+    rm -f "$CADDY_RUNTIME_DIR/upstream.caddy.next"
+  fi
+  rm -f "$STATE_DIR"/*.tmp.$$
 }
 
 acquire_lock() {
@@ -329,7 +339,12 @@ stage_and_validate_upstream() {
   local target_color="$1"
   local template="$CADDY_TEMPLATES_DIR/upstream.${target_color}.caddy"
   [[ -f "$template" ]] || fail "Missing upstream template: $template"
-  cp -f "$template" "$CADDY_RUNTIME_DIR/upstream.caddy.next"
+  OWNS_STAGED_UPSTREAM=1
+  # Callers use `if ! stage_and_validate_upstream`, where errexit is off: check the copy explicitly.
+  if ! cp -f "$template" "$CADDY_RUNTIME_DIR/upstream.caddy.next"; then
+    log "CADDY_STAGE_FAIL could not stage upstream.caddy.next for target=$target_color" >&2
+    return 1
+  fi
 
   if ! compose exec -T caddy sh -c '
     sed "s|/etc/caddy/runtime/upstream.caddy|/etc/caddy/runtime/upstream.caddy.next|g" /etc/caddy/Caddyfile > /tmp/Caddyfile.validate
@@ -347,13 +362,24 @@ stage_and_validate_upstream() {
 
 atomic_reload_upstream() {
   local target_color="$1"
+  # Callers use `if ! atomic_reload_upstream`, where errexit is off: every file step is checked here. Before, a failed
+  # mv (e.g. the staged file removed) left the old upstream, and its successful reload was reported as the switch.
   if [[ -f "$CADDY_RUNTIME_DIR/upstream.caddy" ]]; then
-    cp -f "$CADDY_RUNTIME_DIR/upstream.caddy" "$CADDY_RUNTIME_DIR/upstream.caddy.prev"
+    if ! cp -f "$CADDY_RUNTIME_DIR/upstream.caddy" "$CADDY_RUNTIME_DIR/upstream.caddy.prev"; then
+      log "CADDY_STAGE_FAIL could not keep upstream.caddy.prev; upstream unchanged (target=$target_color)" >&2
+      return 1
+    fi
   fi
-  mv -f "$CADDY_RUNTIME_DIR/upstream.caddy.next" "$CADDY_RUNTIME_DIR/upstream.caddy"
+  if ! mv -f "$CADDY_RUNTIME_DIR/upstream.caddy.next" "$CADDY_RUNTIME_DIR/upstream.caddy"; then
+    log "CADDY_STAGE_FAIL staged upstream.caddy.next could not be moved; upstream unchanged (target=$target_color)" >&2
+    return 1
+  fi
   if ! compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile; then
     if [[ -f "$CADDY_RUNTIME_DIR/upstream.caddy.prev" ]]; then
-      mv -f "$CADDY_RUNTIME_DIR/upstream.caddy.prev" "$CADDY_RUNTIME_DIR/upstream.caddy"
+      if ! mv -f "$CADDY_RUNTIME_DIR/upstream.caddy.prev" "$CADDY_RUNTIME_DIR/upstream.caddy"; then
+        # The file now names the target while Caddy still serves the old color: keep pending and the target for abort.
+        fail "CADDY_RELOAD_REVERT_FAIL upstream.caddy names $target_color after a failed reload; run abort (pending kept)"
+      fi
     fi
     log "CADDY_RELOAD_FAIL reverted upstream.caddy" >&2
     return 1
@@ -366,7 +392,12 @@ rollback_reload_from_prev() {
     log "ROLLBACK_RELOAD_FAILED missing upstream.caddy.prev" >&2
     return 1
   fi
-  mv -f "$CADDY_RUNTIME_DIR/upstream.caddy.prev" "$CADDY_RUNTIME_DIR/upstream.caddy"
+  # Called as `if ! rollback_reload_from_prev` (errexit off). An unchecked failed mv here would reload the target's
+  # upstream "successfully", and the caller would then stop the color still being served.
+  if ! mv -f "$CADDY_RUNTIME_DIR/upstream.caddy.prev" "$CADDY_RUNTIME_DIR/upstream.caddy"; then
+    log "ROLLBACK_RELOAD_FAILED could not restore upstream.caddy.prev; keeping both containers running" >&2
+    return 1
+  fi
   if ! compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile; then
     log "ROLLBACK_RELOAD_FAILED caddy reload failed during rollback; keeping both containers running" >&2
     return 1
