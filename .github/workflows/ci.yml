@@ -24,6 +24,29 @@ jobs:
         with:
           name: test-results
           path: build/reports/tests/
+  deploy-verify:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Syntax and deploy/G4 unit tests
+        run: |
+          bash -n deploy/deploy.sh deploy/g4-probe.sh deploy/tests/deploy-test.sh deploy/tests/caddy-integration-test.sh
+          ./deploy/tests/deploy-test.sh
+      - name: Compose config validation
+        env:
+          DB_USER: ci
+          DB_PASSWORD: ci
+          APP_IMAGE: ghcr.io/lcjam/gongchae-bell
+          APP_BLUE_TAG: sha-${{ github.sha }}
+          APP_GREEN_TAG: sha-${{ github.sha }}
+        run: |
+          docker compose -f compose.prod.yml --profile blue --profile green config -q
+          docker compose -f compose.prod.yml --env-file deploy/.env.prod.example --profile blue --profile green config -q
+      - name: Caddyfile validation and live reload/header/redaction test
+        run: ./deploy/tests/caddy-integration-test.sh
+      - name: Build ARM64 runtime image (no push)
+        run: docker build --platform linux/arm64 -t gongchae-bell:ci-${{ github.sha }} .
   secrets:
     runs-on: ubuntu-latest
     timeout-minutes: 10
