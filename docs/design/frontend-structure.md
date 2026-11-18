@@ -109,7 +109,7 @@ src/main/java/kr/gongchae/bell/
 | 상세 (`/jobs/{sn}`) | `title`, `description`, `job` | `PostingDetail` (`recrutNopeDisplay, aplyQlfc, pref, scrnprcdr, safeSrcUrl, srcUrlGeneric, alioUrl, detailStatus, steps, stepsUnknownFormat, files, filesUnknownFormat, ...`) |
 | 기관 (`/institutions/{code}`) | `title`, `description`, `institution`, `pageNumbers` | `InstitutionDetailView(summary, yearlyRecruits, monthlyPatterns, ncsDistribution, history)` |
 | 개인정보 (`/privacy`) | `title`, `description`, `privacy` | `AlertsProperties.Privacy(officer, contact, policyVersion, effectiveDate, hostingLocation, overseasBasis, resendRetention)` |
-| 신청 (`new.html`) | `filterOptions`, `privacy`, `form`, `error`, `tab`, `email` | `form`은 `Conditions(ncs, region, hire, career, q, notifyNew, notifyDeadline)`, `error`는 `email`, `webhook`, `kinds`, `consent`, `age14`, `q` |
+| 신청 (`new.html`) | `filterOptions`, `privacy`, `form`, `error`, `tab`, `email` | `form`은 `Conditions(ncs, region, hire, career, q, notifyNew, notifyDeadline)`, `error`는 `email`, `webhook`, `kinds`, `consent`, `age14`, `q`, `ncs`, `region`, `hire`, `career`이며 마지막 네 값은 일반 조건 오류 분기로 표시 |
 | 확인·해지 | `title`, `token` | `token`은 쿼리 `t` 문자열 (hidden input으로 POST 전송) |
 | 관리 (`manage.html`) | `title`, `view`, `form`, `error`, `filterOptions` | `view`는 `ManageView(id, channel, status, target, conditions, token)` (`target`은 마스킹 이메일 또는 `"Discord 웹훅"`) |
 | 결과 (`notice.html`) | `title`, `heading`, `message`, `detail`, `manageLink` | `manageLink`는 `"/subscriptions/manage?t=" + token` (선택 포함) |
