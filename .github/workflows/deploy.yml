@@ -1,0 +1,227 @@
+name: Deploy
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Deployment action"
+        type: choice
+        default: deploy
+        options:
+          - deploy
+          - bootstrap
+          - rollback
+      image_sha:
+        description: "Commit SHA to build/deploy (defaults to workflow SHA)"
+        type: string
+        required: false
+
+permissions: {}
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    name: Build & Push ARM64 Image
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    if: >-
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.action != 'rollback')
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      sha: ${{ steps.meta.outputs.sha }}
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+    steps:
+      - name: Resolve target SHA
+        id: meta
+        env:
+          INPUT_SHA: ${{ inputs.image_sha }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          SELF_SHA: ${{ github.sha }}
+        run: |
+          sha="${RUN_SHA:-${INPUT_SHA:-$SELF_SHA}}"
+          [[ "$sha" =~ ^[0-9a-f]{7,40}$ ]] || { echo "Invalid SHA: $sha" >&2; exit 1; }
+          echo "sha=$sha" >>"$GITHUB_OUTPUT"
+          echo "image_tag=sha-$sha" >>"$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ steps.meta.outputs.sha }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push ARM64 image
+        env:
+          REPO_LOWER: ${{ github.repository }}
+        run: |
+          image_repo="ghcr.io/$(printf '%s' "$REPO_LOWER" | tr '[:upper:]' '[:lower:]')"
+          tag="${image_repo}:${{ steps.meta.outputs.image_tag }}"
+          docker build --platform linux/arm64 -t "$tag" .
+          docker push "$tag"
+
+  deploy:
+    name: Blue/Green Deploy with External G4 Probe
+    needs: build-and-push
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: production
+    if: >-
+      always() &&
+      (needs.build-and-push.result == 'success' ||
+       (github.event_name == 'workflow_dispatch' && inputs.action == 'rollback')) &&
+      (vars.AUTO_DEPLOY_ENABLED == 'true' || github.event_name == 'workflow_dispatch')
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.build-and-push.outputs.sha || github.sha }}
+
+      - name: Validate deployment configuration names (no values printed)
+        env:
+          HAS_HOST: ${{ secrets.DEPLOY_HOST != '' }}
+          HAS_USER: ${{ secrets.DEPLOY_USER != '' }}
+          HAS_KEY: ${{ secrets.DEPLOY_SSH_KEY != '' }}
+          HAS_KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS != '' }}
+        run: |
+          for v in HAS_HOST HAS_USER HAS_KEY HAS_KNOWN; do
+            if [[ "${!v}" != "true" ]]; then
+              echo "Missing required GitHub secret for $v (expected DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY, DEPLOY_KNOWN_HOSTS)" >&2
+              exit 1
+            fi
+          done
+
+      - name: Execute SSH deploy / rollback with ADR-0005 external G4 gate
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          SITE_DOMAIN: ${{ vars.SITE_DOMAIN || 'gongchae.enjoylcjworld.com' }}
+          ACTION: ${{ inputs.action || 'deploy' }}
+          TARGET_SHA: ${{ needs.build-and-push.outputs.sha || github.sha }}
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          ssh_dir="$RUNNER_TEMP/.ssh"
+          mkdir -p "$ssh_dir"
+          chmod 700 "$ssh_dir"
+          key_file="$ssh_dir/deploy_key"
+          known_file="$ssh_dir/known_hosts"
+          g4_stop="$RUNNER_TEMP/g4.stop"
+          g4_report="$RUNNER_TEMP/g4-report.json"
+
+          cleanup() {
+            rm -rf "$ssh_dir"
+          }
+          trap cleanup EXIT
+
+          printf '%s\n' "$DEPLOY_SSH_KEY" >"$key_file"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" >"$known_file"
+          chmod 600 "$key_file"
+          chmod 644 "$known_file"
+
+          ssh_opts=(-i "$key_file" -o "UserKnownHostsFile=$known_file" -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o ForwardAgent=no -o BatchMode=yes)
+
+          remote_status="$(ssh "${ssh_opts[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" "/opt/gongchae-bell/deploy/deploy.sh status" || true)"
+          echo "$remote_status"
+
+          mode="$ACTION"
+          if [[ "$mode" == "deploy" ]]; then
+            if grep -q '^active_color=none$' <<<"$remote_status" || [[ -z "$remote_status" ]]; then
+              mode="bootstrap"
+            else
+              mode="bluegreen"
+            fi
+          fi
+
+          deploy_id="${mode}-${TARGET_SHA:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "Using deploy_id=$deploy_id mode=$mode"
+
+          # Sync tracked deployment definitions to /opt/gongchae-bell without touching .env or deploy/state
+          if [[ "$mode" != "rollback" ]]; then
+            tar --exclude='deploy/state' -cf - compose.prod.yml deploy | \
+              ssh "${ssh_opts[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" "mkdir -p /opt/gongchae-bell && tar -xf - -C /opt/gongchae-bell && chmod +x /opt/gongchae-bell/deploy/deploy.sh /opt/gongchae-bell/deploy/g4-probe.sh"
+          fi
+
+          if [[ "$mode" == "bootstrap" ]]; then
+            echo "Running initial bootstrap (separated from zero-downtime blue/green G4 gate)"
+            ssh "${ssh_opts[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" "PULL_POLICY=always /opt/gongchae-bell/deploy/deploy.sh bootstrap '${IMAGE_TAG}' --deploy-id '${deploy_id}'"
+            exit 0
+          fi
+
+          # ADR-0005 order:
+          #   1-3. Switch Caddy upstream to target while keeping previous color running
+          #   4.   Verify external G4 probe from outside OCI VM
+          #   5-6. Finalize (stop old color with 40s grace + commit state) on G4 pass,
+          #        or abort (instant reload back to running old color + stop new color) on G4 failure.
+          ./deploy/g4-probe.sh \
+            --base-url "https://${SITE_DOMAIN}" \
+            --stop-file "$g4_stop" \
+            --post-window 15 \
+            --interval 1 \
+            --min-requests 15 \
+            --report "$g4_report" \
+            --context "github-actions-external" \
+            --deploy-id "$deploy_id" &
+          g4_pid=$!
+
+          # Pre-switch baseline window (10s)
+          sleep 10
+          if ! kill -0 "$g4_pid" 2>/dev/null; then
+            echo "External G4 probe aborted during pre-switch baseline (deploy_id=$deploy_id)" >&2
+            wait "$g4_pid" || true
+            exit 1
+          fi
+
+          deploy_rc=0
+          if [[ "$mode" == "rollback" ]]; then
+            ssh "${ssh_opts[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" "/opt/gongchae-bell/deploy/deploy.sh rollback --phase switch --deploy-id '${deploy_id}'" || deploy_rc=$?
+          else
+            ssh "${ssh_opts[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" "PULL_POLICY=always /opt/gongchae-bell/deploy/deploy.sh deploy '${IMAGE_TAG}' --mode bluegreen --phase switch --deploy-id '${deploy_id}'" || deploy_rc=$?
+          fi
+
+          touch "$g4_stop"
+
+          if [[ "$deploy_rc" -ne 0 ]]; then
+            wait "$g4_pid" || true
+            echo "Remote switch failed (rc=$deploy_rc, deploy_id=$deploy_id); cleaning up only if this deploy_id is pending" >&2
+            ssh "${ssh_opts[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" "/opt/gongchae-bell/deploy/deploy.sh abort --deploy-id '${deploy_id}' --if-pending" || true
+            exit "$deploy_rc"
+          fi
+
+          g4_rc=0
+          wait "$g4_pid" || g4_rc=$?
+
+          if [[ "$g4_rc" -ne 0 ]]; then
+            echo "External G4 probe failed (g4_rc=$g4_rc, deploy_id=$deploy_id); aborting to still-running previous color" >&2
+            ssh "${ssh_opts[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" "/opt/gongchae-bell/deploy/deploy.sh abort --deploy-id '${deploy_id}'"
+            exit "$g4_rc"
+          fi
+
+          echo "External G4 probe passed (deploy_id=$deploy_id); finalizing old color shutdown and state commit"
+          ssh "${ssh_opts[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" "/opt/gongchae-bell/deploy/deploy.sh finalize --deploy-id '${deploy_id}'"
+
+      - name: Upload G4 external probe report
+        uses: actions/upload-artifact@v7.0.2
+        if: always()
+        with:
+          name: g4-probe-report
+          path: ${{ runner.temp }}/g4-report.json
+          if-no-files-found: ignore
