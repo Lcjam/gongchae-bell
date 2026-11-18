@@ -5,6 +5,7 @@ review/
 .tools/
 .gradle/
 build/
+deploy/state/
 *.log
 .idea/
 *.iml
