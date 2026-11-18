@@ -5,6 +5,9 @@ spring:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/gongchae}
     username: ${DB_USER}
     password: ${DB_PASSWORD}
+    hikari:
+      # Bounded pool wait: the in-request alert sends must finish inside their 25 s budget (contract 14-4).
+      connection-timeout: 5000  # ms
   jpa:
     open-in-view: false
     hibernate:
@@ -51,3 +54,22 @@ collector:
   service-key: ${COLLECTOR_SERVICE_KEY:}
   warning-limit: ${COLLECTOR_WARNING_LIMIT:500}
   stop-limit: ${COLLECTOR_STOP_LIMIT:900}
+
+alerts:
+  enabled: ${ALERTS_ENABLED:false}
+  token-key: ${ALERTS_TOKEN_KEY:}
+  hmac-key: ${ALERTS_HMAC_KEY:}
+  webhook-key: ${ALERTS_WEBHOOK_KEY:}
+  webhook-key-id: ${ALERTS_WEBHOOK_KEY_ID:}
+  erasure-log: ${ALERTS_ERASURE_LOG:}
+  mail:
+    api-key: ${RESEND_API_KEY:}
+    from: ${ALERTS_MAIL_FROM:}
+  privacy:
+    officer: ${PRIVACY_OFFICER:}
+    contact: ${PRIVACY_CONTACT:}
+    policy-version: ${PRIVACY_POLICY_VERSION:}
+    effective-date: ${PRIVACY_EFFECTIVE_DATE:}
+    hosting-location: ${PRIVACY_HOSTING_LOCATION:}
+    overseas-basis: ${PRIVACY_OVERSEAS_BASIS:}
+    resend-retention: ${PRIVACY_RESEND_RETENTION:}

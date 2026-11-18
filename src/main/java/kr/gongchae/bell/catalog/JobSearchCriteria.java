@@ -42,6 +42,56 @@ public record JobSearchCriteria(
         return new JobSearchCriteria(validNcs, validRegion, validHire, validCareer, validStatus, validQ, validSort, validPage);
     }
 
+    /**
+     * Subscription input (#6): the same allow-lists and query rule as {@link #normalize}, but a non-blank value outside
+     * them is an error instead of being ignored, and an over-long query is refused instead of cut. Blank means "all".
+     * Status, sort and page are not part of a subscription.
+     */
+    public static JobSearchCriteria strict(
+            String ncs,
+            String region,
+            String hire,
+            String career,
+            String q,
+            Map<String, Set<String>> allowedCodes
+    ) {
+        String query = q == null || q.isBlank() ? null : q.trim();
+        if (query != null && query.length() > MAX_QUERY_LENGTH) {
+            throw new InvalidCondition("q");
+        }
+        return new JobSearchCriteria(
+                requireAllowed("ncs", ncs, allowedCodes.getOrDefault("NCS", Set.of())),
+                requireAllowed("region", region, allowedCodes.getOrDefault("REGION", Set.of())),
+                requireAllowed("hire", hire, allowedCodes.getOrDefault("HIRE", Set.of())),
+                requireAllowed("career", career, ALLOWED_CAREER),
+                "open", query, "deadline", 1);
+    }
+
+    /** A subscription condition outside the allow-list; {@code field} names the input. */
+    public static final class InvalidCondition extends IllegalArgumentException {
+        private final String field;
+
+        public InvalidCondition(String field) {
+            super("INVALID_CONDITION");
+            this.field = field;
+        }
+
+        public String field() {
+            return field;
+        }
+    }
+
+    private static String requireAllowed(String field, String raw, Set<String> allowed) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        String trimmed = raw.trim();
+        if (!allowed.contains(trimmed)) {
+            throw new InvalidCondition(field);
+        }
+        return trimmed;
+    }
+
     public static int parsePositiveInt(String raw, int fallback) {
         if (raw == null || raw.isBlank()) {
             return fallback;
