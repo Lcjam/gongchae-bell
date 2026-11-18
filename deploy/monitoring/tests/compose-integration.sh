@@ -48,7 +48,8 @@ if (cd "$WORK" && env -u APP_BLUE_TAG -u APP_GREEN_TAG docker compose -f compose
     --env-file .env config -q) 2>"$WORK/raw.err"; then
   fail "raw compose unexpectedly interpolated blank APP_*_TAG"
 fi
-grep -q "APP_BLUE_TAG" "$WORK/raw.err" || fail "raw compose failed for another reason: $(cat "$WORK/raw.err")"
+# Either required tag may be reported first (Compose does not fix the order).
+grep -qE "APP_(BLUE|GREEN)_TAG" "$WORK/raw.err" || fail "raw compose failed for another reason: $(cat "$WORK/raw.err")"
 
 echo "=== 2. deploy.sh monitoring config merges both files"
 deploy_sh monitoring --profile blue --profile green config --format json >"$WORK/merged.json"

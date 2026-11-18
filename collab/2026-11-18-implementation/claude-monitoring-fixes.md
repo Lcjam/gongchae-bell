@@ -12,7 +12,8 @@
 | main(#6 PR13 `ed3f28f`) 병합 | `c36c557` (`.env.example`, `docs/implementation-status.md` 충돌 해소) |
 | main(#16 PR22 `52c172c`) 병합 | `010930d`. runbook 충돌은 #15 모니터링 줄과 #16 백업 문서 링크를 모두 유지. 병합된 #16 동작(성공 ping, 실패 `/fail`, 재시도 없음)에 맞춰 모니터링 문서의 백업 heartbeat 행과 구현 현황을 고침. 로컬 `check bootJar` 154 tests, 0 failures |
 | CI (`c36c557`) | CI [44283945810](https://github.com/Lcjam/gongchae-bell/actions/runs/44283945810) test(`check bootJar`, ARM64)·deploy-verify(`ALL_DEPLOY_TESTS_PASSED` 16개, Caddy 통합, ARM64 이미지)·secrets 성공. Monitoring [44283945764](https://github.com/Lcjam/gongchae-bell/actions/runs/44283945764) rules(promtool `SUCCESS`)·compose-integration(ARM64, `COMPOSE_INTEGRATION_TEST_PASSED`, 39초)·alert-e2e(발동 104초, 해제 57초) 성공 |
-| 최종 head | 이 파일을 담은 다음 커밋(문서만). PR #21 head로 확인. 마지막 병합 뒤 CI는 PR #21 체크에서 확인 |
+| 시험 보정 | `4d2e4e8`의 Monitoring [44285072148](https://github.com/Lcjam/gongchae-bell/actions/runs/44285072148) `compose-integration`이 1단계에서 실패했다. 두 태그가 모두 비면 Compose가 `APP_BLUE_TAG`와 `APP_GREEN_TAG` 중 어느 쪽을 먼저 보고할지 정해져 있지 않은데(앞 실행은 BLUE, 이번은 GREEN) 시험이 BLUE만 받았다. 둘 다 받도록 고치고 로컬에서 다시 통과했다. 같은 head의 CI [44285072147](https://github.com/Lcjam/gongchae-bell/actions/runs/44285072147)는 test·backup-verify·deploy-verify·secrets 성공 |
+| 최종 head | 이 파일을 담은 다음 커밋(시험 보정 포함). PR #21 head로 확인 |
 | PR | [#21](https://github.com/Lcjam/gongchae-bell/pull/21) draft 유지, `Refs #15` |
 
 ## 1. HTTP p95 히스토그램 상한 (root P2)
