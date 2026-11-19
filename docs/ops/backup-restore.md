@@ -9,14 +9,14 @@
 
 - **실행 주체·시각**: OCI 호스트 `ubuntu`(UID/GID `1000:1000`) systemd timer `gongchae-backup.timer`가 매일 `03:00 KST`(`OnCalendar=*-*-* 03:00:00 Asia/Seoul`, UTC 기준 `18:00:00 UTC`, `Persistent=true`)에 `gongchae-backup.service` → `deploy/backup/backup.sh run`을 실행한다.
 - **동시 실행 방지**: `flock` 배타 잠금(`/opt/gongchae-bell/backup/backup.lock`)으로 중복 실행을 막는다(`LOCK_HELD`, exit `20`).
-- **백업 대상 (고정 스테이징 디렉터리 `${BACKUP_STAGE_ROOT}/gongchae-backup-stage`, `0700`, `flock` 배타 보호)**:
+- **백업 대상 및 순서 불변식 (고정 스테이징 디렉터리 `${BACKUP_STAGE_ROOT}/gongchae-backup-stage`, `0700`, `flock` 배타 보호)**:
   1. `gongchae-bell.dump`: 실행 중인 운영 Compose `postgres` 컨테이너 내부에서 `pg_dump -Fc`로 추출한 논리 덤프. 생성 직후 비어 있지 않음과 `pg_restore --list` TOC 검증을 통과해야 한다. (**실행 중인 PostgreSQL 데이터 볼륨 `postgres_data` 파일 직접 복사는 사용하지 않는다.**)
-  2. `erasure.log`: ADR-0013 호스트 해지 대장(`/var/lib/gongchae-bell/erasure/erasure.log`).
+  2. `erasure.log`: ADR-0013 호스트 해지 대장(`/var/lib/gongchae-bell/erasure/erasure.log`). **반드시 `pg_dump`가 끝난 뒤**에 복사해 스테이징한다(`stage_postgres_dump` → `stage_erasure_log`). 이 순서를 지켜야 백업 snapshot에 담긴 `erasure.log`가 적어도 해당 덤프 스냅샷 시점 이후(복사 직전)까지의 해지를 포함한다.
      - `REQUIRE_ERASURE_LOG=auto`(기본값)일 때, `/opt/gongchae-bell/.env`에 `ALERTS_ENABLED=true`(따옴표·대소문자 포함)가 설정되어 있으면 파일이 반드시 정규 파일로 존재해야 하며 없으면 실패 종료한다. M2(`ALERTS_ENABLED=true`) 전환 시 `backup.env`에 `REQUIRE_ERASURE_LOG=true`를 함께 명시하는 것을 권장한다.
-     - M1(`ALERTS_ENABLED=false`) 단계에서는 파일이 아직 없으면 `ERASURE_LOG_ABSENT_M1_ONLY`만 남기고 DB 덤프를 계속 백업하며, 빈 파일이라도 미리 생성되어 있으면 함께 백업한다.
-     - 경로에 파일 대신 디렉터리가 있으면 즉시 실패한다.
-  3. `backup-meta.txt`: 백업 UTC 시각, 덤프 바이트·SHA-256, TOC 항목 수, 해지 대장 포함 여부·바이트·줄 수(비밀값·UUID 미포함).
-- **암호화·전송**: 고정 스테이징 경로에서 `restic backup --tag gongchae-bell --tag daily`로 클라이언트 측 암호화 후 OCI Object Storage S3 호환 버킷에 업로드한다.
+     - **M1 전용(`ALERTS_ENABLED=false`) vs M2 이후 구분**: 처음부터 `ALERTS_ENABLED=false`로만 운영해 아직 대장 파일을 만들지 않은 M1 백업에서는 `ERASURE_LOG_ABSENT_M1_ONLY`와 `backup-meta.txt`의 `erasure_included=false`를 남기고 DB 덤프만 백업한다(빈 파일이라도 미리 만들어 두었으면 함께 백업). 반면 M2를 한 번이라도 켠 뒤(`erasure_included=true` 또는 `ALERTS_ENABLED=true`)에는 대장이 필수이며, missing·손상 대장을 빈 대장으로 대체하지 않는다.
+     - 경로에 파일 대신 디렉터리나 심볼릭 링크가 있으면 즉시 실패한다.
+  3. `backup-meta.txt`: 백업 UTC 시각, 덤프 바이트·SHA-256, TOC 항목 수, 해지 대장 포함 여부(`erasure_included=true|false`)·바이트·줄 수(비밀값·UUID 미포함).
+- **암호화·전송**: `backup.sh`는 스테이징 디렉터리 안에서 상대 경로(`gongchae-bell.dump`, `backup-meta.txt`, 존재 시 `erasure.log`)로 `restic backup --tag gongchae-bell --tag daily`를 실행하므로, `restic restore` 대상 디렉터리 루트에 위 파일들이 그대로 풀린다.
 
 ---
 
@@ -111,33 +111,110 @@
 
 ---
 
-## 7. 복구 절차 (ADR-0012 · ADR-0013 · fail-closed)
+## 7. 격리 복원 리허설 및 장애 복구 절차 (ADR-0012 · ADR-0013 · fail-closed)
 
-> **주의**: 기존 운영 DB에 직접 덮어쓰지 않고 **발송·수집을 중지한 격리 환경**에서 검증한 뒤 전환한다.
+> **핵심 원칙**:
+> 1. **운영 DB 직접 덮어쓰기 금지**: 리허설과 전환 전 검증은 **절대 운영 Compose(`compose.prod.yml`)의 `postgres` 컨테이너나 `postgres_data` 볼륨을 대상으로 실행하지 않는다.** 고유한 컨테이너·볼륨·DB·계정과 외부 통신이 차단된 Docker `--internal` 네트워크를 쓰는 **전용 일회용 `postgres:17`**에서만 복원한다. (`--clean --if-exists`가 필요할 때도 격리 일회용 DB를 재사용할 때만 적용하며 운영 `postgres`에는 쓰지 않는다.)
+> 2. **호스트 생존 시 살아 있는 최신 호스트 대장 사용**: DB 손상·실수 삭제·잘못된 마이그레이션 등 호스트가 살아 있는 사고나 리허설에서는 백업 시점 이후 해지까지 포함한 **살아 있는 호스트 대장(`/var/lib/gongchae-bell/erasure/erasure.log`)**을 재적용에 사용한다. 백업 안의 과거 `erasure.log`로 재적용하거나 살아 있는 호스트 대장을 백업 파일로 덮어쓰면 백업 이후 해지한 구독자가 부활하고 호스트 대장에서도 영구 유실된다. **VM·호스트 영구 소실(또는 호스트 대장 자체 소실) 시에만** 사용 가능한 백업(OCI 또는 NAS/PC 사본) 중 **가장 최신** 정상 사본을 택한다.
+> 3. **운영 `.env` 통째 `source` 금지 및 외부 부작용 차단**: 복원·재적용 명령은 `/opt/gongchae-bell/.env`를 `source`하지 않는다(운영 `DB_*`·`ALERTS_ENABLED=true`·`COLLECTOR_ENABLED=true`·`HEARTBEAT_*`·`RESEND_API_KEY`가 격리 컨테이너에 섞이는 사고 방지). `DB_URL`·`DB_USER`·`DB_PASSWORD`는 격리 PG로 명시하고, `ALERTS_ENABLED=false`, `COLLECTOR_ENABLED=false`, `HEARTBEAT_COLLECTOR_URL=`(빈 값)으로 고정하며, 외부 망이 차단된 `--internal` 네트워크 안에서 실행한다.
+> 4. **missing·손상 대장 대체 금지**: `ErasureReapplyCommand`는 파일 누락(`ERASURE_LOG_MISSING`)이나 손상(`ERASURE_LOG_TORN_LAST_LINE`, `ERASURE_LOG_BAD_LINE_<N>`) 시 0건 삭제 후 실패 종료한다. 원인 확인 전에 빈 파일로 대체해 통과시키지 않는다. 단, 처음부터 `ALERTS_ENABLED=false`였던 M1 전용 백업(`backup-meta.txt`의 `erasure_included=false`이며 M2를 켠 적이 없는 경우)은 재적용할 대장이 없을 수 있으므로 M2 이후 대장 필수 조건과 구분한다.
 
-1. **사전 준비**: 대상 호스트에서 앱 발송/수집(`COLLECTOR_ENABLED=false`, `ALERTS_ENABLED=false`)을 멈춘 상태를 확인한다. 비밀번호 관리자의 `RESTIC_PASSWORD`와 OCI 자격증명을 준비한다.
-2. **snapshot 선택 및 추출**:
-   ```bash
-   mkdir -p /tmp/gongchae-restore && chmod 0700 /tmp/gongchae-restore
-   set -a && source /opt/gongchae-bell/backup/backup.env && set +a
-   restic snapshots --tag gongchae-bell --compact
-   restic restore <SNAPSHOT_ID> --target /tmp/gongchae-restore
-   ```
-3. **덤프 및 메타 확인**: `/tmp/gongchae-restore/backup-meta.txt`의 `dump_sha256`과 `gongchae-bell.dump`의 `sha256sum`이 일치하는지 확인하고 `pg_restore --list`로 구조를 점검한다.
-4. **격리 PostgreSQL 복원**:
-   ```bash
-   docker compose -f /opt/gongchae-bell/compose.prod.yml --env-file /opt/gongchae-bell/.env \
-     exec -T postgres pg_restore -U "$DB_USER" -d "$DB_NAME" --clean --if-exists --no-owner --exit-on-error < /tmp/gongchae-restore/gongchae-bell.dump
-   ```
-5. **해지 대장 검증 및 재적용 (`ALERTS_ENABLED=false` 상태 유지, ADR-0013)**:
-   - 백업에서 복원한 `erasure.log` 경로를 `ALERTS_ERASURE_LOG`로 지정해 재적용 명령을 실행한다(없거나 손상된 대장이면 fail-closed로 0건 삭제 후 비정상 종료한다):
+### 7.1 격리 복원 및 해지 대장 재적용 단계 (리허설·전환 전 검증 공통)
+
+1. **사전 준비 및 격리 식별자 고정**:
+   - 리허설 중에는 운영 앱·DB를 건드리지 않는다. 실제 장애 복구 시에는 먼저 운영 앱의 수집·발송을 멈춘 뒤 진행한다.
+   - 비밀번호 관리자에서 `RESTIC_PASSWORD`와 OCI 자격증명을 확인한다. `backup.sh`와 별개로 restic 자격증명만 `/opt/gongchae-bell/backup/backup.env`에서 읽고, 운영 `/opt/gongchae-bell/.env`는 읽지 않는다.
+   - 제한된 권한(`0700`)의 임시 작업 디렉터리와 고유 격리 자원 이름을 만든다:
      ```bash
-     ALERTS_ENABLED=false ALERTS_ERASURE_LOG=/tmp/gongchae-restore/erasure.log \
-       java -jar gongchae-bell.jar --spring.main.web-application-type=none --alerts.erasure-reapply=true
+     RESTORE_WORK="$(mktemp -d /tmp/gongchae-restore.XXXXXX)"
+     chmod 0700 "$RESTORE_WORK"
+     RESTORE_NET="gongchae-restore-net-$$"
+     RESTORE_PG="gongchae-restore-pg-$$"
+     RESTORE_VOL="gongchae-restore-vol-$$"
+     RESTORE_DB="gongchae_restore"
+     RESTORE_USER="gongchae_restore"
+     RESTORE_PASS="$(openssl rand -hex 24)"
      ```
-   - `ERASURE_REAPPLY_COMPLETE deleted=N` 및 `exit 0`을 확인하고, 복원된 대장을 호스트 `/var/lib/gongchae-bell/erasure/erasure.log`(`1000:1000`, `0600`)로 배치한 뒤에만 알림(`ALERTS_ENABLED=true`)을 재개한다.
-6. **임시 복원 디렉터리 정리**: `rm -rf /tmp/gongchae-restore`.
-7. **한계 고지 (ADR-0013)**: VM 전체가 영구 소실된 경우 마지막 일일 백업 이후(최대 약 24시간)에 발생한 `erasure.log` 기록은 백업에 남아 있지 않으므로, 그 사이 해지한 구독자에게 복원 후 다시 발송될 수 있다.
+2. **snapshot 선택 및 추출 (`backup.sh` 상대 경로 아카이브 구조)**:
+   - `backup.sh`는 스테이징 디렉터리 내부 기준 상대 경로로 백업하므로, `restic restore` 결과물(`gongchae-bell.dump`, `backup-meta.txt`, 포함 시 `erasure.log`)이 `"$RESTORE_WORK"` 바로 아래에 풀린다.
+     ```bash
+     set -a && source /opt/gongchae-bell/backup/backup.env && set +a
+     restic snapshots --tag gongchae-bell --compact
+     restic restore <SNAPSHOT_ID> --target "$RESTORE_WORK"
+     ls -la "$RESTORE_WORK"
+     ```
+3. **덤프 무결성 및 TOC 확인**:
+   ```bash
+   cat "$RESTORE_WORK/backup-meta.txt"
+   expected_sha="$(awk -F= '$1=="dump_sha256"{print $2}' "$RESTORE_WORK/backup-meta.txt")"
+   actual_sha="$(sha256sum "$RESTORE_WORK/gongchae-bell.dump" | awk '{print $1}')"
+   [[ -n "$expected_sha" && "$expected_sha" == "$actual_sha" ]] || { echo "DUMP_SHA_MISMATCH" >&2; exit 1; }
+   docker run --rm --network none -i postgres:17 pg_restore --list < "$RESTORE_WORK/gongchae-bell.dump" | head -n 40
+   ```
+4. **전용 일회용 PostgreSQL 17 기동 및 덤프 복원 (운영 Compose `postgres` 금지)**:
+   ```bash
+   docker network create --internal "$RESTORE_NET"
+   docker volume create "$RESTORE_VOL"
+   docker run -d --name "$RESTORE_PG" \
+     --network "$RESTORE_NET" \
+     -v "$RESTORE_VOL:/var/lib/postgresql/data" \
+     -e POSTGRES_DB="$RESTORE_DB" \
+     -e POSTGRES_USER="$RESTORE_USER" \
+     -e POSTGRES_PASSWORD="$RESTORE_PASS" \
+     postgres:17
+   until docker exec "$RESTORE_PG" pg_isready -U "$RESTORE_USER" -d "$RESTORE_DB"; do sleep 1; done
+
+   # 새 격리 DB이므로 --clean 불필요 (동일 격리 DB 재실행 시에만 --clean --if-exists 허용, 운영 postgres 절대 금지)
+   docker exec -i "$RESTORE_PG" \
+     pg_restore -U "$RESTORE_USER" -d "$RESTORE_DB" --no-owner --exit-on-error < "$RESTORE_WORK/gongchae-bell.dump"
+   docker exec "$RESTORE_PG" psql -U "$RESTORE_USER" -d "$RESTORE_DB" -c '\dt'
+   ```
+5. **해지 대장 출처 선택 및 격리 앱 재적용 (`ALERTS_ENABLED=false`, `COLLECTOR_ENABLED=false`)**:
+   - **경우 A — 호스트 생존 (리허설 또는 운영 DB 손상·실수 삭제)**:
+     - **살아 있는 호스트 대장** `/var/lib/gongchae-bell/erasure/erasure.log`를 사용한다. 백업에서 풀린 `$RESTORE_WORK/erasure.log`로 호스트 파일을 덮어쓰지 않는다.
+     - `ErasureJournal.readStrict()`는 OS 잠금(`FileChannel.lock()`)을 위해 `READ, WRITE` 모드로 여므로 `:ro` 마운트로는 실패하며 UID `1000:1000` 쓰기 가능(`0600`) 파일이어야 한다. 리허설 중 운영 앱이 살아 있을 때는 호스트 파일 잠금 간섭을 피하기 위해 마지막 줄 개행을 확인한 뒤 `"$RESTORE_WORK/reapply-erasure.log"`(`0600`, `1000:1000`)로 복사해 검증하고, 앱을 중지한 실제 장애 복구에서는 호스트 대장 자체를 지정한다.
+   - **경우 B — VM·호스트 영구 소실 (또는 호스트 대장 유실)**:
+     - 살아 있는 호스트 대장이 없을 때만 OCI 또는 NAS/PC 사본 중 **가장 최신** 정상 snapshot에서 꺼낸 `erasure.log`를 사용한다(더 오래된 덤프 snapshot과 다른 최신 snapshot의 대장이 있으면 최신 사본 선택).
+   - **M1 전용 백업 예외**: `backup-meta.txt`가 `erasure_included=false`이고 M2(`ALERTS_ENABLED=true`)를 한 번도 켠 적이 없는 M1 전용 백업이라면 `erasure.log`가 없을 수 있다. 반대로 M2가 켜진 적이 있거나 `erasure_included=true`인데 대장이 없다면 빈 파일로 대체하지 말고 중단한다.
+   - **재적용 실행** (운영 `.env`를 `source`하지 않고 격리 DB·차단 env를 명시하며, `--network "$RESTORE_NET"` `--internal` 망으로 외부 provider·heartbeat 통신을 원천 차단한다; `APP_IMAGE`/`TARGET_TAG`는 덤프와 스키마가 호환되는 배포 이미지 태그 지정):
+     ```bash
+     cp /var/lib/gongchae-bell/erasure/erasure.log "$RESTORE_WORK/reapply-erasure.log"
+     chown 1000:1000 "$RESTORE_WORK" "$RESTORE_WORK/reapply-erasure.log"
+     chmod 0700 "$RESTORE_WORK"
+     chmod 0600 "$RESTORE_WORK/reapply-erasure.log"
+
+     docker run --rm --network "$RESTORE_NET" \
+       -u 1000:1000 \
+       -v "$RESTORE_WORK:/restore:rw" \
+       -e DB_URL="jdbc:postgresql://${RESTORE_PG}:5432/${RESTORE_DB}" \
+       -e DB_USER="$RESTORE_USER" \
+       -e DB_PASSWORD="$RESTORE_PASS" \
+       -e ALERTS_ENABLED=false \
+       -e COLLECTOR_ENABLED=false \
+       -e HEARTBEAT_COLLECTOR_URL= \
+       -e ALERTS_ERASURE_LOG=/restore/reapply-erasure.log \
+       "${APP_IMAGE}:${TARGET_TAG}" \
+       --spring.main.web-application-type=none \
+       --alerts.erasure-reapply=true
+     ```
+   - 출력 로그의 **`ERASURE_REAPPLY_COMPLETE deleted=N`**과 종료 코드 **`0`**을 확인한다. `ERASURE_LOG_MISSING`·`ERASURE_LOG_TORN_LAST_LINE`·`ERASURE_LOG_BAD_LINE_<N>`이 나오면 아무 행도 삭제하지 않은 채 실패하므로 원인을 해결하기 전까지 알림을 켜지 않는다.
+6. **사후 삭제 확인 및 발송 재개(`ALERTS_ENABLED=true`) 전 후속 게이트 구분**:
+   - **사후 삭제 검증**: 대장에 기록된 UUID가 격리 DB의 `subscription` 테이블에 0건 남아 있는지 직접 대조한다(0건이 아니면 발송을 재개하지 않는다).
+   - **발송 재개 전 후속 게이트 (재적용과 별개 단계)**:
+     1. 살아 있는 호스트 대장이 `/var/lib/gongchae-bell/erasure/erasure.log`(`1000:1000`, `0600`)로 보존돼 있는지 확인(VM 소실 복구 시에만 사용 가능한 가장 최신 백업 대장을 `/var/lib/gongchae-bell/erasure/erasure.log`로 배치).
+     2. 웹훅·HMAC·토큰 키(`ALERTS_WEBHOOK_KEY_ID`·`ALERTS_WEBHOOK_KEY`·`ALERTS_HMAC_KEY`·`ALERTS_TOKEN_KEY`)가 복원된 DB 구독 행과 호환되는지 확인.
+     3. 리허설이 아니라 실제 장애 복구라면 검증을 통과한 격리 DB로 운영 DB를 전환한 뒤에만 `COLLECTOR_ENABLED`/`ALERTS_ENABLED=true` 재개를 검토한다. (전환 세부 절차·자동 연속성/키 검증 도구는 `#17` 후속에서 확정한다.)
+7. **격리 자원 및 임시 경로 정리**:
+   - 리허설·검증이 끝나면 운영 `compose.prod.yml`의 `postgres`·`postgres_data`는 건드리지 않고, 1·4단계에서 만든 격리 자원만 삭제한다:
+     ```bash
+     docker rm -f "$RESTORE_PG"
+     docker volume rm "$RESTORE_VOL"
+     docker network rm "$RESTORE_NET"
+     rm -rf "$RESTORE_WORK"
+     ```
+8. **한계 고지 (ADR-0013)**:
+   - **호스트 생존 사고**: 살아 있는 호스트 대장을 사용하므로 백업 시점 이후의 해지도 유지된다.
+   - **VM·호스트 영구 소실**: 마지막 성공 백업(OCI 저장소 기준 최대 약 24시간 + 실패 일수, OCI 밖 PC pull 사본 복원 시 마지막 성공 pull 이후 기간) 사이에 기록된 `erasure.log`는 백업에 없으므로, 그 사이 해지한 구독자에게 복원 후 다시 발송될 수 있다. (재발송 메일 안 해지 링크로 재해지할 수는 있으나 유실 자체를 없애지는 못한다.)
 
 ---
 
