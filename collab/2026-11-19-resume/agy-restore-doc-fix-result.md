@@ -45,3 +45,42 @@
 - **미실행 범위 (이번 PR 범위 밖)**:
   - 실제 OCI 서버·OCI Object Storage 버킷·운영 `.env`·실서버 DB·비밀키·외부 provider·사용자 PC 백업 저장소 접근 및 실제 서버 복원 리허설(`docs/ops/backup-restore.md` §8 실서버 리허설 표는 `*미실시 (#17 예정)*` 유지).
   - 최종 HEAD CI 및 PR `MERGEABLE` 상태는 푸시 직후 원격 GitHub Actions에서 확인해 PR #27 본문에 기록합니다.
+
+---
+
+## 4. 2차 검수 보완 (§후속)
+
+- **요청 및 검수 근거**: `collab/2026-11-19-resume/agy-restore-doc-round2-request.md` (root `collab/reviews/pr-27-codex.md` D1·D2, Claude `collab/reviews/pr-27-claude.md` F1~F3·N1~N4)
+- **2차 문서 보완 커밋 SHA**: `971c30a4f739782b79df8a8ac33c584c531b11d1` (`docs: address PR #27 round 2 review on ownership, branches, and cutover (Refs #17)`)
+
+### 보완 내역
+
+1. **실행 사용자·소유권·정리 및 M2 선행 게이트 (`backup-restore.md` §1, §7, §8 — root D2 / Claude F1)**
+   - §1의 잘못된 `ubuntu(UID/GID 1000:1000)` 표기를 실제 호스트 계정(예: UID `1001`)과 앱 컨테이너(`1000:1000`) 구분으로 바로잡았습니다.
+   - §7 명령을 호스트 `ubuntu`(UID `1001`, `docker` 그룹) 실행 기준으로 통일하고, 호스트 대장 확인·`reapply` 전용 하위 디렉터리(`$RESTORE_WORK/reapply`, `0700`/`0600`, `1000:1000`) 생성·새 호스트 배치·최종 `sudo rm -rf "$RESTORE_WORK"` 정리에서만 `sudo`를 쓰도록 분리했습니다.
+   - `$RESTORE_WORK` 전체를 `1000:1000`으로 바꾸거나 컨테이너에 마운트하지 않고 **대장 1개만 담은 `$RESTORE_WORK/reapply`만 `-v "$RESTORE_WORK/reapply:/restore:rw"`로 마운트**해 덤프/메타 PII 격리를 지켰습니다.
+   - `User=ubuntu`(UID `1001`)로 도는 `gongchae-backup.service`가 `1000:1000 0600`인 `/var/lib/gongchae-bell/erasure/erasure.log`를 읽지 못하는 문제를 **M2(`ALERTS_ENABLED=true`) 전환 전 선행 운영 게이트**로 §1과 §8에 명시했습니다(이 PR에서는 백업·서비스 소스/ACL 정책을 바꾸지 않았습니다).
+2. **사고별 대장 원천(경우 A/B)과 M1 분기 (`backup-restore.md` §7.1 2·5단계, `alerts.md` — root D1 / Claude F3)**
+   - `JOURNAL_SRC` 선택 후 공통 재적용 블록이 한 번만 `JOURNAL_SRC`를 `install`하도록 정리해 A 전용 `cp`가 무조건 실행되지 않게 했습니다.
+   - **경우 B(VM·호스트 소실)**: 덤프 snapshot 추출 디렉터리(`$RESTORE_WORK`)와 분리된 `"$RESTORE_WORK/latest-journal"`에 최신 대장 snapshot의 `erasure.log`만 `--include /erasure.log`로 추출하도록 분리했고, 새 호스트 영구 경로 배치(`sudo install -d -o 1000 -g 1000 -m 0750 /var/lib/gongchae-bell/erasure` + `sudo install -o 1000 -g 1000 -m 0600 ...`)를 명시했습니다.
+   - **분기 M1**: ① 격리 DB `SELECT count(*) FROM subscription` = `0`, ② `backup-meta.txt` `erasure_included=false`, ③ M2 미활성 이력이 모두 확인될 때만 건너뛰며, 근거 미확인이나 M2 이후 누락은 중단, 대장이 존재하면 `0`건이어도 `readStrict()` 손상 검사를 건너뛰지 않도록 고정했습니다.
+3. **실제 장애 전환 직전 최종 대장 재적용 (`backup-restore.md` §7.1 1·6.2단계, `alerts.md` — Claude F2)**
+   - 리허설과 실제 장애 복구를 명확히 구분했습니다. `ALERTS_ENABLED=false`·`COLLECTOR_ENABLED=false` 플래그만으로는 웹 해지(`/subscriptions/unsubscribe*`) 쓰기가 멈추지 않으므로, 실제 전환 직전에는 `app-blue`·`app-green` **모든 운영 앱 컨테이너를 중지**한 뒤 `/var/lib/gongchae-bell/erasure:/erasure:rw`를 직접 마운트해 멱등 재적용 + `0`건 대조를 재실행하도록 고쳤습니다(원본 호스트 대장은 백업본으로 덮어쓰지 않음).
+4. **비차단 실행 흐름 완성 (`backup-restore.md` §7.1 1·3·6.1단계, `alerts.md` — Claude N1~N4)**
+   - `alerts.md`의 호스트 미존재 `java -jar /app/gongchae-bell.jar` 예시를 `backup-restore.md` §7과 일치하는 Docker 컨테이너(`-u 1000:1000`, `reapply:/restore:rw`) 명령과 링크로 교체했습니다.
+   - `/opt/gongchae-bell/.env`를 통째로 `source`하지 않고 `APP_IMAGE` 1줄 추출 + `deploy/state/${ACTIVE_COLOR}_tag` 조회로 `APP_IMAGE:TARGET_TAG`를 얻는 절차를 추가했습니다.
+   - 3단계 SHA 불일치 시 대화형 SSH 셸 종료를 막기 위해 `return 1 2>/dev/null || exit 1`로 보완했고, 6.1단계에 `awk` + `psql -qtA` `COPY tmp_erased FROM STDIN` + `JOIN`으로 `REMAINING_UNSUBS=0` 확인 SQL을 구체화했습니다.
+
+### 2차 한정 합성 검증 결과
+
+- **실제 호스트 `ubuntu` UID `1001` vs `1000` 소유권·정리 (`ubuntu:24.04` 컨테이너 검증)**:
+  - `op1001`(UID `1001`)에서 `1000:1000 0600` 해지 대장 직접 읽기 실패(`UID_1001_DIRECT_READ_DENIED=ok`).
+  - `op1001` 소유 `$RESTORE_WORK`(`0700`) 안에 `reapply/`(`1000:1000 0700`)와 `reapply/erasure.log`(`1000:1000 0600`)만 `install` 배치 시 일반 `rm -rf`는 `reapply` 삭제 불가(`PLAIN_RM_BY_1001_FAILED_AS_EXPECTED=ok`), `sudo rm -rf` 역할을 수행한 관리자 정리에서는 덤프·메타·사본 포함 100% 삭제 확인(`SUDO_RM_CLEANUP_OK=1`).
+- **경우 A · 전환 직전 6.2 · 경우 B · M1/fail-closed (`postgres:17` + `restic/restic:latest` + Docker `--internal` + `gongchae-bell.jar` + Flyway 실스키마)**:
+  - `SHA_MATCH=ok`.
+  - **경우 A**: `ERASURE_REAPPLY_COMPLETE deleted=2`, 6.1 SQL 대조 `REMAINING_UNSUBS_CASE_A=0`.
+  - **전환 직전 6.2**: 웹 추가 해지(`SUB_C`)가 살아 있는 호스트 대장에 쌓인 뒤 직접 마운트 재적용 시 `ERASURE_REAPPLY_COMPLETE deleted=1` → 재실행 시 멱등 `ERASURE_REAPPLY_COMPLETE deleted=0`, `REMAINING_UNSUBS_PRE_CUTOVER=0`.
+  - **경우 B**: `T1` 덤프 복원 후 `T2`에서 `--include /erasure.log`로 `/latest-journal`에 분리 추출 후 재적용 → `ERASURE_REAPPLY_COMPLETE deleted=2`.
+  - **M1 및 fail-closed**: `SUB_COUNT=0` & `ERASURE_INCLUDED=false` 조건 확인, 누락 대장 `RC_MISSING=1` (`ERASURE_LOG_MISSING`), `subscription` `0`건 상태에서도 잘린 대장 전달 시 `RC_TORN=1` (`ERASURE_LOG_TORN_LAST_LINE`) 실패 종료 확인 (`ALL_VERIFY_PASSED`).
+- **문서·정적 검사**:
+  - `docs/ops/backup-restore.md`·`docs/ops/alerts.md` 상대 마크다운 링크 검사 통과, `gitleaks dir --verbose docs/ops` (`no leaks found`), `deploy/backup/backup.sh`·`deploy/tests/*.sh` Git Bash `bash -n` 구문 검사 통과(`GIT_BASH_SYNTAX_OK`).
