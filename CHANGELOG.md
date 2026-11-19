@@ -16,5 +16,11 @@
   - 최초 `bootstrap`과 `bluegreen` rollout 측정 조건 분리, 고정 G4 규격, 실패/중단 복구 절차, `#15`/`#16`(`pg_dump -Fc` + `erasure.log`) 연동을 포함한 `docs/runbook.md` 작성.
   - *(미완료 · 후속 운영 실행)*: OCI 실서버 `bootstrap` 적용, `gongchae.enjoylcjworld.com` 실 HTTPS 자동 배포 성공/실패 롤백 G4 실측, 외부 포트 차단·자원 실측은 실서버 환경 준비 후 기록한다.
 
+- **#15 모니터링 소스·문서 (`ops/#15-monitoring`)**:
+  - `compose.monitoring.yml` overlay(Prometheus `v3.16.0` 호스트 포트 없음·보존 1년, Grafana `13.0.2` `127.0.0.1:3000` 루프백만), scrape·경보 규칙 6개와 `promtool` 시험, 대시보드 `공채벨 운영`, Grafana 전달 규칙·운영 디스코드 연락처(웹훅 미설정 시 로컬 닫힌 포트로 전송 꺼짐).
+  - 앱: 정기 회차 `COMPLETE` 뒤 선점한 앱만 1회 보내는 Healthchecks heartbeat(`HEARTBEAT_COLLECTOR_URL`, 기본 꺼짐), API 경고·차단 한도 게이지, HTTP 요청 히스토그램(5ms~30s, 25초 예산 요청까지 p95가 포화되지 않음).
+  - #14 통합: `deploy.sh monitoring <compose 인자>`(앱 태그를 `deploy/state`에서 읽어 overlay 명령 실행), `compose.prod.yml`이 앱에 heartbeat URL 전달, `deploy.yml`이 `compose.monitoring.yml` 동기화, 실제 Compose 통합 시험 `compose-integration.sh`와 CI 잡.
+  - *(미완료 · 후속 운영 실행)*: 서버 설치, 외부 포트 차단 확인, 운영 디스코드·Healthchecks.io·UptimeRobot 실제 발동·수신·복구, 메모리·디스크 실측. M2 발송 지표와 묶음 heartbeat는 #7.
+
 ### Added (M1 Baseline on `main`)
 - **#2~#5 공고 수집 및 웹 M1 기반** (`000dce55`): Java 21 / Spring Boot 4.1.2 / PostgreSQL 17 / Flyway(V1~V4), 공공데이터 채용정보 수집기(`START_SCAN` 최초 적재, 정기 수집, 상세 수집, 영속 일 예산), 탐색·상세·기관 3년 통계 웹 화면.

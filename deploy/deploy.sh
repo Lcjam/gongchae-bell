@@ -15,6 +15,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="${DEPLOY_ROOT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 COMPOSE_FILE="${COMPOSE_FILE:-$ROOT_DIR/compose.prod.yml}"
+MONITORING_COMPOSE_FILE="${MONITORING_COMPOSE_FILE:-$ROOT_DIR/compose.monitoring.yml}"
 ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env}"
 CADDY_TEMPLATES_DIR="${CADDY_TEMPLATES_DIR:-$ROOT_DIR/deploy/caddy}"
 STATE_DIR="${DEPLOY_STATE_DIR:-$ROOT_DIR/deploy/state}"
@@ -186,7 +187,17 @@ default_deploy_id() {
 
 ensure_dirs_and_cleanup_trap() {
   mkdir -p "$STATE_DIR" "$CADDY_RUNTIME_DIR"
-  trap 'rm -f "$CADDY_RUNTIME_DIR/upstream.caddy.next" "$STATE_DIR"/*.tmp.$$' EXIT
+  trap cleanup_on_exit EXIT
+}
+
+# upstream.caddy.next is shared: only the run that staged it (under the deploy lock) removes it. A lock-free command
+# (monitoring, status, help) or a run that failed to take the lock must not delete a deploy's staged file mid-switch.
+OWNS_STAGED_UPSTREAM=0
+cleanup_on_exit() {
+  if [[ "$OWNS_STAGED_UPSTREAM" -eq 1 ]]; then
+    rm -f "$CADDY_RUNTIME_DIR/upstream.caddy.next"
+  fi
+  rm -f "$STATE_DIR"/*.tmp.$$
 }
 
 acquire_lock() {
@@ -328,7 +339,12 @@ stage_and_validate_upstream() {
   local target_color="$1"
   local template="$CADDY_TEMPLATES_DIR/upstream.${target_color}.caddy"
   [[ -f "$template" ]] || fail "Missing upstream template: $template"
-  cp -f "$template" "$CADDY_RUNTIME_DIR/upstream.caddy.next"
+  OWNS_STAGED_UPSTREAM=1
+  # Callers use `if ! stage_and_validate_upstream`, where errexit is off: check the copy explicitly.
+  if ! cp -f "$template" "$CADDY_RUNTIME_DIR/upstream.caddy.next"; then
+    log "CADDY_STAGE_FAIL could not stage upstream.caddy.next for target=$target_color" >&2
+    return 1
+  fi
 
   if ! compose exec -T caddy sh -c '
     sed "s|/etc/caddy/runtime/upstream.caddy|/etc/caddy/runtime/upstream.caddy.next|g" /etc/caddy/Caddyfile > /tmp/Caddyfile.validate
@@ -346,13 +362,24 @@ stage_and_validate_upstream() {
 
 atomic_reload_upstream() {
   local target_color="$1"
+  # Callers use `if ! atomic_reload_upstream`, where errexit is off: every file step is checked here. Before, a failed
+  # mv (e.g. the staged file removed) left the old upstream, and its successful reload was reported as the switch.
   if [[ -f "$CADDY_RUNTIME_DIR/upstream.caddy" ]]; then
-    cp -f "$CADDY_RUNTIME_DIR/upstream.caddy" "$CADDY_RUNTIME_DIR/upstream.caddy.prev"
+    if ! cp -f "$CADDY_RUNTIME_DIR/upstream.caddy" "$CADDY_RUNTIME_DIR/upstream.caddy.prev"; then
+      log "CADDY_STAGE_FAIL could not keep upstream.caddy.prev; upstream unchanged (target=$target_color)" >&2
+      return 1
+    fi
   fi
-  mv -f "$CADDY_RUNTIME_DIR/upstream.caddy.next" "$CADDY_RUNTIME_DIR/upstream.caddy"
+  if ! mv -f "$CADDY_RUNTIME_DIR/upstream.caddy.next" "$CADDY_RUNTIME_DIR/upstream.caddy"; then
+    log "CADDY_STAGE_FAIL staged upstream.caddy.next could not be moved; upstream unchanged (target=$target_color)" >&2
+    return 1
+  fi
   if ! compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile; then
     if [[ -f "$CADDY_RUNTIME_DIR/upstream.caddy.prev" ]]; then
-      mv -f "$CADDY_RUNTIME_DIR/upstream.caddy.prev" "$CADDY_RUNTIME_DIR/upstream.caddy"
+      if ! mv -f "$CADDY_RUNTIME_DIR/upstream.caddy.prev" "$CADDY_RUNTIME_DIR/upstream.caddy"; then
+        # The file now names the target while Caddy still serves the old color: keep pending and the target for abort.
+        fail "CADDY_RELOAD_REVERT_FAIL upstream.caddy names $target_color after a failed reload; run abort (pending kept)"
+      fi
     fi
     log "CADDY_RELOAD_FAIL reverted upstream.caddy" >&2
     return 1
@@ -365,7 +392,12 @@ rollback_reload_from_prev() {
     log "ROLLBACK_RELOAD_FAILED missing upstream.caddy.prev" >&2
     return 1
   fi
-  mv -f "$CADDY_RUNTIME_DIR/upstream.caddy.prev" "$CADDY_RUNTIME_DIR/upstream.caddy"
+  # Called as `if ! rollback_reload_from_prev` (errexit off). An unchecked failed mv here would reload the target's
+  # upstream "successfully", and the caller would then stop the color still being served.
+  if ! mv -f "$CADDY_RUNTIME_DIR/upstream.caddy.prev" "$CADDY_RUNTIME_DIR/upstream.caddy"; then
+    log "ROLLBACK_RELOAD_FAILED could not restore upstream.caddy.prev; keeping both containers running" >&2
+    return 1
+  fi
   if ! compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile; then
     log "ROLLBACK_RELOAD_FAILED caddy reload failed during rollback; keeping both containers running" >&2
     return 1
@@ -828,6 +860,7 @@ Usage:
   deploy.sh abort --deploy-id ID [--if-pending]
   deploy.sh rollback [--phase full|switch] [--deploy-id ID]
   deploy.sh status
+  deploy.sh monitoring <docker compose args>   (#15 overlay, e.g. monitoring up -d prometheus grafana)
   deploy.sh <image_tag>    (shorthand for: deploy <image_tag> --mode auto --phase full)
 
 Notes:
@@ -935,6 +968,17 @@ main() {
           ;;
         *) fail "Invalid --mode: $mode" ;;
       esac
+      return 0
+      ;;
+    monitoring)
+      # #15 overlay on the same Compose project (docs/ops/monitoring.md). compose.prod.yml requires APP_BLUE_TAG and
+      # APP_GREEN_TAG, which live in deploy/state, not in .env: read them like every other compose call here. No deploy
+      # lock: these commands do not touch the apps, Caddy or the deploy state.
+      shift
+      [[ $# -gt 0 ]] || fail "monitoring requires docker compose arguments, e.g. 'monitoring up -d prometheus grafana'"
+      [[ -f "$MONITORING_COMPOSE_FILE" ]] || fail "MONITORING_FILE_MISSING $MONITORING_COMPOSE_FILE"
+      export_color_tags
+      compose -f "$MONITORING_COMPOSE_FILE" "$@"
       return 0
       ;;
     -h|--help)

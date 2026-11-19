@@ -1,0 +1,45 @@
+# Isolated stack for alert-e2e.sh only: the real app jar on a fresh database, the Discord webhook replaced by a stub.
+# Mirrors compose.prod.yml where the overlay depends on it: the internal backend network and the app's :8081.
+name: gongchae-monitoring-e2e
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: gongchae
+      POSTGRES_USER: e2e
+      POSTGRES_PASSWORD: e2e-only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U e2e -d gongchae"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    networks: [backend]
+
+  app-blue:
+    image: eclipse-temurin:21-jre
+    command: ["java", "-Xmx256m", "-jar", "/app/gongchae-bell.jar"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/gongchae
+      DB_USER: e2e
+      DB_PASSWORD: e2e-only
+      MANAGEMENT_ADDRESS: 0.0.0.0
+      COLLECTOR_ENABLED: "false"
+    volumes:
+      - ./build/libs/gongchae-bell.jar:/app/gongchae-bell.jar:ro
+    networks: [backend]
+
+  discord-stub:
+    image: python:3.13-alpine
+    command: ["python", "/stub/stub.py", "serve"]
+    volumes:
+      - ./deploy/monitoring/tests:/stub:ro
+      - ./deploy/monitoring/grafana/dashboards:/dashboards:ro
+    networks: [monitoring]
+
+networks:
+  backend:
+    internal: true

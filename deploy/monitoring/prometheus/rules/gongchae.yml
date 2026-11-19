@@ -1,0 +1,57 @@
+# Prometheus evaluates the rules; Grafana forwards every firing one to the ops Discord (provisioning/alerting).
+# Thresholds are initial settings (docs/ops/monitoring.md), not measured targets. Tests: ../tests/gongchae.test.yml.
+# The summary is a fixed label so the forwarded Discord message is readable without opening Prometheus.
+groups:
+  - name: gongchae
+    rules:
+      - alert: GongchaeAppMetricsDown
+        # No color answers the scrape. The DB-backed alerts below go silent without it, so this one covers them.
+        expr: max(up{job="gongchae-app"}) < 1 or absent(up{job="gongchae-app"})
+        for: 5m
+        labels:
+          severity: critical
+          summary: 앱 지표 수집 실패 5분 (blue·green 모두 응답 없음)
+
+      - alert: GongchaeRegularCollectionFailing
+        # Runs after the last COMPLETE one. A run still in progress counts, so `for` waits it out.
+        expr: max(collector_regular_incomplete_consecutive) >= 2
+        for: 10m
+        labels:
+          severity: critical
+          summary: 정기 수집 2회 연속 미완료 (실패 기록)
+
+      - alert: GongchaeRegularCollectionStale
+        # Slots that never ran leave no row; 2h15m without a COMPLETE run means two :07 slots were missed.
+        # A DB that never completed a run (collector not enabled yet) reports 0 and stays quiet.
+        expr: max(collector_last_complete_epoch) > 0 and time() - max(collector_last_complete_epoch) > 8100
+        for: 1m
+        labels:
+          severity: critical
+          summary: 정기 수집 2회 연속 미완료 (마지막 완전 수집 2시간 15분 초과)
+
+      - alert: GongchaeApiBudgetWarning
+        # KST daily count against the configured COLLECTOR_WARNING_LIMIT (500). Clears at KST midnight.
+        expr: max(collector_api_attempts_today) >= max(collector_api_warning_limit)
+        labels:
+          severity: warning
+          summary: 공공데이터 API 일 호출 경고 한도 도달
+
+      - alert: GongchaeApiBudgetStopped
+        # COLLECTOR_STOP_LIMIT (900): no more reservations today, regular collection included.
+        expr: max(collector_api_attempts_today) >= max(collector_api_stop_limit)
+        labels:
+          severity: critical
+          summary: 공공데이터 API 일 호출 차단 한도 도달 (오늘 수집 중단)
+
+      - alert: GongchaeHttp5xxHigh
+        # Over 10 minutes: more than 5% of requests are 5xx and at least 5 of them, so one error on a quiet site is not a page.
+        expr: |
+          (
+            sum(rate(http_server_requests_seconds_count{job="gongchae-app",status=~"5..",uri!~"/actuator.*"}[10m]))
+            / sum(rate(http_server_requests_seconds_count{job="gongchae-app",uri!~"/actuator.*"}[10m]))
+          ) > 0.05
+          and sum(increase(http_server_requests_seconds_count{job="gongchae-app",status=~"5..",uri!~"/actuator.*"}[10m])) >= 5
+        for: 5m
+        labels:
+          severity: warning
+          summary: HTTP 5xx 비율 5% 초과 (10분, 5건 이상)

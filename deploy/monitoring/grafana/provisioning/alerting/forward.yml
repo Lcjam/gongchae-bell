@@ -1,0 +1,56 @@
+# Grafana does not own the thresholds: it forwards every firing Prometheus alert (rules/gongchae.yml) to the ops
+# Discord and sends the resolve when the alert clears. One Grafana instance per Prometheus alert name.
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: ops-discord
+    receivers:
+      - uid: ops-discord
+        type: discord
+        disableResolveMessage: false
+        settings:
+          url: $OPS_DISCORD_WEBHOOK_URL
+          use_discord_username: false
+
+policies:
+  - orgId: 1
+    receiver: ops-discord
+    group_by: [prom_alert]
+    group_wait: 30s
+    group_interval: 1m
+    repeat_interval: 4h
+
+groups:
+  - orgId: 1
+    name: prometheus-forward
+    folder: gongchae
+    interval: 30s
+    rules:
+      - uid: gongchae-prometheus-forward
+        title: GongchaePrometheusAlert
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 300, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              # Grafana replaces alertname with the rule title, so the Prometheus name moves to prom_alert.
+              # Grafana does not expand env vars here: "$1" reaches Prometheus as is (verified by alert-e2e.sh).
+              expr: label_replace(ALERTS{alertstate="firing"}, "prom_alert", "$1", "alertname", "(.+)")
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0]}
+        # No firing Prometheus alert = no series = nothing to say. Prometheus unreachable = Error, which is sent.
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        annotations:
+          description: 규칙과 대응 절차는 docs/ops/monitoring.md

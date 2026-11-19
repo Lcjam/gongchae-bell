@@ -150,7 +150,8 @@ sudo chmod 0750 /opt/gongchae-bell /opt/gongchae-bell/deploy/state /var/lib/gong
 | 실패 시점 | 자동 동작 | 서버 상태 | 수동 조치 |
 |---|---|---|---|
 | **기동 전 실패** (`PRE_SWITCH_FAIL`) | 새 색 `stop -t 40` 후 종료 | 기존 색·Caddy·`active_color` 무변경 | 새 버전 로그 확인 후 재시도 |
-| **Caddy 검증/리로드 실패** (`CADDY_VALIDATE_FAIL`, `CADDY_RELOAD_FAIL`) | `upstream.caddy` 원복, 새 색 중지, `pending_*` 정리 | 기존 색 계속 서빙 | `Caddyfile`·런타임 마운트 점검 |
+| **Caddy 검증/리로드 실패** (`CADDY_VALIDATE_FAIL`, `CADDY_RELOAD_FAIL`, `CADDY_STAGE_FAIL`) | `upstream.caddy` 원복, 새 색 중지, `pending_*` 정리. `CADDY_STAGE_FAIL`은 `upstream.caddy.next` 복사·이동이나 `.prev` 보관이 실패해 `upstream.caddy`를 바꾸지 않은 경우다(예전에는 이동 실패가 가려져 구 설정의 reload가 `SWITCH_OK`로 보고될 수 있었다) | 기존 색 계속 서빙 | `Caddyfile`·런타임 마운트·디스크 점검 후 재시도 |
+| **리로드 실패 뒤 원복 실패** (`CADDY_RELOAD_REVERT_FAIL`), **전환 뒤 복귀 실패** (`ROLLBACK_RELOAD_FAILED`) | 즉시 실패 종료. 새 색과 `pending_*`를 남긴다 | 두 색 실행 중, `upstream.caddy`가 새 색을 가리킬 수 있음 | `deploy.sh abort --deploy-id <ID>`로 구 색 복귀 |
 | **전환 직후/외부 G4 실패** (`POST_SWITCH_FAIL`, `G4_FAIL`) | 실행 중인 구 색으로 즉시 `caddy reload` 복귀 후 새 색 중지 | 기존 색·`active_color` 유지 (콜드 스타트 없음) | Actions 아티팩트 `g4-probe-report` 및 앱 로그 확인 |
 | **중단된 배포·종료 실패 잔류** (`PENDING_DEPLOY_EXISTS`, `STATE_MISMATCH`, `FINALIZE_STOP_FAILED`) | 새 배포 **fail-closed** 거부 (`finalize` 종료 실패 시에도 `pending_*` 유지) | 실행 중 컨테이너·기존 `active_color` 보호 | 아래 `중단 복구` 절차로 `finalize` 재시도 또는 `abort` 수행 |
 | **사후 롤백** (`rollback`) | `prev_color`/`prev_sha` 기동 → 외부 G4 검증 → 현재 색 `stop -t 40` | 이전 정상 버전으로 복귀 | `workflow_dispatch(action=rollback)` 또는 아래 2단계/G4_HOOK 절차 |
@@ -219,6 +220,8 @@ docker compose -f compose.prod.yml --profile blue --profile green ps
 ## 7. 후속 연동 인터페이스 (#15 관측 · #16 백업)
 
 - **#15 관측**: `app-blue`/`app-green`은 `MANAGEMENT_ADDRESS=0.0.0.0`으로 Docker 내부망 `:8081`(`/actuator/health/readiness`, `/actuator/prometheus`)만 노출한다. 호스트 포트는 열지 않는다.
+  - Prometheus·Grafana는 `compose.monitoring.yml` overlay로 같은 프로젝트에 띄운다. 설치·재기동·점검 명령은 **`deploy/deploy.sh monitoring <docker compose 인자>`**로 실행한다(예: `deploy/deploy.sh monitoring up -d prometheus grafana`). 앱 태그를 `deploy/state`에서 읽기 때문이며, `docker compose -f compose.prod.yml -f compose.monitoring.yml`을 직접 치면 `APP_BLUE_TAG` 보간 오류로 실패한다. 앱 배포(`deploy.sh` 본 명령)는 모니터링 컨테이너를 지우지 않는다. 잠금 없이 도는 명령(`monitoring`, `status`, 도움말)이나 잠금을 얻지 못한 실행은 다른 배포가 준비한 `upstream.caddy.next`를 지우지 않는다(그 파일은 준비한 실행만 정리한다). 절차·경보·첫 정기 수집 확인은 [모니터링과 경보](ops/monitoring.md#설치-운영-서버-후속-실행)를 따른다.
+  - 앱 heartbeat `HEARTBEAT_COLLECTOR_URL`과 모니터링 키(`GRAFANA_ADMIN_PASSWORD`, `OPS_DISCORD_WEBHOOK_URL`)는 같은 `/opt/gongchae-bell/.env`에 둔다(키 이름은 `deploy/.env.prod.example`).
 - **#16 백업 ([백업과 복구 절차](ops/backup-restore.md), ADR-0012 / ADR-0013)**:
   - 일일 논리 백업 대상은 **실행 중인 `postgres` 컨테이너에서 추출한 `pg_dump -Fc` 결과물**과 **호스트의 `${ERASURE_HOST_DIR}/erasure.log`(해지 대장)**이다. 이를 `restic`으로 암호화해 OCI Object Storage에 보관한다.
   - **실행 중인 PostgreSQL 데이터 볼륨(`postgres_data`) 파일 직접 복사는 일일 논리 백업 인터페이스로 사용하지 않는다.**
@@ -229,7 +232,7 @@ docker compose -f compose.prod.yml --profile blue --profile green ps
 ## 8. 현재 검증 범위와 남은 운영 실행 조건
 
 - **소스·구문·대역 검증 (본 브랜치 `ops/#14-bluegreen-deploy`)**:
-  - `deploy/tests/deploy-test.sh` (모의 `docker`/`curl` + 실제 `flock` 기반 15개 시나리오), `deploy/tests/caddy-integration-test.sh` (실제 `caddy:2-alpine` 기반 헤더·access/502 error 로그 마스킹·IP 경계·reload 전환), `docker compose -f compose.prod.yml --profile blue --profile green config -q`, `Dockerfile` ARM64/컨테이너 빌드, `./gradlew check bootJar`(`DeploymentConfigIntegrationTest` 포함), Gitleaks 스캔으로 검증한다.
+  - `deploy/tests/deploy-test.sh` (모의 `docker`/`curl` + 실제 `flock` 기반 17개 시나리오. 16번은 `deploy.sh monitoring`, 17번은 공유 `upstream.caddy.next` 소유권과 `cp`·`mv` 실패의 전체 CLI 경로), `deploy/tests/caddy-integration-test.sh` (실제 `caddy:2-alpine` 기반 헤더·access/502 error 로그 마스킹·IP 경계·reload 전환), `docker compose -f compose.prod.yml --profile blue --profile green config -q`, `Dockerfile` ARM64/컨테이너 빌드, `./gradlew check bootJar`(`DeploymentConfigIntegrationTest` 포함), Gitleaks 스캔으로 검증한다.
 - **남은 실서버 운영 실행 조건 (후속 실행 단계에서 기록)**:
   1. OCI VM 최초 준비 및 `bootstrap` 실행, HTTPS(`https://gongchae.enjoylcjworld.com`) 확인
   2. 실제 `main` 머지 자동 배포(`bluegreen`)의 G4 외부 시험 0건 실측 기록 (CI `g4-probe-report`)

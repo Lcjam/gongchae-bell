@@ -7,6 +7,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import kr.gongchae.bell.ingestion.PostingIngestor;
+import kr.gongchae.bell.ops.Heartbeat;
 
 @Component
 public class RegularCollector {
@@ -15,9 +16,12 @@ public class RegularCollector {
     private final RecruitmentClient client;
     private final PostingIngestor ingestor;
     private final DetailCollector details;
+    private final Heartbeat heartbeat;
     private final Clock clock;
-    public RegularCollector(CollectionRuns runs,RecruitmentClient client,PostingIngestor ingestor,DetailCollector details,Clock clock) {
-        this.runs=runs;this.client=client;this.ingestor=ingestor;this.details=details;this.clock=clock;
+    public RegularCollector(CollectionRuns runs,RecruitmentClient client,PostingIngestor ingestor,DetailCollector details,
+            Heartbeat collectorHeartbeat,Clock clock) {
+        // Named after its bean so a second Heartbeat bean (digest, #7) does not make the injection ambiguous.
+        this.runs=runs;this.client=client;this.ingestor=ingestor;this.details=details;this.heartbeat=collectorHeartbeat;this.clock=clock;
     }
     public boolean collect(Instant scheduledAt) {
         String slot=slot(scheduledAt);
@@ -33,6 +37,8 @@ public class RegularCollector {
             // The core may already have committed APPLY_ERROR; never overwrite a finished run.
             runs.fail(run.get(),CollectionFailure.Code.INGESTION_FAILED);log.warn("COLLECTION_FAILED INGESTION_FAILED");return false;
         }
+        // Only the slot owner reaches here, once, after COMPLETE is committed; the detail sweep is not part of the signal.
+        heartbeat.ping();
         details.collect(slot);
         return true;
     }

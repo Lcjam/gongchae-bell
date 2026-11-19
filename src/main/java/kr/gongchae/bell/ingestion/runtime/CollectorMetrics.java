@@ -10,7 +10,10 @@ import org.springframework.stereotype.Component;
 /** Gauges read durable state, so restarts do not erase the operational picture. */
 @Component
 public class CollectorMetrics {
-    public CollectorMetrics(MeterRegistry registry,JdbcClient jdbc,Clock clock) {
+    public CollectorMetrics(MeterRegistry registry,JdbcClient jdbc,Clock clock,CollectorProperties properties) {
+        // The configured limits, so alert rules compare against what ApiBudget enforces, not a copy of ADR-0014.
+        Gauge.builder("collector.api.warning.limit",properties::warningLimit).register(registry);
+        Gauge.builder("collector.api.stop.limit",properties::stopLimit).register(registry);
         Gauge.builder("collector.api.attempts.today",jdbc,j -> j.sql("SELECT COALESCE((SELECT count FROM api_budget WHERE day=:day),0)")
                 .param("day",LocalDate.now(clock.withZone(ApiBudget.KST))).query(Integer.class).single()).register(registry);
         Gauge.builder("collector.last.complete.epoch",jdbc,j -> j.sql("""
