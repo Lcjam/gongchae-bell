@@ -61,20 +61,32 @@
 ## 해지 대장과 복원 (ADR-0013)
 
 - 해지하면 구독 행 잠금 아래에서 `<구독 UUID>\t<UTC 시각>` 한 줄을 쓰고, 파일과 디렉터리를 fsync한다. 디렉터리 fsync는 POSIX에서만 하며, 매번 파일 잠금을 쥔 채로 한다. 그 뒤에 행을 지운다. 대장 쓰기가 실패하면(파일이 없거나 fsync 실패) 해지 요청이 실패하고 아무것도 지우지 않는다.
-- 복원 (상세 절차 및 격리 명령은 [백업과 복구 §7](backup-restore.md#7-격리-복원-리허설-및-장애-복구-절차-adr-0012--adr-0013--fail-closed)):
-  1. **운영 DB에 직접 덮어쓰지 않고** 전용 일회용 `postgres:17` 격리 DB에 `ALERTS_ENABLED=false`, `COLLECTOR_ENABLED=false`, 외부 연결 차단(`--internal`) 상태로 덤프를 복원한다. (운영 `.env`를 통째로 `source`하지 않는다.)
-  2. 다음 명령을 격리 DB(`DB_URL`·`DB_USER`·`DB_PASSWORD`)와 부작용 차단 env(`ALERTS_ENABLED=false`, `COLLECTOR_ENABLED=false`, `HEARTBEAT_COLLECTOR_URL=`)로 실행한다:
+- 복원 (전체 단계와 복사·정리 명령은 [백업과 복구 §7](backup-restore.md#7-격리-복원-리허설-및-장애-복구-절차-adr-0012--adr-0013--fail-closed)):
+  1. **운영 DB에 직접 덮어쓰지 않고** 전용 일회용 `postgres:17` 격리 DB에 `ALERTS_ENABLED=false`, `COLLECTOR_ENABLED=false`, 외부 연결 차단(`--internal`) 상태로 덤프를 복원한다. (운영 `/opt/gongchae-bell/.env`를 통째로 `source`하지 않고, 이미지·태그는 `APP_IMAGE` 1줄 추출 + 배포 상태 파일에서 읽는다.)
+  2. OCI 호스트에는 Java나 `/app/gongchae-bell.jar`가 없으므로 **앱 컨테이너(`-u 1000:1000`)로만** 실행하며, 대장 1개만 담은 전용 하위 디렉터리(`$RESTORE_WORK/reapply`, `sudo install`로 `1000:1000` `0700`/`0600` 설정)만 `:rw` 마운트해 격리 DB에 재적용한다(덤프·메타파일은 마운트하지 않는다):
      ```bash
-     ALERTS_ENABLED=false COLLECTOR_ENABLED=false HEARTBEAT_COLLECTOR_URL= \
-     DB_URL=jdbc:postgresql://<격리-pg>:5432/<격리-db> DB_USER=<격리-user> DB_PASSWORD=<격리-pw> \
-     ALERTS_ERASURE_LOG=<적용할-erasure.log-경로> \
-       java -jar /app/gongchae-bell.jar --spring.main.web-application-type=none --alerts.erasure-reapply=true
+     docker run --rm --network "<격리-internal-net>" \
+       -u 1000:1000 \
+       -v "$RESTORE_WORK/reapply:/restore:rw" \
+       -e DB_URL="jdbc:postgresql://<격리-pg>:5432/<격리-db>" \
+       -e DB_USER="<격리-user>" \
+       -e DB_PASSWORD="<격리-pw>" \
+       -e ALERTS_ENABLED=false \
+       -e COLLECTOR_ENABLED=false \
+       -e HEARTBEAT_COLLECTOR_URL= \
+       -e ALERTS_ERASURE_LOG=/restore/erasure.log \
+       "${APP_IMAGE}:${TARGET_TAG}" \
+       --spring.main.web-application-type=none \
+       --alerts.erasure-reapply=true
      ```
-     - **대장 출처 선택**: 호스트가 살아 있는 사고나 리허설에서는 **살아 있는 최신 호스트 대장(`/var/lib/gongchae-bell/erasure/erasure.log`)**을 사용하고(리허설 시에는 운영 앱과 잠금 간섭을 피하기 위해 사본으로 검증), **절대 백업 안의 과거 사본으로 호스트 대장을 덮어쓰지 않는다.** VM·호스트 자체를 잃었을 때만 사용 가능한 백업(OCI 또는 NAS/PC 사본) 중 **가장 최신** 대장을 사용한다.
+     - **대장 출처 선택**: 호스트가 살아 있는 사고나 리허설에서는 **살아 있는 최신 호스트 대장(`/var/lib/gongchae-bell/erasure/erasure.log`)**을 사용하고(리허설 시에는 운영 앱과 잠금 간섭을 피하기 위해 사본으로 검증), **절대 백업 안의 과거 사본으로 호스트 대장을 덮어쓰지 않는다.** VM·호스트 자체를 잃었을 때만 사용 가능한 백업(OCI 또는 NAS/PC 사본) 중 대장이 포함된 **가장 최신** snapshot의 `/erasure.log`만 별도 디렉터리에 추출해 사용한다.
      - `ErasureJournal.readStrict()`가 `FileChannel.lock()`을 위해 쓰기 가능(`READ, WRITE`, `1000:1000`, `0600`) 열기를 요구하므로 컨테이너 마운트는 `:rw`로 둔다.
      - 로그 `ERASURE_REAPPLY_COMPLETE deleted=N`과 종료 코드 `0`을 확인한다.
-  3. **사후 검증 및 발송 재개 후속 게이트**: 격리 DB의 `subscription` 테이블에 대장 UUID가 `0`건 남았는지 확인한 뒤, 실제 발송 재개(`ALERTS_ENABLED=true`) 전에는 키 정합성(웹훅 키 ID·HMAC·토큰 키)·호스트 대장 배치(VM 소실 시)·실운영 전환 게이트를 별도로 확인한다.
-- 아래 경우 명령은 실패한다. 완료 로그가 없고, 종료 코드가 0이 아니며, 아무것도 지우지 않는다. 운영자가 원인을 확인한 뒤 다시 실행한다. 그동안 알림을 켜지 않으며 **missing·손상 대장을 빈 대장으로 대체해 통과시키지 않는다.** (단, 처음부터 `ALERTS_ENABLED=false`로만 운영해 대장 파일이 아직 없던 M1 전용 백업은 `erasure_included=false`를 확인해 M2 이후 필수 조건과 구분한다.)
+  3. **사후 검증·전환 직전 재적용·발송 재개 후속 게이트**:
+     - 격리 DB의 `subscription` 테이블에 대장 UUID가 `0`건 남았는지 SQL로 직접 대조한다.
+     - **실제 장애 복구 전환 시에는** 리허설 사본 재적용 이후 전환 직전까지 웹(`/subscriptions/unsubscribe*`)을 통해 들어온 추가 해지를 반영하기 위해, `app-blue`·`app-green` **모든 운영 앱 컨테이너를 중지한 뒤** `/var/lib/gongchae-bell/erasure:/erasure:rw`를 직접 마운트해 멱등 재적용과 0건 대조를 1회 더 통과해야 한다.
+     - 실제 발송 재개(`ALERTS_ENABLED=true`) 전에는 호스트 대장 보존·배치(`1000:1000`, `0600`), 키 정합성(웹훅 키 ID·HMAC·토큰 키), 실운영 DB 전환 완료, 정리(`sudo rm -rf "$RESTORE_WORK"`)를 별도로 확인한다.
+- 아래 경우 명령은 실패한다. 완료 로그가 없고, 종료 코드가 0이 아니며, 아무것도 지우지 않는다. 운영자가 원인을 확인한 뒤 다시 실행한다. 그동안 알림을 켜지 않으며 **missing·손상 대장을 빈 대장으로 대체해 통과시키지 않는다.** (단, 복원 DB `subscription` 행 수 `0` **AND** `backup-meta.txt` `erasure_included=false` **AND** M2 미활성 이력이 모두 확인되는 M1 전용 백업만 대장 재적용을 건너뛰며, 대장 파일이 존재하면 `0`건이어도 손상 검사를 건너뛰지 않는다.)
   - 경로에 파일이 없음(경로 오타, 대장을 되살리지 않음, 디렉터리를 가리킴): `ERASURE_LOG_MISSING`. 빈 대장으로 보지 않는다. 해지가 한 번도 없었던 경우에도 준비해 둔 빈 파일이 백업에 있어야 한다.
   - 대장에 잘리거나 형식이 틀린 줄: `ERASURE_LOG_TORN_LAST_LINE` 또는 `ERASURE_LOG_BAD_LINE_<줄 번호>`.
 - 정리: 자동 정리는 없다. 해지 시각 이전에 만든 모든 백업 사본의 삭제가 확인된 뒤에만 그 줄을 지울 수 있다. 파일을 다시 쓰는 정리는 두 앱을 멈춘 상태에서 한다. 사본 삭제를 확인할 방법과 주기를 정하기 전까지 대장은 정리하지 않는다(처리방침에도 '미정'으로 표시).
