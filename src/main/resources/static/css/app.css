@@ -10,5 +10,8 @@ h1 { letter-spacing: -.055em; line-height: 1.25; overflow-wrap: anywhere; }
 .btn-outline-primary { --bs-btn-color: #255c50; --bs-btn-border-color: #255c50; --bs-btn-hover-bg: #255c50; --bs-btn-hover-border-color: #255c50; }
 .empty-state { border: 1px dashed #cedad0; border-radius: 12px; background: white; padding: 2.5rem 1.5rem; text-align: center; color: #637168; }
 .pre-line-text { white-space: pre-line; overflow-wrap: anywhere; }
+.job-card-inst { min-width: 0; overflow-wrap: anywhere; }
 .job-card-title { overflow-wrap: anywhere; }
+.job-card-badges .badge { line-height: 1.3; }
+.job-card-badges .job-meta-badge { white-space: normal; text-align: left; overflow-wrap: anywhere; max-width: 100%; }
 a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid #bc7b20; outline-offset: 2px; }
