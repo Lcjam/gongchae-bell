@@ -611,18 +611,354 @@
       ]
     },
     {
-      "type": "text",
-      "title": "발송 적체·실패·결과 불명확 (M2)",
+      "type": "timeseries",
+      "title": "발송 적체 · 회수 대상 (backlog / sending_stuck)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
         "y": 34
       },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(alerts_notification_backlog{job=\"gongchae-app\"})",
+          "legendFormat": "적체 (backlog, 5m+ 대기)",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(alerts_notification_sending_stuck{job=\"gongchae-app\"})",
+          "legendFormat": "회수 대상 (sending_stuck, 5m+)",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "description": "DB 기반 게이지(두 색 같은 값 → max). backlog > 0이 15분 지속 시 GongchaeAlertsBacklog 발동. sending_stuck은 recoverAsync/sweepSync 회수 대상으로 적체와 함께 본다."
+    },
+    {
+      "type": "row",
+      "title": "알림 발송 (M2, DB 게이지 max · 카운터/타이머 sum)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 42
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "실패(1h) · 결과 불명(24h) · 중복 위험(24h)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 43
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (kind) (alerts_notification_failed_last1h{job=\"gongchae-app\"})",
+          "legendFormat": "FAILED 1h · {{kind}}",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (kind) (alerts_notification_uncertain_last24h{job=\"gongchae-app\"})",
+          "legendFormat": "UNCERTAIN 24h · {{kind}}",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (kind) (alerts_notification_duplicate_risk_last24h{job=\"gongchae-app\"})",
+          "legendFormat": "중복 위험 24h · {{kind}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "description": "kind별 max로 blue·green 중복 제거. 합계 기준 FAILED(1h) >= 5 → GongchaeAlertsFailedHigh, UNCERTAIN(24h) > 0 → GongchaeAlertsUncertain(재발송 금지). 중복 위험은 UNKNOWN 경유 후 SENT 건수."
+    },
+    {
+      "type": "timeseries",
+      "title": "발송 성공 (최근 24h, SENT)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 43
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (kind) (alerts_notification_sent_last24h{job=\"gongchae-app\"})",
+          "legendFormat": "SENT 24h · {{kind}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "description": "종류(kind)별 최근 24시간 SENT 완료 작업 수(DB 기반 게이지, kind별 max로 중복 제거)."
+    },
+    {
+      "type": "timeseries",
+      "title": "구독 수(채널별) & 발송 상한 사용량",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 43
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (channel) (alerts_subscriptions_active{job=\"gongchae-app\"})",
+          "legendFormat": "활성 · {{channel}}",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (channel) (alerts_subscriptions_disabled{job=\"gongchae-app\"})",
+          "legendFormat": "비활성 · {{channel}}",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (provider) (alerts_send_total_used{job=\"gongchae-app\"})",
+          "legendFormat": "상한 사용 · {{provider}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "description": "이메일 일 상한 90통(UTC), 디스코드 시간당 상한 300회(ADR-0014). 두 색 같은 DB 값 → max."
+    },
+    {
+      "type": "bargauge",
+      "title": "발송 시도 결과 · 누적 중복 위험 (선택 기간 합)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 51
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (kind, outcome) (increase(alerts_delivery_attempts_total{job=\"gongchae-app\"}[$__range]))",
+          "legendFormat": "{{kind}} · {{outcome}}",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (kind) (increase(alerts_delivery_duplicate_risk_total{job=\"gongchae-app\"}[$__range]))",
+          "legendFormat": "중복 위험(누적) · {{kind}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
       "options": {
-        "mode": "markdown",
-        "content": "**아직 지표가 없다.** 발송기(#7)가 구현·머지되면 `docs/ops/monitoring.md`의 M2 통합 계약대로 지표와 경보를 붙인다. 지표가 없는 동안 0으로 채워 정상처럼 보이게 하지 않는다."
-      }
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      },
+      "description": "앱 메모리 카운터(색별 increase 합산). 첫 시도/중복 위험 발생 전에는 빈 값이며, increase()는 보간 근사값이다."
+    },
+    {
+      "type": "timeseries",
+      "title": "작업 생성 → 발송 완료 지연 (비동기 작업 1건 기준)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 51
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(alerts_delivery_delay_max_seconds{job=\"gongchae-app\"})",
+          "legendFormat": "미완료 최장 대기(s)",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (kind) (rate(alerts_delivery_latency_seconds_sum{job=\"gongchae-app\"}[5m])) / sum by (kind) (rate(alerts_delivery_latency_seconds_count{job=\"gongchae-app\"}[5m]))",
+          "legendFormat": "작업 평균 지연 · {{kind}}",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (kind) (alerts_delivery_latency_seconds_max{job=\"gongchae-app\"})",
+          "legendFormat": "작업 최근 max · {{kind}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "description": "분모·단위: SENT 비동기 작업 1건(notification.created_at → finished_at, EMAIL_DIGEST는 08:00 묶음 생성 이후만). 히스토그램 미도입으로 count·sum·max만 노출되며 p95는 제공하지 않는다."
+    },
+    {
+      "type": "timeseries",
+      "title": "NEW 공고 수집 → 발송 완료 지연 (G7, NEW 항목 1건 기준)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 51
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (kind) (rate(alerts_delivery_collection_latency_seconds_sum{job=\"gongchae-app\"}[5m])) / sum by (kind) (rate(alerts_delivery_collection_latency_seconds_count{job=\"gongchae-app\"}[5m]))",
+          "legendFormat": "수집→발송 평균 · {{kind}}",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (kind) (alerts_delivery_collection_latency_seconds_max{job=\"gongchae-app\"})",
+          "legendFormat": "수집→발송 최근 max · {{kind}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "description": "분모·단위: SENT NEW 공고-구독 항목 1건(posting.first_seen_at → finished_at, DISCORD_NEW·EMAIL_DIGEST만, DEADLINE 제외). EMAIL_DIGEST는 08:00 이전 묶음 대기 포함. 히스토그램 미도입으로 평균·max만 표시하며 p95는 제공하지 않는다."
     }
   ],
   "templating": {
