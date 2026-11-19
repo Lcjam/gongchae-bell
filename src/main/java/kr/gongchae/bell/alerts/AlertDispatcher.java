@@ -185,8 +185,14 @@ public class AlertDispatcher {
 
         SendOutcome outcome = result.outcome();
         if (outcome == SendOutcome.SUCCESS) {
+            OffsetDateTime finishedAt = now();
             if (ledger.finishAsync(claim, true, null, false)) {
-                metrics.recordDeliveryLatency(job.kind(), job.createdAt(), now());
+                metrics.recordDeliveryLatency(job.kind(), job.createdAt(), finishedAt);
+                for (PostingSummary item : rechecked.newPostings()) {
+                    if (item.firstSeenAt() != null) {
+                        metrics.recordCollectionToDeliveryLatency(job.kind(), item.firstSeenAt(), finishedAt);
+                    }
+                }
                 if (job.anyUnknown()) metrics.recordDuplicateRisk(job.kind());
             }
             return null;

@@ -22,7 +22,11 @@ public class AlertMatcher {
             String webhookKeyId, SubscriptionService.Conditions conditions, int tokenVersion,
             OffsetDateTime confirmedAt) {}
 
-    public record PostingSummary(long sn, String instName, String title, LocalDate endDate) {}
+    public record PostingSummary(long sn, String instName, String title, LocalDate endDate, OffsetDateTime firstSeenAt) {
+        public PostingSummary(long sn, String instName, String title, LocalDate endDate) {
+            this(sn, instName, title, endDate, null);
+        }
+    }
 
     private final JdbcClient jdbc;
 
@@ -141,13 +145,13 @@ public class AlertMatcher {
         }
         CatalogRepository.appendConditions(toCriteria(conditions), where, params);
         return jdbc.sql("""
-                SELECT p.sn, i.name, p.title, p.end_date
+                SELECT p.sn, i.name, p.title, p.end_date, p.first_seen_at
                 FROM posting p
                 JOIN institution i ON i.code = p.inst_code
                 """ + where + " ORDER BY p.end_date ASC, p.sn ASC")
                 .params(params)
                 .query((rs, row) -> new PostingSummary(rs.getLong(1), rs.getString(2), rs.getString(3),
-                        rs.getObject(4, LocalDate.class)))
+                        rs.getObject(4, LocalDate.class), rs.getObject(5, OffsetDateTime.class)))
                 .list();
     }
 }

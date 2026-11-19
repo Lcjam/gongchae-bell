@@ -65,7 +65,8 @@ public class AlertsMetrics {
         Gauge.builder("alerts.send.total.used", this, m -> m.sendTotalUsed("discord", RateLimiter.DISCORD_TOTAL))
                 .tag("provider", "discord").register(registry);
         Gauge.builder("alerts.delivery.delay.max.seconds", this, m -> m.maxPendingAgeSeconds())
-                .description("Max age in seconds of queued/sending async notifications").register(registry);
+                .description("Max age in seconds from notification.created_at for open async jobs (PENDING/RETRY/SENDING)")
+                .register(registry);
     }
 
     void recordAttemptOutcome(String kind, SendOutcome outcome) {
@@ -83,10 +84,30 @@ public class AlertsMetrics {
                 .increment();
     }
 
+    /** Job creation (notification.created_at) to successful delivery latency, recorded once per SENT async job. */
     void recordDeliveryLatency(String kind, OffsetDateTime createdAt, OffsetDateTime finishedAt) {
         Duration d = Duration.between(createdAt, finishedAt);
         if (!d.isNegative()) {
-            Timer.builder("alerts.delivery.latency").tag("kind", kind).register(registry).record(d);
+            Timer.builder("alerts.delivery.latency")
+                    .description("Notification job creation (notification.created_at) to successful delivery latency per sent job")
+                    .tag("kind", kind)
+                    .register(registry)
+                    .record(d);
+        }
+    }
+
+    /**
+     * Collection reflection (posting.first_seen_at) to successful delivery latency (PRD G7), recorded once per
+     * sent NEW (notification, sn) item so pre-bundle waits (e.g. before 08:00 KST EMAIL_DIGEST) are observed.
+     */
+    void recordCollectionToDeliveryLatency(String kind, OffsetDateTime firstSeenAt, OffsetDateTime finishedAt) {
+        Duration d = Duration.between(firstSeenAt, finishedAt);
+        if (!d.isNegative()) {
+            Timer.builder("alerts.delivery.collection.latency")
+                    .description("Collection reflection (posting.first_seen_at) to successful delivery latency per sent NEW item")
+                    .tag("kind", kind)
+                    .register(registry)
+                    .record(d);
         }
     }
 

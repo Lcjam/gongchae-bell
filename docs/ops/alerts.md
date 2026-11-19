@@ -90,6 +90,11 @@
 - `notification`의 상태와 `last_error`, `notification_attempt.outcome`을 함께 본다. `UNCERTAIN`은 공급자가 처리했을 수도 있다는 뜻이다(5xx·타임아웃·종료). 재발송하지 않는다.
 - `SEND_CAP`은 우리 상한에 걸린 것이다(HTTP 없음). `QUOTA_DAILY`는 Resend 일 한도에 걸린 것이다(HTTP 있음). `REQUEST_4XX`·`ACCOUNT_4XX`는 요청이나 계정 설정 문제다. 셋 다 구독을 끄지 않는다.
 - **노출 지표 (`/actuator/prometheus`, 고정 라벨만 사용, PII 없음)**:
-  - `alerts_notification_backlog`, `alerts_notification_sending_stuck`, `alerts_notification_failed_last1h{kind}`, `alerts_notification_uncertain_last24h{kind}`, `alerts_notification_sent_last24h{kind}`, `alerts_notification_duplicate_risk_last24h{kind}`
-  - `alerts_subscriptions_active{channel}`, `alerts_subscriptions_disabled{channel}`, `alerts_send_total_used{provider}`, `alerts_delivery_delay_max_seconds`
-  - `alerts_delivery_attempts_total{kind,outcome}`, `alerts_delivery_duplicate_risk_total{kind}`, `alerts_delivery_latency_seconds{kind}`
+  - `alerts_notification_backlog`: `PENDING`·`RETRY` 상태에서 `next_attempt_at`이 5분 이상 지난 비동기 작업 수(게이지)
+  - `alerts_notification_sending_stuck`: `SENDING` 상태에서 `claimed_at`이 5분을 넘긴 작업 수(게이지)
+  - `alerts_notification_failed_last1h{kind}`, `alerts_notification_uncertain_last24h{kind}`, `alerts_notification_sent_last24h{kind}`, `alerts_notification_duplicate_risk_last24h{kind}`: 최근 1시간/24시간 종결 작업 수(게이지, 6종 `kind`)
+  - `alerts_subscriptions_active{channel}`, `alerts_subscriptions_disabled{channel}`, `alerts_send_total_used{provider}`: 채널별 구독 수·일/시간 발송 상한 사용량(게이지)
+  - `alerts_delivery_attempts_total{kind,outcome}`, `alerts_delivery_duplicate_risk_total{kind}`: 발송 시도 결과 및 `UNKNOWN` 경유 후 `SENT` 누적 카운터
+  - `alerts_delivery_delay_max_seconds`: 현재 미완료 비동기 작업(`PENDING`·`RETRY`·`SENDING`, 대상 `EMAIL_DIGEST`·`DISCORD_NEW`·`DISCORD_DEADLINE`) 중 가장 오래된 작업의 `notification.created_at` 기준 대기 경과 초(게이지, 없으면 `0`)
+  - `alerts_delivery_latency_seconds{kind}`: **작업 생성(`notification.created_at`) → 발송 성공(`SENT`) 완료 지연**(타이머). 집계 단위·분모는 성공 발송된 비동기 작업 1건이며, 대상 `kind`는 `EMAIL_DIGEST`·`DISCORD_NEW`·`DISCORD_DEADLINE`이다. 이메일 묶음(`EMAIL_DIGEST`)은 08:00 KST(또는 만회) 작업 생성 이후 발송까지 구간만 재며 묶음 전 대기는 포함하지 않는다.
+  - `alerts_delivery_collection_latency_seconds{kind}`: **공고 수집 반영(`posting.first_seen_at`) → 발송 성공(`SENT`) 완료 지연**(PRD G7 타이머). 집계 단위·분모는 성공 발송된 `NEW` 공고-구독 항목 1건(`notification_item.kind = 'NEW'`)이며, 대상 `kind`는 `NEW` 항목을 포함한 `DISCORD_NEW`·`EMAIL_DIGEST`다(`DEADLINE` 전용 작업과 `NEW`+`DEADLINE` 혼합·동일 `sn`의 `DEADLINE` 항목은 제외). 이메일 묶음의 08:00 KST 이전 수집→묶음 대기 시간도 이 지표에 포함된다.

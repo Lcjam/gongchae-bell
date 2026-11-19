@@ -9,6 +9,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.sun.net.httpserver.HttpServer;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
@@ -169,6 +171,7 @@ class AlertDeliveryIntegrationTest extends IntegrationTestSupport {
     @Autowired DeliveryLedger ledger;
     @Autowired RateLimiter limits;
     @Autowired SubscriptionService subscriptions;
+    @Autowired MeterRegistry meterRegistry;
     @Value("${local.management.port}") int managementPort;
 
     @BeforeEach
@@ -860,6 +863,7 @@ class AlertDeliveryIntegrationTest extends IntegrationTestSupport {
                     .contains("alerts_delivery_delay_max_seconds")
                     .contains("alerts_delivery_attempts_total")
                     .contains("alerts_delivery_latency_seconds")
+                    .contains("alerts_delivery_collection_latency_seconds")
                     .doesNotContain("rfc8058-secret@example.com")
                     .doesNotContain("secret-hook-token")
                     .doesNotContain(sub.toString())
@@ -989,6 +993,131 @@ class AlertDeliveryIntegrationTest extends IntegrationTestSupport {
         assertThat(jdbc.sql("SELECT count(*) FROM notification WHERE subscription_id = :s").param("s", firstSub)
                 .query(Integer.class).single()).isZero();
         assertThat(discExtra).isNotNull();
+    }
+
+    // ---- 8. Collection-to-delivery NEW latency vs job-creation latency across mixed NEW/DEADLINE ----
+
+    @Test
+    void collectionToDeliveryLatencyTracksNewPostingsAcrossPreBundleWaitAndMixedKinds() {
+        long emailJobCount0 = timerCount("alerts.delivery.latency", "EMAIL_DIGEST");
+        double emailJobSec0 = timerTotalSeconds("alerts.delivery.latency", "EMAIL_DIGEST");
+        long emailCollCount0 = timerCount("alerts.delivery.collection.latency", "EMAIL_DIGEST");
+        double emailCollSec0 = timerTotalSeconds("alerts.delivery.collection.latency", "EMAIL_DIGEST");
+        long discNewJobCount0 = timerCount("alerts.delivery.latency", "DISCORD_NEW");
+        double discNewJobSec0 = timerTotalSeconds("alerts.delivery.latency", "DISCORD_NEW");
+        long discNewCollCount0 = timerCount("alerts.delivery.collection.latency", "DISCORD_NEW");
+        double discNewCollSec0 = timerTotalSeconds("alerts.delivery.collection.latency", "DISCORD_NEW");
+        long discDlJobCount0 = timerCount("alerts.delivery.latency", "DISCORD_DEADLINE");
+        double discDlJobSec0 = timerTotalSeconds("alerts.delivery.latency", "DISCORD_DEADLINE");
+        long discDlCollCount0 = timerCount("alerts.delivery.collection.latency", "DISCORD_DEADLINE");
+
+        Instant tConfirm = Instant.parse("2026-11-17T21:00:00Z"); // 06:00 KST
+        UUID emailMixed = insertActiveEmail("mixed-lat@example.com", null, null, null, null, true, true, tConfirm);
+        UUID emailDeadlineOnly = insertActiveEmail("dl-lat@example.com", null, null, null, null, false, true, tConfirm);
+        insertActiveDiscord("https://discord.com/api/webhooks/790/lat", null, null, null, null, true, true, tConfirm);
+
+        // Seed backfill posting 307030 (DEADLINE-only on 2026-11-18, never NEW)
+        String backfill = fixtureBody(307030L, r -> r.put("pbancEndYmd", "20261121").put("ongoingYn", "Y"));
+        ingestor.upsertPage(ingestor.parsePage(backfill), Instant.parse("2026-11-15T00:00:00Z"));
+
+        // Regular collection 1 at T0 = 07:05 KST: 307032 (end_date 2026-11-21 -> BOTH NEW and DEADLINE on 2026-11-18)
+        Instant t0 = Instant.parse("2026-11-17T22:05:00Z");
+        String reg1 = multiFixtureBody(rows -> {
+            ObjectNode r30 = pickRow(rows, 307030L).put("pbancEndYmd", "20261121").put("ongoingYn", "Y");
+            ObjectNode r32 = pickRow(rows, 307032L).put("pbancEndYmd", "20261121").put("ongoingYn", "Y");
+            rows.removeAll();
+            rows.add(r30).add(r32);
+        });
+        long run1 = runs.claim("REGULAR", "2026-11-18T07:05:00+09:00").orElseThrow();
+        ingestor.applyRegular(run1, reg1, t0);
+
+        // Dispatch DISCORD_NEW for 307032 at T0 + 4s
+        NOW.set(t0.plusSeconds(4));
+        worker.runOnce();
+        assertThat(timerCount("alerts.delivery.latency", "DISCORD_NEW") - discNewJobCount0).isEqualTo(1);
+        assertThat(timerTotalSeconds("alerts.delivery.latency", "DISCORD_NEW") - discNewJobSec0).isEqualTo(4.0);
+        assertThat(timerCount("alerts.delivery.collection.latency", "DISCORD_NEW") - discNewCollCount0).isEqualTo(1);
+        assertThat(timerTotalSeconds("alerts.delivery.collection.latency", "DISCORD_NEW") - discNewCollSec0).isEqualTo(4.0);
+
+        // Regular collection 2 at T1 = 07:30 KST: adds 307031 (end_date 2026-11-28 -> NEW-only)
+        Instant t1 = Instant.parse("2026-11-17T22:30:00Z");
+        String reg2 = multiFixtureBody(rows -> {
+            ObjectNode r30 = pickRow(rows, 307030L).put("pbancEndYmd", "20261121").put("ongoingYn", "Y");
+            ObjectNode r32 = pickRow(rows, 307032L).put("pbancEndYmd", "20261121").put("ongoingYn", "Y");
+            ObjectNode r31 = pickRow(rows, 307031L).put("pbancEndYmd", "20261128").put("ongoingYn", "Y");
+            rows.removeAll();
+            rows.add(r30).add(r32).add(r31);
+        });
+        long run2 = runs.claim("REGULAR", "2026-11-18T07:30:00+09:00").orElseThrow();
+        ingestor.applyRegular(run2, reg2, t1);
+
+        // Dispatch DISCORD_NEW for 307031 at T1 + 2s
+        NOW.set(t1.plusSeconds(2));
+        worker.runOnce();
+        assertThat(timerCount("alerts.delivery.latency", "DISCORD_NEW") - discNewJobCount0).isEqualTo(2);
+        assertThat(timerTotalSeconds("alerts.delivery.latency", "DISCORD_NEW") - discNewJobSec0).isEqualTo(6.0);
+        assertThat(timerCount("alerts.delivery.collection.latency", "DISCORD_NEW") - discNewCollCount0).isEqualTo(2);
+        assertThat(timerTotalSeconds("alerts.delivery.collection.latency", "DISCORD_NEW") - discNewCollSec0).isEqualTo(6.0);
+
+        // Email digest generated at T2 = 08:00 KST, sent at T3 = 08:00:05 KST
+        Instant t2 = Instant.parse("2026-11-17T23:00:00Z");
+        Instant t3 = Instant.parse("2026-11-17T23:00:05Z");
+        NOW.set(t2);
+        assertThat(batchGenerator.generateEmailDigest(LocalDate.of(2026, 11, 18))).isEqualTo(2);
+        NOW.set(t3);
+        SENT_MAILS.clear();
+        worker.runOnce();
+        assertThat(SENT_MAILS).hasSize(2);
+
+        // Job-creation latency counts 2 EMAIL_DIGEST jobs at 5s each (= 10s), excluding pre-bundle wait.
+        assertThat(timerCount("alerts.delivery.latency", "EMAIL_DIGEST") - emailJobCount0).isEqualTo(2);
+        assertThat(timerTotalSeconds("alerts.delivery.latency", "EMAIL_DIGEST") - emailJobSec0).isEqualTo(10.0);
+
+        // Collection-to-delivery latency counts ONLY the 2 sent NEW items for emailMixed (NOT DEADLINE on same sn 307032,
+        // NOT backfill DEADLINE 307030, and 0 for emailDeadlineOnly): (08:00:05 - 07:05:00 = 3305s) + (08:00:05 - 07:30:00 = 1805s) = 5110s.
+        assertThat(timerCount("alerts.delivery.collection.latency", "EMAIL_DIGEST") - emailCollCount0).isEqualTo(2);
+        assertThat(timerTotalSeconds("alerts.delivery.collection.latency", "EMAIL_DIGEST") - emailCollSec0)
+                .isEqualTo(3305.0 + 1805.0);
+        assertThat(meterRegistry.find("alerts.delivery.collection.latency").tag("kind", "EMAIL_DIGEST").timer().max(TimeUnit.SECONDS))
+                .isGreaterThanOrEqualTo(3305.0);
+
+        // Mixed email body and both (sn, kind) item rows for 307032 are preserved.
+        String mixedBody = SENT_MAILS.stream().map(SentMail::body).filter(b -> b.contains("mixed-lat@example.com"))
+                .findFirst().orElseThrow();
+        assertThat(mixedBody).contains("[마감 임박 D-3 · 2건]").contains("[새 공고 · 2건]");
+        assertThat(jdbc.sql("SELECT sn || ':' || kind FROM notification_item WHERE subscription_id = :s ORDER BY sn, kind")
+                .param("s", emailMixed).query(String.class).list())
+                .containsExactly("307030:DEADLINE", "307031:NEW", "307032:DEADLINE", "307032:NEW");
+        assertThat(jdbc.sql("SELECT sn || ':' || kind FROM notification_item WHERE subscription_id = :s ORDER BY sn, kind")
+                .param("s", emailDeadlineOnly).query(String.class).list())
+                .containsExactly("307030:DEADLINE", "307032:DEADLINE");
+
+        // DISCORD_DEADLINE records job latency only and never records collection NEW latency.
+        Instant t4 = Instant.parse("2026-11-18T00:00:00Z"); // 09:00 KST
+        NOW.set(t4);
+        assertThat(batchGenerator.generateDiscordDeadline(LocalDate.of(2026, 11, 18))).isEqualTo(1);
+        NOW.set(t4.plusSeconds(6));
+        worker.runOnce();
+        assertThat(timerCount("alerts.delivery.latency", "DISCORD_DEADLINE") - discDlJobCount0).isEqualTo(1);
+        assertThat(timerTotalSeconds("alerts.delivery.latency", "DISCORD_DEADLINE") - discDlJobSec0).isEqualTo(6.0);
+        assertThat(timerCount("alerts.delivery.collection.latency", "DISCORD_DEADLINE")).isEqualTo(discDlCollCount0);
+    }
+
+    private ObjectNode pickRow(ArrayNode rows, long sn) {
+        for (JsonNode row : rows) {
+            if (row.path("recrutPblntSn").asLong() == sn) return ((ObjectNode) row).deepCopy();
+        }
+        throw new IllegalArgumentException("missing sample sn " + sn);
+    }
+
+    private long timerCount(String name, String kind) {
+        Timer t = meterRegistry.find(name).tag("kind", kind).timer();
+        return t == null ? 0L : t.count();
+    }
+
+    private double timerTotalSeconds(String name, String kind) {
+        Timer t = meterRegistry.find(name).tag("kind", kind).timer();
+        return t == null ? 0.0 : t.totalTime(TimeUnit.SECONDS);
     }
 
     private void awaitLockWait(String sqlSubstring) throws InterruptedException {
