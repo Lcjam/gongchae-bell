@@ -5,6 +5,7 @@ import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Supplier;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -57,6 +58,10 @@ public class DeliveryLedger {
 
     /** Key, payload hash and attempt results of a job, read without locks. */
     public record History(UUID key, byte[] payloadHash, int attempts, boolean anyUnknown, boolean allDefinite) {}
+
+    /** Asynchronous job snapshot read before R without taking a lock on notification. */
+    public record AsyncJob(long id, UUID subscriptionId, String kind, String batchKey, OffsetDateTime createdAt,
+            int attempts, UUID idempotencyKey, byte[] payloadSha256, boolean anyUnknown, boolean allDefinite) {}
 
     /** A synchronous job row, created SENDING and claimed by the request that creates it (caller's transaction). */
     public Claim createSync(UUID subscriptionId, String kind) {
@@ -114,7 +119,34 @@ public class DeliveryLedger {
         });
     }
 
-    /** In A after R: lock the job and confirm the claim and this reservation still stand. False = send nothing. */
+    public Optional<AsyncJob> loadAsyncJob(long id) {
+        return jdbc.sql("""
+                SELECT n.id, n.subscription_id, n.kind, n.batch_key, n.created_at, n.attempts, n.idempotency_key,
+                       n.payload_sha256,
+                       EXISTS (SELECT 1 FROM notification_attempt a WHERE a.notification_id = n.id
+                               AND (a.outcome IS NULL OR a.outcome IN (:unknown))) AS any_unknown
+                FROM notification n WHERE n.id = :id
+                """).param("id", id).param("unknown", SendOutcome.UNKNOWN_NAMES)
+                .query((rs, row) -> {
+                    int attempts = rs.getInt(6);
+                    boolean unknown = rs.getBoolean(9);
+                    return new AsyncJob(rs.getLong(1), rs.getObject(2, UUID.class), rs.getString(3), rs.getString(4),
+                            rs.getObject(5, OffsetDateTime.class), attempts, rs.getObject(7, UUID.class),
+                            rs.getBytes(8), unknown, attempts > 0 && !unknown);
+                }).optional();
+    }
+
+    /** In A when ending or deferring without calling R: lock notification and confirm the claim still holds. */
+    public boolean lockClaim(Claim claim) {
+        return jdbc.sql("""
+                SELECT 1 FROM notification WHERE id = :id AND status = 'SENDING' AND claimed_at = :claim FOR UPDATE
+                """).param("id", claim.id()).param("claim", claim.claimedAt())
+                .query(Integer.class).optional().isPresent();
+    }
+
+    /**
+     * In A after R: lock the job and confirm the claim and this reservation still stand. False = send nothing.
+     */
     public boolean lockReserved(Claim claim, int attemptNo, UUID key) {
         return jdbc.sql("""
                 SELECT 1 FROM notification WHERE id = :id AND status = 'SENDING' AND claimed_at = :claim
@@ -147,6 +179,43 @@ public class DeliveryLedger {
                 WHERE n.id = :id AND n.status = 'SENDING' AND n.claimed_at = :claim
                 """).param("sent", sent).param("unknown", SendOutcome.UNKNOWN_NAMES).param("cancel", cancel)
                 .param("reason", reason).param("now", now()).param("id", claim.id()).param("claim", claim.claimedAt()).update() == 1;
+    }
+
+    /** Fenced finish for async jobs: returns items if the job ended FAILED or CANCELLED, preserving SENT and UNCERTAIN items. */
+    public boolean finishAsync(Claim claim, boolean sent, String reason, boolean cancel) {
+        boolean updated = finish(claim, sent, reason, cancel);
+        if (updated && !sent) {
+            jdbc.sql("""
+                    DELETE FROM notification_item ni USING notification n
+                    WHERE ni.notification_id = n.id AND n.id = :id AND n.status IN ('FAILED', 'CANCELLED')
+                    """).param("id", claim.id()).update();
+        }
+        return updated;
+    }
+
+    /**
+     * Fenced non-terminal transition to RETRY for a future attempt within attempt limit and 23 h lifetime.
+     * Caller holds the notification lock in A and must pass a future time truncated to micros.
+     */
+    public boolean retry(Claim claim, OffsetDateTime nextAttemptAt, String reason) {
+        OffsetDateTime next = nextAttemptAt.truncatedTo(ChronoUnit.MICROS);
+        return jdbc.sql("""
+                UPDATE notification SET status = 'RETRY', next_attempt_at = :nextAt, claimed_at = NULL, last_error = :reason
+                WHERE id = :id AND status = 'SENDING' AND claimed_at = :claim
+                  AND attempts < :max AND created_at + :lifetime * interval '1 second' > :nextAt
+                """).param("nextAt", next).param("reason", reason).param("id", claim.id())
+                .param("claim", claim.claimedAt()).param("max", MAX_ATTEMPTS)
+                .param("lifetime", LIFETIME.toSeconds()).update() == 1;
+    }
+
+    /** Delete specific items from notification_item after lockReserved when !anyUnknown and items became ineligible. */
+    public int deleteItems(UUID subscriptionId, long notificationId, String itemKind, List<Long> sns) {
+        if (sns.isEmpty()) return 0;
+        return jdbc.sql("""
+                DELETE FROM notification_item
+                WHERE subscription_id = :subId AND notification_id = :notifId AND kind = :kind AND sn IN (:sns)
+                """).param("subId", subscriptionId).param("notifId", notificationId).param("kind", itemKind)
+                .param("sns", sns).update();
     }
 
     /**
@@ -212,6 +281,10 @@ public class DeliveryLedger {
                         WHERE n.id = :id
                         """).param("max", MAX_ATTEMPTS).param("lifetime", LIFETIME.toSeconds()).param("now", now)
                         .param("unknown", SendOutcome.UNKNOWN_NAMES).param("id", id).update();
+                jdbc.sql("""
+                        DELETE FROM notification_item ni USING notification n
+                        WHERE ni.notification_id = n.id AND n.id = :id AND n.status = 'FAILED'
+                        """).param("id", id).update();
             }
             return stale.size();
         });

@@ -1,6 +1,6 @@
-# 알림 구독 운영 (#6)
+# 알림 구독 및 발송 운영 (#6·#7)
 
-알림 구독(신청·확인·관리·해지·복구)과 요청 안 발송(확인 메일, 관리 링크 메일, 디스코드 등록 테스트)을 다룬다. 실제 공고 알림의 매칭·묶음·비동기 발송은 #7이다. 구현 계약은 [#6 계약](../../collab/2026-11-16-implementation/claude-subscriptions-contract.md)에 있다.
+알림 구독(신청·확인·관리·해지·복구), 요청 안 발송(#6), 공고 매칭·outbox·일일 묶음·비동기 발송 워커(#7)를 다룬다. 구현 계약은 [#6 계약](../../collab/2026-11-16-implementation/claude-subscriptions-contract.md)과 [알림 자격 결정](../../collab/2026-11-17-m2-readiness/03-codex-alert-eligibility-decision.md)에 있다.
 
 ## 켜기 전에 닫을 게이트
 
@@ -24,6 +24,8 @@
 | `ALERTS_WEBHOOK_KEY`, `ALERTS_WEBHOOK_KEY_ID` | 웹훅 URL AES-256-GCM 키(base64, 정확히 32바이트)와 그 ID(`[A-Za-z0-9_-]{1,40}`) |
 | `ALERTS_ERASURE_LOG` | 해지 대장 파일 경로. DB 볼륨과 다른 호스트 디렉터리. 켜기 전에 빈 파일로 준비해 둔다 |
 | `RESEND_API_KEY`, `ALERTS_MAIL_FROM` | Resend API 키, 발신 주소(인증된 도메인) |
+| `HEARTBEAT_DIGEST_URL` | 일일 이메일 묶음(`DIGEST`) 슬롯 선점 완료 후 GET 핑 URL (선택, 비어 있으면 끔) |
+| `ALERTS_WORKER_CONCURRENCY`, `ALERTS_BATCH_SIZE`, `ALERTS_SCHEDULER_ENABLED` | 비동기 워커 동시성(기본 `2`, 최대 `4`), 1회 선점 배치(기본 `20`), 스케줄러 켜기(기본 `true`) |
 | `PRIVACY_OFFICER`, `PRIVACY_CONTACT`, `PRIVACY_POLICY_VERSION`, `PRIVACY_EFFECTIVE_DATE`, `PRIVACY_HOSTING_LOCATION`, `PRIVACY_OVERSEAS_BASIS`, `PRIVACY_RESEND_RETENTION` | 처리방침에 그대로 보이는 값. 동의 기록의 `consent_version`은 `PRIVACY_POLICY_VERSION`이다 |
 
 키는 `openssl rand -base64 32`처럼 만들어 비밀번호 관리자와 서버 환경변수에만 둔다. 키를 잃으면 이렇게 된다:
@@ -74,8 +76,25 @@
   - 대장에 잘리거나 형식이 틀린 줄: `ERASURE_LOG_TORN_LAST_LINE` 또는 `ERASURE_LOG_BAD_LINE_<줄 번호>`.
 - 정리: 자동 정리는 없다. 해지 시각 이전에 만든 모든 백업 사본의 삭제가 확인된 뒤에만 그 줄을 지울 수 있다. 파일을 다시 쓰는 정리는 두 앱을 멈춘 상태에서 한다. 사본 삭제를 확인할 방법과 주기를 정하기 전까지 대장은 정리하지 않는다(처리방침에도 '미정'으로 표시).
 
-## 발송 기록 읽기
+## 발송 기록·비동기 워커·지표 (#7)
 
+- **매칭 및 묶음 생성**:
+  - **정기 신규 (`DISCORD_NEW`)**: 정기 수집(`PostingIngestor.applyRegular`) 트랜잭션 안에서 처음 INSERT된 `OPEN`(`end_date >= kstToday`) 공고만 outbox에 적재한다. backfill·변경·`CLOSED`/`CHECK`·재등장은 제외하며 수집 롤백 시 함께 롤백된다.
+  - **이메일 묶음 (`EMAIL_DIGEST`)**: 매일 `08:00 KST` 이후 매분 만회 검사로 `collect_run(DIGEST, 날짜)`를 선점한 앱 1대만 생성한다. `confirmed_at` 이후 non-backfill 미발송 `NEW`와 실행일 기준 `end_date = kstToday + 3` `DEADLINE`을 구독당 1통으로 합본하고 완료 커밋 뒤 `digestHeartbeat.ping()`을 보낸다.
+  - **디스코드 마감 임박 (`DISCORD_DEADLINE`)**: 매일 `09:00 KST` 이후 `collect_run(DEADLINE, 날짜)` 선점 앱이 실행일 기준 `D-3`을 생성한다.
+- **비동기 워커 (`AlertWorker` / `AlertDispatcher`)**:
+  - 기본 동시성은 `2`(배치 `20`, 폴링 `5s`, 최대 `4`)로, 워커당 `TX2`(`A`: 구독 `FOR SHARE`) + `R`(`B`: `REQUIRES_NEW`) 최대 `4`개 연결만 사용해 기본 Hikari 풀 `10`개에서 연결 고갈을 막는다.
+  - `R` 전·후 KST 현재 자격(`(sn, kind)` 집합)과 결정적 `payload_sha256`을 재검증한다. `UNKNOWN` 이후 대상·본문·`token_version` 변화 시 새 `R`/HTTP 없이 `UNCERTAIN`으로 끝내며 item을 보존한다. `FAILED`/`CANCELLED`로 끝난 작업의 item만 반환(삭제)한다.
+  - Discord `404`만 `TX2` 커밋 뒤 별도 짧은 `TX3`에서 `DISABLED`(`disabled_reason='WEBHOOK_404'`)로 전환하고 구독 관리 화면(`/subscriptions/manage`)에 사유를 표시한다. `429`는 `retry_after` 이후 `RETRY`, `5xx`/연결 실패는 재시도만 한다.
+  - `EMAIL_DIGEST`는 RFC 8058 `List-Unsubscribe` / `List-Unsubscribe-Post` 헤더를 포함하며, Discord는 `allowed_mentions: {"parse": []}`와 `2000`자 제한을 적용한다.
 - `notification`의 상태와 `last_error`, `notification_attempt.outcome`을 함께 본다. `UNCERTAIN`은 공급자가 처리했을 수도 있다는 뜻이다(5xx·타임아웃·종료). 재발송하지 않는다.
 - `SEND_CAP`은 우리 상한에 걸린 것이다(HTTP 없음). `QUOTA_DAILY`는 Resend 일 한도에 걸린 것이다(HTTP 있음). `REQUEST_4XX`·`ACCOUNT_4XX`는 요청이나 계정 설정 문제다. 셋 다 구독을 끄지 않는다.
-- 지표와 경보는 #7에서 붙인다.
+- **노출 지표 (`/actuator/prometheus`, 고정 라벨만 사용, PII 없음)**:
+  - `alerts_notification_backlog`: `PENDING`·`RETRY` 상태에서 `next_attempt_at`이 5분 이상 지난 비동기 작업 수(게이지)
+  - `alerts_notification_sending_stuck`: `SENDING` 상태에서 `claimed_at`이 5분을 넘긴 작업 수(게이지)
+  - `alerts_notification_failed_last1h{kind}`, `alerts_notification_uncertain_last24h{kind}`, `alerts_notification_sent_last24h{kind}`, `alerts_notification_duplicate_risk_last24h{kind}`: 최근 1시간/24시간 종결 작업 수(게이지, 6종 `kind`)
+  - `alerts_subscriptions_active{channel}`, `alerts_subscriptions_disabled{channel}`, `alerts_send_total_used{provider}`: 채널별 구독 수·일/시간 발송 상한 사용량(게이지)
+  - `alerts_delivery_attempts_total{kind,outcome}`, `alerts_delivery_duplicate_risk_total{kind}`: 발송 시도 결과 및 `UNKNOWN` 경유 후 `SENT` 누적 카운터
+  - `alerts_delivery_delay_max_seconds`: 현재 미완료 비동기 작업(`PENDING`·`RETRY`·`SENDING`, 대상 `EMAIL_DIGEST`·`DISCORD_NEW`·`DISCORD_DEADLINE`) 중 가장 오래된 작업의 `notification.created_at` 기준 대기 경과 초(게이지, 없으면 `0`)
+  - `alerts_delivery_latency_seconds{kind}`: **작업 생성(`notification.created_at`) → 발송 성공(`SENT`) 완료 지연**(타이머). 집계 단위·분모는 성공 발송된 비동기 작업 1건이며, 대상 `kind`는 `EMAIL_DIGEST`·`DISCORD_NEW`·`DISCORD_DEADLINE`이다. 이메일 묶음(`EMAIL_DIGEST`)은 08:00 KST(또는 만회) 작업 생성 이후 발송까지 구간만 재며 묶음 전 대기는 포함하지 않는다.
+  - `alerts_delivery_collection_latency_seconds{kind}`: **공고 수집 반영(`posting.first_seen_at`) → 발송 성공(`SENT`) 완료 지연**(PRD G7 타이머). 집계 단위·분모는 성공 발송된 `NEW` 공고-구독 항목 1건(`notification_item.kind = 'NEW'`)이며, 대상 `kind`는 `NEW` 항목을 포함한 `DISCORD_NEW`·`EMAIL_DIGEST`다(`DEADLINE` 전용 작업과 `NEW`+`DEADLINE` 혼합·동일 `sn`의 `DEADLINE` 항목은 제외). 이메일 묶음의 08:00 KST 이전 수집→묶음 대기 시간도 이 지표에 포함된다.

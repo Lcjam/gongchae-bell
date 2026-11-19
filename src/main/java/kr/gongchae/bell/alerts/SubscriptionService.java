@@ -53,7 +53,11 @@ public class SubscriptionService {
     /** Stored subscription conditions: hiring filters plus at least one alert kind (FR-A1). No status/sort/page. */
     public record Conditions(String ncs, String region, String hire, String career, String q, boolean notifyNew, boolean notifyDeadline) {}
 
-    public record ManageView(UUID id, String channel, String status, String target, Conditions conditions, String token) {}
+    public record ManageView(UUID id, String channel, String status, String target, Conditions conditions, String token, String disabledReason) {
+        public ManageView(UUID id, String channel, String status, String target, Conditions conditions, String token) {
+            this(id, channel, status, target, conditions, token, null);
+        }
+    }
 
     /** {@code view} is set only when {@code state} is FOUND. */
     public record ManageAccess(State state, ManageView view) {}
@@ -258,10 +262,10 @@ public class SubscriptionService {
         if (blocked(ipKey)) return new ManageAccess(State.BLOCKED, null);
         record Row(int version, ManageView view) {}
         Optional<ManageView> view = AlertsCrypto.claimedId(token).flatMap(id -> jdbc.sql("""
-                SELECT channel, status, email, conditions::text, notify_new, notify_deadline, token_version FROM subscription WHERE id = :id
+                SELECT channel, status, email, conditions::text, notify_new, notify_deadline, token_version, disabled_reason FROM subscription WHERE id = :id
                 """).param("id", id).query((rs, row) -> new Row(rs.getInt(7), new ManageView(id, rs.getString(1), rs.getString(2),
                         rs.getString(3) == null ? "Discord 웹훅" : mask(rs.getString(3)),
-                        conditionsOf(rs.getString(4), rs.getBoolean(5), rs.getBoolean(6)), token))).optional()
+                        conditionsOf(rs.getString(4), rs.getBoolean(5), rs.getBoolean(6)), token, rs.getString(8)))).optional()
                 .filter(row -> crypto.verify(AlertsCrypto.Purpose.MANAGE, id, row.version(), token)).map(Row::view));
         if (view.isPresent()) return new ManageAccess(State.FOUND, view.get());
         limits.hit(RateLimiter.Scope.TOKEN_FAIL, ipKey, RateLimiter.TOKEN_FAIL);
@@ -490,7 +494,7 @@ public class SubscriptionService {
         return JSON.writeValueAsString(map);
     }
 
-    private static Conditions conditionsOf(String stored, boolean notifyNew, boolean notifyDeadline) {
+    static Conditions conditionsOf(String stored, boolean notifyNew, boolean notifyDeadline) {
         var node = JSON.readTree(stored);
         return new Conditions(text(node, "ncs"), text(node, "region"), text(node, "hire"), text(node, "career"), text(node, "q"),
                 notifyNew, notifyDeadline);

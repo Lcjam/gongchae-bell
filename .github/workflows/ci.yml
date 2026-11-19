@@ -43,6 +43,9 @@ jobs:
         run: |
           docker compose -f compose.prod.yml --profile blue --profile green config -q
           docker compose -f compose.prod.yml --env-file deploy/.env.prod.example --profile blue --profile green config -q
+          ALERTS_WORKER_CONCURRENCY=1 ALERTS_BATCH_SIZE=3 ALERTS_SCHEDULER_ENABLED=false \
+            docker compose -f compose.prod.yml --profile blue --profile green config --format json \
+            | python3 -c 'import json,sys; s=json.load(sys.stdin)["services"]; expected={"ALERTS_WORKER_CONCURRENCY":"1","ALERTS_BATCH_SIZE":"3","ALERTS_SCHEDULER_ENABLED":"false"}; assert all(s[c]["environment"].get(k)==v for c in ("app-blue","app-green") for k,v in expected.items())'
       - name: Caddyfile validation and live reload/header/redaction test
         run: ./deploy/tests/caddy-integration-test.sh
       - name: Build ARM64 runtime image (no push)

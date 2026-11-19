@@ -18,6 +18,8 @@ spring:
     timeout-per-shutdown-phase: 30s
   task:
     scheduling:
+      pool:
+        size: 4
       shutdown:
         # ADR-0014: let a running collection finish for up to 30s on shutdown instead of cutting it off.
         await-termination: true
@@ -61,8 +63,9 @@ management:
         "[http.server.requests]": 30s
 
 heartbeat:
-  # Healthchecks.io ping URL (ADR-0006). Blank = off. The URL contains the check id: env/Secrets only, never logged.
+  # Healthchecks.io ping URLs (ADR-0006). Blank = off. URLs contain check ids: env/Secrets only, never logged.
   collector-url: ${HEARTBEAT_COLLECTOR_URL:}
+  digest-url: ${HEARTBEAT_DIGEST_URL:}
 
 collector:
   enabled: ${COLLECTOR_ENABLED:false}
@@ -77,6 +80,10 @@ alerts:
   webhook-key: ${ALERTS_WEBHOOK_KEY:}
   webhook-key-id: ${ALERTS_WEBHOOK_KEY_ID:}
   erasure-log: ${ALERTS_ERASURE_LOG:}
+  dispatch:
+    worker-concurrency: ${ALERTS_WORKER_CONCURRENCY:2}
+    batch-size: ${ALERTS_BATCH_SIZE:20}
+    scheduler-enabled: ${ALERTS_SCHEDULER_ENABLED:true}
   mail:
     api-key: ${RESEND_API_KEY:}
     from: ${ALERTS_MAIL_FROM:}

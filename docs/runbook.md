@@ -77,6 +77,9 @@ sudo chmod 0750 /opt/gongchae-bell /opt/gongchae-bell/deploy/state /var/lib/gong
 | `COLLECTOR_WARNING_LIMIT` | 선택 | `500` | 일 호출 경고 임계값 (ADR-0014) | 아니오 |
 | `COLLECTOR_STOP_LIMIT` | 선택 | `900` | 일 호출 자동 중단 임계값 (ADR-0014) | 아니오 |
 | `ALERTS_ENABLED` | 선택 | `false` | M2 알림 활성화 여부 (M2 전까지 `false`) | 아니오 |
+| `ALERTS_WORKER_CONCURRENCY` | 선택 | `2` | 비동기 발송 워커 동시성 (기본 `2`, 최대 `4`, `ADR-0014`) | 아니오 |
+| `ALERTS_BATCH_SIZE` | 선택 | `20` | 워커 1회 선점 배치 크기 (기본 `20`, `ADR-0014`) | 아니오 |
+| `ALERTS_SCHEDULER_ENABLED` | 선택 | `true` | 일일 묶음·비동기 발송 스케줄러 활성화 여부 (`false`로 끔) | 아니오 |
 | `ALERTS_TOKEN_KEY` | M2 시 필수 | 빈 문자열 | 구독 토큰 암호화 키 | **비밀** |
 | `ALERTS_HMAC_KEY` | M2 시 필수 | 빈 문자열 | 레이트 리밋/토큰 HMAC 키 | **비밀** |
 | `ALERTS_WEBHOOK_KEY` | M2 시 필수 | 빈 문자열 | 웹훅 URL 암호화 키 | **비밀** |
@@ -84,6 +87,7 @@ sudo chmod 0750 /opt/gongchae-bell /opt/gongchae-bell/deploy/state /var/lib/gong
 | `ALERTS_ERASURE_LOG` | 선택 | `/var/lib/gongchae-bell/erasure/erasure.log` | 해지 대장 파일 경로 | 아니오 |
 | `RESEND_API_KEY` | M2 시 필수 | 빈 문자열 | Resend API 키 | **비밀** |
 | `ALERTS_MAIL_FROM` | M2 시 필수 | 빈 문자열 | 발신 이메일 주소 | 아니오 |
+| `HEARTBEAT_DIGEST_URL` | 선택 | 빈 문자열 | 일일 이메일 묶음(`DIGEST`) 완료 후 GET 핑 URL | **비밀** |
 | `PRIVACY_OFFICER` | M2 시 필수 | 빈 문자열 | 개인정보 보호책임자명 | 아니오 |
 | `PRIVACY_CONTACT` | M2 시 필수 | 빈 문자열 | 개인정보 담당 연락처 | 아니오 |
 | `PRIVACY_POLICY_VERSION` | M2 시 필수 | 빈 문자열 | 처리방침 버전 | 아니오 |

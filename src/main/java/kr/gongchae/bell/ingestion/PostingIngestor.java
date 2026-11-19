@@ -20,6 +20,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.regex.Pattern;
@@ -27,6 +28,7 @@ import kr.gongchae.bell.ingestion.ListResponseParser.Page;
 import kr.gongchae.bell.ingestion.ListResponseParser.PostingRow;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -47,15 +49,29 @@ public class PostingIngestor {
     /** Suspected broken text, not a confirmed one: U+FFFD, or '?' glued to a Hangul syllable (observed where 「」 were lost). */
     private static final Pattern BROKEN = Pattern.compile("�|\\?[가-힣]");
 
+    /** Same-transaction hook invoked only for newly inserted OPEN postings during regular collection (#7). */
+    @FunctionalInterface
+    public interface RegularNewOutbox {
+        void recordRegularNew(long runId, List<Long> openNewSns, Instant observedAt);
+    }
+
     private final JdbcClient jdbc;
     private final TransactionTemplate tx;
     private final ZoneId zone;
+    private final RegularNewOutbox outbox;
     private final ListResponseParser parser = new ListResponseParser();
 
     public PostingIngestor(JdbcClient jdbc, PlatformTransactionManager transactionManager, Clock clock) {
+        this(jdbc, transactionManager, clock, Optional.empty());
+    }
+
+    @Autowired
+    public PostingIngestor(JdbcClient jdbc, PlatformTransactionManager transactionManager, Clock clock,
+            Optional<RegularNewOutbox> outbox) {
         this.jdbc = jdbc;
         this.tx = new TransactionTemplate(transactionManager);
         this.zone = clock.getZone();
+        this.outbox = outbox.orElse((runId, sns, at) -> {});
     }
 
     public RunResult applyRegular(long runId, String body, Instant observedAt) {
@@ -77,7 +93,7 @@ public class PostingIngestor {
         }
         try {
             Counts counts = tx.execute(status -> {
-                Counts c = write(page, false, true, observedAt);
+                Counts c = write(runId, page, false, true, observedAt);
                 finish(runId, "COMPLETE", null, c);
                 return c;
             });
@@ -100,7 +116,7 @@ public class PostingIngestor {
     /** Applies a page the caller has accepted, in one transaction. Absent postings are not judged. */
     public Counts upsertPage(ParsedPage page, Instant observedAt) {
         requireNoTransaction();
-        return tx.execute(status -> write(page.page(), true, false, observedAt));
+        return tx.execute(status -> write(null, page.page(), true, false, observedAt));
     }
 
     private RunResult fail(long runId, IngestionException e, Counts counts) {
@@ -109,7 +125,7 @@ public class PostingIngestor {
         return new RunResult(e.failure().result(), e.failure(), counts);
     }
 
-    private Counts write(Page page, boolean fromBackfill, boolean snapshot, Instant observedAt) {
+    private Counts write(Long runId, Page page, boolean fromBackfill, boolean snapshot, Instant observedAt) {
         List<PostingRow> rows = page.rows().stream().sorted(Comparator.comparingLong(PostingRow::sn)).toList();
         if (rows.isEmpty()) {
             return new Counts(page.totalCount(), 0, 0, 0, 0);
@@ -129,6 +145,7 @@ public class PostingIngestor {
             }
         }
         int inserted = 0, changed = 0, closed = 0;
+        List<Long> regularOpenNewSns = new ArrayList<>();
         for (PostingRow row : rows) {
             String status = row.end().isBefore(today) || "N".equals(row.ongoingYn()) ? "CLOSED" : "OPEN";
             boolean shared = urlUse.getOrDefault(row.instCode() + "\n" + row.srcUrl(), 0L) > 1;
@@ -141,6 +158,9 @@ public class PostingIngestor {
                 if (insert(row, generic, status, fromBackfill, hash, at)) {
                     insertCodes(row);
                     inserted++;
+                    if (!fromBackfill && snapshot && "OPEN".equals(status) && !row.end().isBefore(today)) {
+                        regularOpenNewSns.add(row.sn());
+                    }
                     continue;
                 }
                 // Another transaction committed this sn after our lock query: treat it as an existing row.
@@ -166,6 +186,9 @@ public class PostingIngestor {
         }
         if (snapshot) {
             closed += markMissing(stored, Set.copyOf(sns), today);
+        }
+        if (runId != null && !fromBackfill && snapshot && !regularOpenNewSns.isEmpty()) {
+            outbox.recordRegularNew(runId, regularOpenNewSns, observedAt);
         }
         return new Counts(page.totalCount(), rows.size(), inserted, changed, closed);
     }

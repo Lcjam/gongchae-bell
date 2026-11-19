@@ -11,7 +11,7 @@
     <span th:switch="${view.status}">
       <span th:case="'ACTIVE'">알림 받는 중</span>
       <span th:case="'PENDING'">확인 대기</span>
-      <span th:case="*">비활성화됨</span>
+      <span th:case="*">비활성화됨<span th:if="${view.disabledReason == 'WEBHOOK_404'}"> (디스코드 웹훅 404 — 새 웹훅으로 다시 신청할 수 있습니다)</span></span>
     </span>
   </p>
   <div th:if="${error != null}" class="alert alert-danger py-2 small" role="alert" th:switch="${error}">

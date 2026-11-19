@@ -29,8 +29,11 @@ x-app-common: &app-common
     COLLECTOR_STOP_LIMIT: ${COLLECTOR_STOP_LIMIT:-900}
     # #15 Healthchecks.io ping after each complete regular run (secret URL; blank = off).
     HEARTBEAT_COLLECTOR_URL: ${HEARTBEAT_COLLECTOR_URL:-}
-    # M2 (#6) compatibility keys (all alerts disabled by default until M2 rollout)
+    # M2 (#6/#7) compatibility keys (all alerts disabled by default until M2 rollout)
     ALERTS_ENABLED: ${ALERTS_ENABLED:-false}
+    ALERTS_WORKER_CONCURRENCY: ${ALERTS_WORKER_CONCURRENCY:-2}
+    ALERTS_BATCH_SIZE: ${ALERTS_BATCH_SIZE:-20}
+    ALERTS_SCHEDULER_ENABLED: ${ALERTS_SCHEDULER_ENABLED:-true}
     ALERTS_TOKEN_KEY: ${ALERTS_TOKEN_KEY:-}
     ALERTS_HMAC_KEY: ${ALERTS_HMAC_KEY:-}
     ALERTS_WEBHOOK_KEY: ${ALERTS_WEBHOOK_KEY:-}
@@ -38,6 +41,7 @@ x-app-common: &app-common
     ALERTS_ERASURE_LOG: ${ALERTS_ERASURE_LOG:-/var/lib/gongchae-bell/erasure/erasure.log}
     RESEND_API_KEY: ${RESEND_API_KEY:-}
     ALERTS_MAIL_FROM: ${ALERTS_MAIL_FROM:-}
+    HEARTBEAT_DIGEST_URL: ${HEARTBEAT_DIGEST_URL:-}
     PRIVACY_OFFICER: ${PRIVACY_OFFICER:-}
     PRIVACY_CONTACT: ${PRIVACY_CONTACT:-}
     PRIVACY_POLICY_VERSION: ${PRIVACY_POLICY_VERSION:-}
