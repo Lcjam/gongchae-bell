@@ -2,12 +2,15 @@
 set -euo pipefail
 umask 077
 
-# Gongchae-Bell daily encrypted backup script (PRD §6, ADR-0012, ADR-0013, ADR-0014, ADR-0006).
+# Gongchae-Bell daily encrypted backup script (PRD §6, ADR-0012, ADR-0013, ADR-0014, ADR-0006, ADR-0017).
+# - First expires every gongchae-bell snapshot older than 14 days by the run's wall clock (explicit IDs, no
+#   "keep latest" exception, zero copies allowed), prunes their data, and checks none is left (ADR-0017).
+#   This runs before the dump, so a failing dump or upload never keeps expired copies alive.
 # - Runs logical pg_dump -Fc inside the running Compose postgres container (never copies live postgres_data files).
 # - Stages ADR-0013 host erasure journal alongside the dump.
-# - Encrypts and uploads via restic to OCI Object Storage (S3-compatible), then applies keep-daily 14 + prune.
+# - Encrypts and uploads via restic to OCI Object Storage (S3-compatible).
 # - Keeps restic/OCI credentials in BACKUP_ENV_FILE separate from COMPOSE_ENV_FILE (DB_PASSWORD/app secrets).
-# - Sends Healthchecks.io ping only after dump validation, restic backup, and prune all succeed; sends /fail on error.
+# - Sends Healthchecks.io ping only after expiry, prune, dump validation and restic backup all succeed; /fail on error.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -16,8 +19,14 @@ BACKUP_ENV_FILE="${BACKUP_ENV_FILE:-/opt/gongchae-bell/backup/backup.env}"
 DOCKER_BIN="${DOCKER_BIN:-docker}"
 RESTIC_BIN="${RESTIC_BIN:-restic}"
 CURL_BIN="${CURL_BIN:-curl}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+EXPIRE_SELECT="$SCRIPT_DIR/expire-select.py"
+# User decision 2026-11-19 (ADR-0017): fixed 14 days by wall clock, not a tunable count.
+RETENTION_SECONDS=$((14 * 86400))
 
 STAGE_DIR=""
+RUN_NOW_EPOCH=""
+RETENTION_SUMMARY=""
 IN_BACKUP_RUN=0
 BACKUP_SUCCEEDED=0
 FAIL_REASON=""
@@ -163,7 +172,7 @@ on_exit() {
 
 require_tools() {
   local bin
-  for bin in "$DOCKER_BIN" "$RESTIC_BIN" "$CURL_BIN" flock awk stat mktemp sha256sum; do
+  for bin in "$DOCKER_BIN" "$RESTIC_BIN" "$CURL_BIN" "$PYTHON_BIN" flock awk stat mktemp sha256sum; do
     command -v "$bin" >/dev/null 2>&1 || fail "Required tool not found: $bin"
   done
 }
@@ -226,7 +235,6 @@ load_backup_env() {
   REQUIRE_ERASURE_LOG="${REQUIRE_ERASURE_LOG:-auto}"
   BACKUP_LOCK_FILE="${BACKUP_LOCK_FILE:-/opt/gongchae-bell/backup/backup.lock}"
   BACKUP_LOCK_WAIT_SECONDS="${BACKUP_LOCK_WAIT_SECONDS:-0}"
-  BACKUP_KEEP_DAILY="${BACKUP_KEEP_DAILY:-14}"
   BACKUP_STAGE_ROOT="${BACKUP_STAGE_ROOT:-/tmp}"
   BACKUP_HOST_TAG="${BACKUP_HOST_TAG:-}"
   RESTIC_INIT_IF_MISSING="${RESTIC_INIT_IF_MISSING:-false}"
@@ -239,7 +247,8 @@ load_backup_env() {
     [[ -n "${AWS_ACCESS_KEY_ID:-}" ]] || fail "Missing AWS_ACCESS_KEY_ID for S3 repository"
     [[ -n "${AWS_SECRET_ACCESS_KEY:-}" ]] || fail "Missing AWS_SECRET_ACCESS_KEY for S3 repository"
   fi
-  [[ "$BACKUP_KEEP_DAILY" =~ ^[1-9][0-9]*$ ]] || fail "BACKUP_KEEP_DAILY must be a positive integer: $BACKUP_KEEP_DAILY"
+  # A leftover count setting would suggest a policy that no longer runs.
+  [[ -z "${BACKUP_KEEP_DAILY:-}" ]] || fail "BACKUP_KEEP_DAILY is no longer supported: retention is a fixed 14 days by wall clock (ADR-0017); remove it from $BACKUP_ENV_FILE"
 
   export RESTIC_REPOSITORY RESTIC_PASSWORD
   export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-}"
@@ -381,34 +390,42 @@ ensure_restic_repo() {
   fail "RESTIC_REPO_UNAVAILABLE repository check failed (run 'backup.sh init' or verify credentials/network)"
 }
 
-log_snapshot_retention_summary() {
-  local snap_out summary_line
-  snap_out="$(mktemp "$STAGE_DIR/snapshots.XXXXXX")"
-  if ! "$RESTIC_BIN" snapshots --tag gongchae-bell --compact >"$snap_out" 2>&1; then
-    redact_stream <"$snap_out" >&2
-    rm -f "$snap_out"
-    fail "RESTIC_SNAPSHOTS_FAIL unable to list snapshots after prune"
+# Lists gongchae-bell snapshots and picks those older than 14 days at RUN_NOW_EPOCH (expire-select.py).
+# Leaves the summary line in retention.summary and the expired full IDs in retention.ids.
+select_expired() {
+  local snaps="$STAGE_DIR/snapshots.json" picked="$STAGE_DIR/retention.picked" err="$STAGE_DIR/select.err"
+  if ! "$RESTIC_BIN" snapshots --tag gongchae-bell --json >"$snaps" 2>"$err"; then
+    redact_stream <"$err" >&2
+    fail "RESTIC_SNAPSHOTS_FAIL unable to list snapshots for retention; nothing was deleted"
   fi
-  redact_stream <"$snap_out"
-  summary_line="$(awk -v keep="$BACKUP_KEEP_DAILY" '
-    /^[0-9a-f]{8}[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}[[:space:]]+[0-9]{2}:[0-9]{2}:[0-9]{2}/ {
-      count++
-      ts = $2 "T" $3 "Z"
-      if (count == 1) oldest = ts
-      latest_id = $1
-      latest_ts = ts
-    }
-    END {
-      if (count > 0) {
-        printf "SNAPSHOT_RETENTION_SUMMARY count=%d oldest_utc=%s latest_id=%s latest_utc=%s keep_daily=%s",
-          count, oldest, latest_id, latest_ts, keep
-      } else {
-        printf "SNAPSHOT_RETENTION_SUMMARY count=0 oldest_utc=none latest_id=none latest_utc=none keep_daily=%s", keep
-      }
-    }' "$snap_out")"
-  rm -f "$snap_out"
-  log "$summary_line"
-  printf '%s\n' "$summary_line" >"$STAGE_DIR/retention.summary"
+  if ! "$PYTHON_BIN" -I "$EXPIRE_SELECT" "$RUN_NOW_EPOCH" "$RETENTION_SECONDS" <"$snaps" >"$picked" 2>"$err"; then
+    redact_stream <"$err" >&2
+    fail "RETENTION_SELECT_FAIL snapshot list rejected; nothing was deleted"
+  fi
+  head -n 1 "$picked" >"$STAGE_DIR/retention.summary"
+  tail -n +2 "$picked" | awk '{print $1}' >"$STAGE_DIR/retention.ids"
+}
+
+# ADR-0017: delete every snapshot past 14 days (no latest-copy exception), drop its data, then prove none is left.
+apply_retention() {
+  local -a ids=()
+  select_expired
+  mapfile -t ids <"$STAGE_DIR/retention.ids"
+  log "RETENTION_SELECT $(cat "$STAGE_DIR/retention.summary")"
+  if (( ${#ids[@]} > 0 )); then
+    log "Forgetting ${#ids[@]} snapshot(s) older than 14 days: ${ids[*]}"
+    run_redacted "$RESTIC_BIN" forget "${ids[@]}" \
+      || fail "RESTIC_FORGET_FAIL expired=${#ids[@]} snapshots are still listed; retention not met"
+  fi
+  # Every run, so data left by an earlier failed prune is removed too. --max-unused 0 repacks every pack that
+  # holds forgotten data instead of tolerating restic's default 5% of unused space.
+  run_redacted "$RESTIC_BIN" prune --max-unused 0 \
+    || fail "RESTIC_PRUNE_FAIL forgotten=${#ids[@]} data of forgotten snapshots may still be stored; retention not met"
+  select_expired
+  [[ ! -s "$STAGE_DIR/retention.ids" ]] \
+    || fail "RETENTION_VERIFY_FAIL snapshots older than 14 days are still listed after forget"
+  RETENTION_SUMMARY="SNAPSHOT_RETENTION_SUMMARY policy=wall-clock-14d forgotten=${#ids[@]} $(cat "$STAGE_DIR/retention.summary")"
+  log "$RETENTION_SUMMARY"
 }
 
 cmd_init() {
@@ -450,7 +467,13 @@ prepare_stage_dir() {
 
 cmd_run() {
   IN_BACKUP_RUN=1
+  # One clock reading per run: expiry and its check use the same cutoff.
+  RUN_NOW_EPOCH="$(date -u +%s)"
   prepare_stage_dir
+
+  # Expiry first (ADR-0017): a failed dump or upload below must not keep expired copies alive.
+  ensure_restic_repo
+  apply_retention
 
   stage_postgres_dump
   stage_erasure_log
@@ -473,10 +496,8 @@ toc_entries=$toc_entries
 erasure_included=$erasure_included
 erasure_bytes=$erasure_bytes
 erasure_lines=$erasure_lines
-keep_daily=$BACKUP_KEEP_DAILY
+retention=wall-clock-14d
 EOF
-
-  ensure_restic_repo
 
   local -a backup_items=("gongchae-bell.dump" "backup-meta.txt")
   if [[ "$erasure_included" == "true" ]]; then
@@ -493,16 +514,7 @@ EOF
     fail "RESTIC_BACKUP_FAIL"
   fi
 
-  log "Applying restic retention policy (--group-by host,tags --keep-daily $BACKUP_KEEP_DAILY --prune)"
-  if ! run_redacted "$RESTIC_BIN" forget --tag gongchae-bell --group-by host,tags --keep-daily "$BACKUP_KEEP_DAILY" --prune; then
-    fail "RESTIC_PRUNE_FAIL"
-  fi
-
-  log_snapshot_retention_summary
-  local summary
-  summary="$(cat "$STAGE_DIR/retention.summary")"
-
-  if ! send_heartbeat "" "BACKUP_OK dump_bytes=$dump_bytes dump_sha256=$dump_sha erasure_included=$erasure_included $summary"; then
+  if ! send_heartbeat "" "BACKUP_OK dump_bytes=$dump_bytes dump_sha256=$dump_sha erasure_included=$erasure_included $RETENTION_SUMMARY"; then
     fail "HEARTBEAT_PING_FAIL success heartbeat failed"
   fi
 
