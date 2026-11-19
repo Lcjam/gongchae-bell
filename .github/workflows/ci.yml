@@ -47,6 +47,21 @@ jobs:
         run: ./deploy/tests/caddy-integration-test.sh
       - name: Build ARM64 runtime image (no push)
         run: docker build --platform linux/arm64 -t gongchae-bell:ci-${{ github.sha }} .
+  backup-verify:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install restic
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y restic
+      - name: Syntax and backup unit/double tests
+        run: |
+          bash -n deploy/backup/backup.sh deploy/tests/backup-test.sh deploy/tests/backup-integration-test.sh
+          ./deploy/tests/backup-test.sh
+      - name: Disposable PostgreSQL 17 and restic restore integration test
+        run: ./deploy/tests/backup-integration-test.sh
   secrets:
     runs-on: ubuntu-latest
     timeout-minutes: 10
