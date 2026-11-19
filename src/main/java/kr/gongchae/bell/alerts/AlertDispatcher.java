@@ -21,6 +21,8 @@ import kr.gongchae.bell.alerts.DeliveryLedger.Reservation;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
@@ -187,13 +189,7 @@ public class AlertDispatcher {
         if (outcome == SendOutcome.SUCCESS) {
             OffsetDateTime finishedAt = now();
             if (ledger.finishAsync(claim, true, null, false)) {
-                metrics.recordDeliveryLatency(job.kind(), job.createdAt(), finishedAt);
-                for (PostingSummary item : rechecked.newPostings()) {
-                    if (item.firstSeenAt() != null) {
-                        metrics.recordCollectionToDeliveryLatency(job.kind(), item.firstSeenAt(), finishedAt);
-                    }
-                }
-                if (job.anyUnknown()) metrics.recordDuplicateRisk(job.kind());
+                recordSuccessAfterCommit(job, rechecked.newPostings(), finishedAt);
             }
             return null;
         }
@@ -274,6 +270,29 @@ public class AlertDispatcher {
         List<Long> droppedDeadline = recorded.deadlineSns().stream().filter(sn -> !keptDeadline.contains(sn)).toList();
         List<Long> droppedNew = recorded.newSns().stream().filter(sn -> !keptNew.contains(sn)).toList();
         return new EligibleSet(eligibleDeadline, eligibleNew, droppedDeadline, droppedNew);
+    }
+
+    private void recordSuccessAfterCommit(AsyncJob job, List<PostingSummary> newPostings, OffsetDateTime finishedAt) {
+        List<PostingSummary> snapshot = List.copyOf(newPostings);
+        Runnable record = () -> {
+            metrics.recordDeliveryLatency(job.kind(), job.createdAt(), finishedAt);
+            for (PostingSummary item : snapshot) {
+                if (item.firstSeenAt() != null) {
+                    metrics.recordCollectionToDeliveryLatency(job.kind(), item.firstSeenAt(), finishedAt);
+                }
+            }
+            if (job.anyUnknown()) metrics.recordDuplicateRisk(job.kind());
+        };
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    record.run();
+                }
+            });
+        } else {
+            record.run();
+        }
     }
 
     private OffsetDateTime now() {
