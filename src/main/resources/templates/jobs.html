@@ -172,10 +172,10 @@
       <article class="card border-secondary-subtle" th:each="job : ${result.items}">
         <div class="card-body">
           <div class="d-flex justify-content-between align-items-center gap-2 mb-1 small">
-            <a class="text-secondary text-decoration-none"
+            <a class="text-secondary text-decoration-none job-card-inst"
                th:href="@{/institutions/{code}(code=${job.instCode})}"
                th:text="${job.instName}">기관명</a>
-            <div class="d-flex gap-1 align-items-center">
+            <div class="d-flex gap-1 align-items-center flex-shrink-0">
               <span class="badge text-bg-light text-dark fw-semibold" th:text="${job.ddayLabel}">D-0</span>
               <span class="badge"
                     th:classappend="${job.effectiveStatus == 'OPEN'} ? 'text-bg-success' : (${job.effectiveStatus == 'CHECK'} ? 'text-bg-warning' : 'text-bg-secondary')"
@@ -187,11 +187,11 @@
                th:href="@{/jobs/{sn}(sn=${job.sn})}"
                th:text="${job.title}">제목</a>
           </h2>
-          <div class="d-flex flex-wrap gap-1 small text-secondary">
+          <div class="d-flex flex-wrap gap-1 small text-secondary job-card-badges">
             <span class="badge text-bg-light" th:text="${job.recrutSeLabel}">구분</span>
-            <span th:if="${!#lists.isEmpty(job.ncsNames)}" class="badge text-bg-light" th:text="${#strings.listJoin(job.ncsNames, ', ')}">직무</span>
-            <span th:if="${!#lists.isEmpty(job.regionNames)}" class="badge text-bg-light" th:text="${#strings.listJoin(job.regionNames, ', ')}">지역</span>
-            <span th:if="${!#lists.isEmpty(job.hireNames)}" class="badge text-bg-light" th:text="${#strings.listJoin(job.hireNames, ', ')}">고용형태</span>
+            <span th:if="${!#lists.isEmpty(job.ncsNames)}" class="badge text-bg-light job-meta-badge" th:text="${#strings.listJoin(job.ncsNames, ', ')}">직무</span>
+            <span th:if="${!#lists.isEmpty(job.regionNames)}" class="badge text-bg-light job-meta-badge" th:text="${#strings.listJoin(job.regionNames, ', ')}">지역</span>
+            <span th:if="${!#lists.isEmpty(job.hireNames)}" class="badge text-bg-light job-meta-badge" th:text="${#strings.listJoin(job.hireNames, ', ')}">고용형태</span>
             <span th:if="${job.brokenText}" class="badge text-bg-warning">문자 주의</span>
           </div>
           <p class="small text-secondary mb-0 mt-2" th:text="${'기간 ' + #temporals.format(job.bgngDate, 'yyyy-MM-dd') + ' ~ ' + #temporals.format(job.endDate, 'yyyy-MM-dd')}">기간</p>
