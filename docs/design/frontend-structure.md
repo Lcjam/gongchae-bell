@@ -3,8 +3,8 @@
 Spring MVC와 Thymeleaf 서버 렌더링 웹 구조, 경로, 폼 계약, 화면 전환, 보안·상태 인터페이스를 정리한 문서다.
 
 - 설계 기준 문서 [`prd.md`](../prd.md), [`wireframes.md`](wireframes.md), [`routes.md`](routes.md), [`architecture.md`](architecture.md), [`implementation-status.md`](../implementation-status.md)
-- 2026-11-18 `main` 기준 SHA `52c172c3d6c0a76ab5d3902e1f360b779f86b572`. M1 화면과 PR #13 구독 화면 소스가 포함돼 있다.
-- 구독 UI 계약은 PR #13 `7fa3f385773b3bcf2cb76b7a8f2766c1867cc432`에서 검수했고, 후속 요청 예산·풀 오류 수정의 최종 head `2b152930dc145a377f40cb8d01a7b7cd6c4a175b`에서도 경로·템플릿·폼 계약을 유지한다. 실제 운영 배포·발송 검증은 진행 중이다.
+- 2026-11-19 `main` 기준 SHA `fd106543aa90b59476e14f18f9be36e2b47757db`. M1 화면, PR #13 구독 화면, PR #23 알림 발송 워커(`48f6878cc57230bedd1693003b0e82eb9c8ae287`), PR #26 모바일 배지 줄바꿈(`32e71e4bb56c9137cb12f9b49088a66d949f988a`), PR #25 초기 운영 배포·적재·G4/사후 롤백 기록(`fd10654`)이 포함돼 있다.
+- 구독 UI 계약은 PR #13(`ed3f28f38623afeccd41006548a9e4f54ed0e301` 병합)을 유지하며, PR #23에서 `ManageView.disabledReason` 표시(`WEBHOOK_404` 안내)와 백엔드 발송 워커가 병합됐다. 운영은 `ALERTS_ENABLED=false`·`COLLECTOR_ENABLED=false`를 유지 중이며 실제 이메일/Discord 사용자 발송·정기 수집 등 운영 게이트는 아직 남아 있다.
 
 ## 1. 기술 구성 및 파일 트리
 
@@ -18,7 +18,7 @@ src/main/resources/
 ├── application.yml                   # [M1] error, base-url / [PR13] alerts, forward-headers
 ├── static/
 │   ├── css/
-│   │   ├── app.css                   # [M1] 커스텀 스타일, 포커스·래핑
+│   │   ├── app.css                   # [M1/PR26] 커스텀 스타일, 포커스·래핑·모바일 배지 줄바꿈
 │   │   ├── bootstrap.LICENSE         # [M1] MIT 라이선스
 │   │   └── bootstrap.min.css         # [M1] Bootstrap v5.3.8 CSS
 │   └── js/
@@ -28,7 +28,7 @@ src/main/resources/
     ├── error/404.html                # [M1] 404
     ├── fragments/layout.html         # [M1] head/header/footer (PR13 /privacy 링크)
     ├── home.html                     # [M1] 홈 (/)
-    ├── jobs.html                     # [M1] 목록 (/jobs, PR13 CTA 분기)
+    ├── jobs.html                     # [M1/PR26] 목록 (/jobs, PR13 CTA 분기, PR26 모바일 배지)
     ├── job-detail.html               # [M1] 상세 (/jobs/{sn})
     ├── institution.html              # [M1] 기관 이력 (/institutions/{code})
     ├── privacy.html                  # [PR13] 개인정보처리방침 (/privacy)
@@ -36,7 +36,7 @@ src/main/resources/
         ├── fragments.html            #   conditions(prefix), notice(channel)
         ├── new.html                  #   신청 (/subscriptions/new)
         ├── confirm.html              #   확인 (/subscriptions/confirm)
-        ├── manage.html               #   관리 (/subscriptions/manage)
+        ├── manage.html               #   관리 (/subscriptions/manage, PR23 disabledReason)
         ├── unsubscribe.html          #   해지 (/subscriptions/unsubscribe)
         ├── recover.html              #   복구 (/subscriptions/recover)
         └── notice.html               #   결과·오류·준비중 안내
@@ -51,12 +51,14 @@ src/main/java/kr/gongchae/bell/
 │   ├── SafeUrlValidator.java         # [M1] http/https 검증, 잡알리오 URL
 │   └── CatalogMetrics.java           # [M1] 페이지뷰·원문 리다이렉트 집계
 └── alerts/
-    ├── AlertsConfiguration.java      # [PR13] 모든 뷰에 alertsEnabled 주입
+    ├── AlertsConfiguration.java      # [PR13/PR23] alertsEnabled 주입, digestHeartbeat 등록
     ├── AlertsProperties.java         # [PR13] alerts, privacy 설정
     ├── OriginFilter.java             # [PR13] POST Origin/Referer 검사
     ├── SubscriptionController.java   # [PR13] /subscriptions/*, /privacy 라우트
-    └── SubscriptionService.java      # [PR13] 신청·확인·관리·해지·복구 로직
+    └── SubscriptionService.java      # [PR13/PR23] 신청·확인·관리(disabledReason)·해지·복구 로직
 ```
+
+- PR #23(`#7` 알림 발송 워커)에서 추가된 내부 스케줄러·배치·발송·원장·메트릭 클래스(`AlertBatchGenerator`, `AlertDispatchProperties`, `AlertDispatcher`, `AlertMatcher`, `AlertOutbox`, `AlertPayloadBuilder`, `AlertScheduler`, `AlertWorker`, `AlertsMetrics`, `DeliveryLedger`)와 `ops/Heartbeat.java`는 백엔드 발송·관측 경로이며 웹 라우트나 폼 입력 계약은 바꾸지 않는다.
 
 ## 2. 공통 레이아웃, 모델 및 UI 규칙
 
@@ -111,7 +113,7 @@ src/main/java/kr/gongchae/bell/
 | 개인정보 (`/privacy`) | `title`, `description`, `privacy` | `AlertsProperties.Privacy(officer, contact, policyVersion, effectiveDate, hostingLocation, overseasBasis, resendRetention)` |
 | 신청 (`new.html`) | `filterOptions`, `privacy`, `form`, `error`, `tab`, `email` | `form`은 `Conditions(ncs, region, hire, career, q, notifyNew, notifyDeadline)`, `error`는 `email`, `webhook`, `kinds`, `consent`, `age14`, `q`, `ncs`, `region`, `hire`, `career`이며 마지막 네 값은 일반 조건 오류 분기로 표시 |
 | 확인·해지 | `title`, `token` | `token`은 쿼리 `t` 문자열 (hidden input으로 POST 전송) |
-| 관리 (`manage.html`) | `title`, `view`, `form`, `error`, `filterOptions` | `view`는 `ManageView(id, channel, status, target, conditions, token)` (`target`은 마스킹 이메일 또는 `"Discord 웹훅"`) |
+| 관리 (`manage.html`) | `title`, `view`, `form`, `error`, `filterOptions` | `view`는 `ManageView(id, channel, status, target, conditions, token, disabledReason)` (`target`은 마스킹 이메일 또는 `"Discord 웹훅"`, `status != 'ACTIVE'`이고 `disabledReason == 'WEBHOOK_404'`일 때 웹훅 404 재신청 안내 표시) |
 | 결과 (`notice.html`) | `title`, `heading`, `message`, `detail`, `manageLink` | `manageLink`는 `"/subscriptions/manage?t=" + token` (선택 포함) |
 
 ## 5. 구독·개인정보 화면 및 폼 계약 (PR #13)
@@ -135,7 +137,7 @@ src/main/java/kr/gongchae/bell/
 
 ## 6. 반응형, 보안 및 상태 인터페이스
 
-- **반응형·접근성 (360px)** `viewport`와 `.container` 최대 폭 `1080px`를 유지한다. `/jobs`와 `/institutions/{code}` 이력은 `d-none d-md-block` 테이블과 `d-md-none` 카드로 분기하고 `/jobs` 모바일 필터는 `filter-toggle.js`로 토글한다. `overflow-wrap: anywhere`, `.table-responsive`, `text-break`, 스킵 링크, `:focus-visible`, `aria-*`를 유지한다.
+- **반응형·접근성 (360px)** `viewport`와 `.container` 최대 폭 `1080px`를 유지한다. `/jobs`와 `/institutions/{code}` 이력은 `d-none d-md-block` 테이블과 `d-md-none` 카드로 분기하고 `/jobs` 모바일 필터는 `filter-toggle.js`로 토글한다. `/jobs` 모바일 카드(`d-md-none`)는 상단 기관명 `.job-card-inst`(`min-width: 0; overflow-wrap: anywhere`), D-day·상태 묶음 `.flex-shrink-0`, 하단 메타 배지 래퍼 `.job-card-badges`(`.badge { line-height: 1.3 }`) 안의 직무·지역·고용형태 다중 값 배지 `.job-meta-badge`(`white-space: normal; text-align: left; overflow-wrap: anywhere; max-width: 100%`)로 360px 가용 폭 안에서 줄바꿈한다(`D-day`·`상태`·`구분`·`문자 주의` 등 짧은 배지는 `white-space: nowrap` 유지). `overflow-wrap: anywhere`, `.table-responsive`, `text-break`, 스킵 링크, `:focus-visible`, `aria-*`를 유지한다.
 - **Escape·외부 링크** 출력은 `th:text`로 자동 이스케이프하며 `SafeUrlValidator`가 `http`/`https` 외 스킴과 제어문자·userinfo를 걸러낸다. 외부 링크는 `target="_blank" rel="noopener noreferrer"`를 부여하고 `/jobs/{sn}/source`는 `Referrer-Policy: no-referrer`를 내린다. 알 수 없는 상세 JSON은 안내 문구만 표시한다.
 - **Origin·토큰 보호** `OriginFilter`가 상태 변경 요청의 `Origin`/`Referer`를 `app.base-url`과 대조해 불일치 시 `403`을 반환한다. 토큰 POST(`/confirm`, `/manage`, `/unsubscribe`, `/unsubscribe/one-click`)만 `Origin` 누락·`null`을 허용한다. 토큰 화면은 `Referrer-Policy: no-referrer`, `Cache-Control: no-store`, `X-Robots-Tag: noindex`를 내리고 `manageLink`는 `rel="noreferrer"`를 붙인다. 관리 화면은 이메일 마스킹과 `"Discord 웹훅"`만 노출하며 웹훅 오류 시 입력값을 다시 채우지 않는다.
 
@@ -151,7 +153,7 @@ src/main/java/kr/gongchae/bell/
 
 | 구분 | 기준 | 현재 상태 |
 |---|---|---|
-| M1 웹 카탈로그 | `main` 포함, 최초 구현 `000dce555e9eb69ef3184dd5f80aa1d499a1f602` | 홈, 목록, 상세, 원문 이동, 기관 이력, SEO, 오류 화면, 레이아웃, CSS/JS 반영 완료 |
-| PR #13 구독·개인정보 | `main` 포함, 병합 `ed3f28f38623afeccd41006548a9e4f54ed0e301` | `/privacy`, `/subscriptions/*`, 푸터 링크, `jobs.html` CTA, 동기 신청·웹훅 검증·테스트 발송·확인·관리·해지·복구 구현 (`home.html` 알림 섹션은 준비 배지 유지, 기본 `ALERTS_ENABLED=false`) |
-| `#7` 알림 발송 워커 | `feat/#7-alert-delivery`에서 구현 중 | 새 공고 매칭, 이메일 일일 묶음, 디스코드 회차별 발송, D-3 마감 임박, 비동기 발송 실패 처리 예정 |
-| M3 공개 배포·관측 | PRD §7 (공개 배포 전) | 공개 HTTPS 배포, 운영 DB 적재, 실서비스 Resend·Discord E2E 관측 전 |
+| M1 웹 카탈로그 | `main` 포함, 최초 구현 `000dce555e9eb69ef3184dd5f80aa1d499a1f602`, 모바일 배지 수정 PR #26(`32e71e4bb56c9137cb12f9b49088a66d949f988a`) | 홈, 목록(`/jobs` 모바일 배지 줄바꿈 포함), 상세, 원문 이동, 기관 이력, SEO, 오류 화면, 레이아웃, CSS/JS 반영 완료 |
+| PR #13 구독·개인정보 | `main` 포함, 병합 `ed3f28f38623afeccd41006548a9e4f54ed0e301` | `/privacy`, `/subscriptions/*`, 푸터 링크, `jobs.html` CTA, 동기 신청·웹훅 검증·테스트 발송·확인·관리·해지·복구 구현 (`home.html` 알림 섹션은 준비 배지 유지, 운영 `ALERTS_ENABLED=false`) |
+| `#7` 알림 발송 워커 (PR #23) | `main` 포함, 병합 `48f6878cc57230bedd1693003b0e82eb9c8ae287` | 새 공고 매칭, 이메일 일일 묶음, 디스코드 회차별 발송, D-3 마감 임박, 비동기 발송·재시도·404 비활성화(`disabledReason`)·수집→발송 지연 지표·`HEARTBEAT_DIGEST_URL` 백엔드 코드 병합 완료 (`ALERTS_ENABLED=false` 유지로 실제 운영 발송 미개시) |
+| M3 공개 배포·관측 | `main` `fd10654`([`codex-runtime-review.md`](../../collab/2026-11-19-resume/codex-runtime-review.md)) | 공개 HTTPS·운영 DB 최초 적재(36,879건)·모니터링 설치·외부 G4 전환/사후 롤백(`836a3c0`↔`517eb6b`) 및 `32e71e4` 공개 모바일 360px 재검수 완료. 단 `ALERTS_ENABLED=false`·`COLLECTOR_ENABLED=false` 유지 중이며 실제 Resend·Discord 사용자 발송, 정기 수집 활성화, 운영 디스코드 채널 사람 확인, UptimeRobot/Healthchecks, 백업·복원, 부하 등 운영·공개 출시 게이트는 미완료 |
