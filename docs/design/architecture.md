@@ -32,9 +32,9 @@ flowchart TB
 | `app-blue` / `app-green` | 같은 이미지. 평소에는 한쪽만 실행된다 | 없음 (Docker 내부망) |
 | `postgres` | 공고, 구독, 발송 작업, 실행 기록, 카운터 | 없음 |
 | `prometheus` | 앱 관리 포트(:8081) 수집, 보존 기간은 길게(라벨이 적다) | 없음 |
-| `grafana` | 대시보드, 경보 → 운영 디스코드 | 없음 (SSH 터널) |
+| `grafana` | 대시보드, 경보 → 운영 디스코드 | 없음 (호스트 루프백 `127.0.0.1:3000`, SSH 터널) |
 
-호스트 포트로 내보내는 건 Caddy의 80과 443뿐이다. 나머지는 Docker 내부 서비스 이름으로 통신한다. 넣지 않은 것과 이유는 [설계 종합 §1](../../collab/2026-11-08-design/final.md)에 있다.
+외부에 여는 호스트 포트는 Caddy의 80과 443뿐이다. Grafana만 SSH 터널용으로 호스트 루프백에 연다. Prometheus와 Grafana는 `compose.prod.yml` 위에 얹는 `compose.monitoring.yml`에 있다([모니터링](../ops/monitoring.md)). 나머지는 Docker 내부 서비스 이름으로 통신한다. 넣지 않은 것과 이유는 [설계 종합 §1](../../collab/2026-11-08-design/final.md)에 있다.
 
 ## 앱 패키지 (기능별)
 | 패키지 | 내용 |
@@ -75,5 +75,5 @@ flowchart TB
 |---|---|
 | 웹 생존 | UptimeRobot 외부 HTTP |
 | 수집, 이메일 묶음, 백업, NAS 가져오기 | Healthchecks.io heartbeat |
-| HTTP p95와 오류율, 마지막 완전 수집, 발송 적체와 실패, 결과 불명확, API 예산 | Prometheus → Grafana 대시보드와 경보 |
+| HTTP p95와 오류율, 마지막 완전 수집, 발송 적체와 실패, 결과 불명확, API 예산 | Prometheus → Grafana 대시보드. 경보 규칙은 Prometheus가 평가하고 Grafana가 운영 디스코드로 전달한다 ([모니터링](../ops/monitoring.md)) |
 | 호스트 자원 | 정해진 시점(평상시, 수집 중, 배포 겹침)에 `docker stats`와 `df`로 실측 기록 |

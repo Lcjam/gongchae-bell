@@ -12,8 +12,10 @@ import java.time.temporal.ChronoUnit;
 import java.util.List;
 import kr.gongchae.bell.alerts.AlertMatcher.ActiveSubscription;
 import kr.gongchae.bell.ingestion.runtime.CollectionRuns;
+import kr.gongchae.bell.ops.Heartbeat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -24,7 +26,7 @@ import org.springframework.transaction.support.TransactionTemplate;
  * - {@code DISCORD_DEADLINE} at >= 09:00 KST (D-3 only; Discord NEW is created in the regular collection TX)
  *
  * <p>Same-day catch-up runs once per KST date via {@code collect_run(kind, date)} unique claim.
- * The {@link DigestHeartbeat} ping is emitted only by the app that wins and completes the DIGEST slot.
+ * The {@link Heartbeat} digest ping is emitted only by the app that wins and completes the DIGEST slot.
  */
 @Component
 public class AlertBatchGenerator {
@@ -37,13 +39,13 @@ public class AlertBatchGenerator {
     private final AlertMatcher matcher;
     private final AlertOutbox outbox;
     private final AlertsProperties properties;
-    private final DigestHeartbeat digestHeartbeat;
+    private final Heartbeat digestHeartbeat;
     private final TransactionTemplate tx;
     private final Clock clock;
 
     public AlertBatchGenerator(CollectionRuns runs, AlertMatcher matcher, AlertOutbox outbox,
-            AlertsProperties properties, DigestHeartbeat digestHeartbeat, PlatformTransactionManager manager,
-            Clock clock) {
+            AlertsProperties properties, @Qualifier("digestHeartbeat") Heartbeat digestHeartbeat,
+            PlatformTransactionManager manager, Clock clock) {
         this.runs = runs;
         this.matcher = matcher;
         this.outbox = outbox;

@@ -154,9 +154,11 @@ jobs:
           deploy_id="${mode}-${TARGET_SHA:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           echo "Using deploy_id=$deploy_id mode=$mode"
 
-          # Sync tracked deployment definitions to /opt/gongchae-bell without touching .env or deploy/state
+          # Sync tracked deployment definitions to /opt/gongchae-bell without touching .env or deploy/state.
+          # compose.monitoring.yml and deploy/monitoring (#15) ride along; a changed monitoring config takes effect only
+          # when the operator runs `deploy.sh monitoring up -d prometheus grafana` (docs/ops/monitoring.md).
           if [[ "$mode" != "rollback" ]]; then
-            tar --exclude='deploy/state' -cf - compose.prod.yml deploy | \
+            tar --exclude='deploy/state' -cf - compose.prod.yml compose.monitoring.yml deploy | \
               ssh "${ssh_opts[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" "mkdir -p /opt/gongchae-bell && tar -xf - -C /opt/gongchae-bell && chmod +x /opt/gongchae-bell/deploy/deploy.sh /opt/gongchae-bell/deploy/g4-probe.sh"
           fi
 

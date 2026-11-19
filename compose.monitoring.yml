@@ -1,0 +1,60 @@
+# #15 monitoring overlay (ADR-0006). Use it on top of compose.prod.yml, same project, never alone, through deploy.sh
+# (it reads the app tags from deploy/state, which raw `docker compose -f ... -f ...` cannot interpolate):
+#   deploy/deploy.sh monitoring up -d prometheus grafana
+# It adds no app setting: deploy.sh keeps managing app-blue/app-green with compose.prod.yml only.
+# Nothing is reachable from the internet: Prometheus has no host port, Grafana listens on the host loopback for an
+# SSH tunnel only. Steps, thresholds and the alert test are in docs/ops/monitoring.md.
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.16.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # ADR-0014: one year, so page views stay comparable over time.
+      - --storage.tsdb.retention.time=1y
+    volumes:
+      - ./deploy/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/monitoring/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus_data:/prometheus
+    networks:
+      # backend reaches the apps' :8081; monitoring is the only network Grafana shares with it.
+      - backend
+      - monitoring
+
+  grafana:
+    image: grafana/grafana-oss:13.0.2
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD}
+      GF_SERVER_ROOT_URL: http://localhost:3000/
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      # Ops Discord webhook (secret). Grafana refuses to start with an empty one, so "off" (the default) points at a
+      # closed port inside the Grafana container: alerts are still evaluated, every send fails locally, nothing leaves.
+      OPS_DISCORD_WEBHOOK_URL: ${OPS_DISCORD_WEBHOOK_URL:-http://127.0.0.1:9/alerts-off}
+    volumes:
+      - ./deploy/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    networks:
+      # Not internal: Grafana needs egress to Discord. It cannot reach postgres or the apps.
+      - monitoring
+
+networks:
+  monitoring:
+    driver: bridge
+
+volumes:
+  prometheus_data:
+  grafana_data:

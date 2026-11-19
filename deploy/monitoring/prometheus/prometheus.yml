@@ -1,0 +1,16 @@
+# Internal only (ADR-0006): no host port. Grafana reads it on the monitoring network; it scrapes the apps on backend.
+global:
+  scrape_interval: 30s
+  scrape_timeout: 10s
+  evaluation_interval: 30s
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+  # Both colors are listed; only the running one answers. A stopped color is up=0, which the rules allow for.
+  # DB-backed collector gauges are identical on both colors, so rules and panels read them with max(), never sum().
+  - job_name: gongchae-app
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["app-blue:8081", "app-green:8081"]
