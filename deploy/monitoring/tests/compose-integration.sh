@@ -7,7 +7,9 @@
 #  3. Prometheus and Grafana keep running, same containers, while deploy.sh runs its own app compose calls on the same
 #     project (bootstrap: up app-blue, readiness fails on a stand-in image, stop and rm app-blue). The app container
 #     gets the heartbeat URL from the real files, and a Grafana restart through deploy.sh works.
-# Needs docker with the compose plugin, flock, python3. Leaves nothing behind (own project name, down -v).
+#  4. After a deploy-style tar sync (GNU tar gives every file a new inode) and an in-place edit of prometheus.yml,
+#     SIGHUP makes the running Prometheus load the new config. Fails with a single-file mount of prometheus.yml.
+# Needs docker with the compose plugin, flock, python3, GNU tar and stat. Leaves nothing behind (own project name, down -v).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -93,5 +95,21 @@ grep -q "BOOTSTRAP_APP_FAIL" "$WORK/bootstrap.log" || fail "unexpected bootstrap
 deploy_sh monitoring restart grafana
 for _ in $(seq 1 30); do [[ "$(running_ids | wc -l)" -eq 2 ]] && break; sleep 2; done
 [[ "$(running_ids)" == "$before" ]] || fail "grafana restart through deploy.sh changed the containers"
+
+echo "=== 4. after a deploy tar sync, an edited prometheus.yml reaches the running Prometheus on SIGHUP"
+prom_api() { deploy_sh monitoring exec -T prometheus wget -qO- "http://localhost:9090$1"; }
+loaded() { prom_api /api/v1/status/config 2>/dev/null | grep -q "job_name: $1"; }
+for _ in $(seq 1 30); do loaded gongchae-app && break; sleep 2; done
+loaded gongchae-app || fail "Prometheus did not load prometheus.yml"
+cfg="$WORK/deploy/monitoring/prometheus/prometheus.yml"
+inode_before="$(stat -c %i "$cfg")"
+# Same command shape as the sync step in .github/workflows/deploy.yml.
+(cd "$REPO_ROOT" && tar --exclude='deploy/state' -cf - compose.prod.yml compose.monitoring.yml deploy) | tar -xf - -C "$WORK"
+[[ "$(stat -c %i "$cfg")" != "$inode_before" ]] || fail "tar did not replace prometheus.yml, so this step would prove nothing"
+printf '  - job_name: it-reload-probe\n    static_configs:\n      - targets: ["localhost:9090"]\n' >>"$cfg"
+deploy_sh monitoring kill -s SIGHUP prometheus
+for _ in $(seq 1 15); do loaded it-reload-probe && break; sleep 1; done
+loaded it-reload-probe || fail "Prometheus still runs the pre-sync prometheus.yml after SIGHUP (mount pinned to the old inode)"
+[[ "$(running_ids)" == "$before" ]] || fail "the reload recreated the monitoring containers"
 
 echo "COMPOSE_INTEGRATION_TEST_PASSED"

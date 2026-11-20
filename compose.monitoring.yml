@@ -15,8 +15,9 @@ services:
       # ADR-0014: one year, so page views stay comparable over time.
       - --storage.tsdb.retention.time=1y
     volumes:
-      - ./deploy/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./deploy/monitoring/prometheus/rules:/etc/prometheus/rules:ro
+      # The whole directory, not prometheus.yml alone: the deploy sync (tar) replaces each file with a new inode, and a
+      # single-file mount keeps the old one, so SIGHUP would reload stale settings. Holds prometheus.yml and rules/.
+      - ./deploy/monitoring/prometheus:/etc/prometheus:ro
       - prometheus_data:/prometheus
     networks:
       # backend reaches the apps' :8081; monitoring is the only network Grafana shares with it.
