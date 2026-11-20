@@ -9,7 +9,7 @@
 #     gets the heartbeat URL from the real files, and a Grafana restart through deploy.sh works.
 #  4. After a deploy-style tar sync (GNU tar gives every file a new inode) and an in-place edit of prometheus.yml,
 #     SIGHUP makes the running Prometheus load the new config. Fails with a single-file mount of prometheus.yml.
-# Needs docker with the compose plugin, flock, python3, GNU tar and stat. Leaves nothing behind (own project name, down -v).
+# Needs docker with the compose plugin, flock, python3 and GNU tar. Leaves nothing behind (own project name, down -v).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -102,10 +102,12 @@ loaded() { prom_api /api/v1/status/config 2>/dev/null | grep -q "job_name: $1"; 
 for _ in $(seq 1 30); do loaded gongchae-app && break; sleep 2; done
 loaded gongchae-app || fail "Prometheus did not load prometheus.yml"
 cfg="$WORK/deploy/monitoring/prometheus/prometheus.yml"
-inode_before="$(stat -c %i "$cfg")"
+# Pin the pre-sync file with a hard link, as a single-file mount would; otherwise the filesystem may hand the freed
+# inode number straight back to tar's new file and the check below could not tell a replacement from an overwrite.
+ln "$cfg" "$WORK/prometheus.yml.pre-sync"
 # Same command shape as the sync step in .github/workflows/deploy.yml.
 (cd "$REPO_ROOT" && tar --exclude='deploy/state' -cf - compose.prod.yml compose.monitoring.yml deploy) | tar -xf - -C "$WORK"
-[[ "$(stat -c %i "$cfg")" != "$inode_before" ]] || fail "tar did not replace prometheus.yml, so this step would prove nothing"
+[[ ! "$cfg" -ef "$WORK/prometheus.yml.pre-sync" ]] || fail "tar did not replace prometheus.yml, so this step would prove nothing"
 printf '  - job_name: it-reload-probe\n    static_configs:\n      - targets: ["localhost:9090"]\n' >>"$cfg"
 deploy_sh monitoring kill -s SIGHUP prometheus
 for _ in $(seq 1 15); do loaded it-reload-probe && break; sleep 1; done
