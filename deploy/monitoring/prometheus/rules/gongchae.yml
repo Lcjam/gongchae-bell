@@ -55,3 +55,26 @@ groups:
         labels:
           severity: warning
           summary: HTTP 5xx 비율 5% 초과 (10분, 5건 이상)
+
+      - alert: GongchaeAlertsBacklog
+        # Both colors read the same DB table, so max() deduplicates them.
+        # View together with alerts_notification_sending_stuck on Grafana when investigating stalls.
+        expr: max(alerts_notification_backlog{job="gongchae-app"}) > 0
+        for: 15m
+        labels:
+          severity: warning
+          summary: 알림 발송 적체 15분 지속 (5분 초과 대기 작업 존재)
+
+      - alert: GongchaeAlertsFailedHigh
+        # Deduplicate app-blue/green per kind first, then sum across the 6 fixed kinds.
+        expr: sum(max by (kind) (alerts_notification_failed_last1h{job="gongchae-app"})) >= 5
+        labels:
+          severity: warning
+          summary: 최근 1시간 알림 발송 실패(FAILED) 5건 이상
+
+      - alert: GongchaeAlertsUncertain
+        # UNCERTAIN means the provider may have processed the request; never auto-resend.
+        expr: sum(max by (kind) (alerts_notification_uncertain_last24h{job="gongchae-app"})) > 0
+        labels:
+          severity: warning
+          summary: 최근 24시간 알림 발송 결과 불명(UNCERTAIN) 발생 — 재발송 금지

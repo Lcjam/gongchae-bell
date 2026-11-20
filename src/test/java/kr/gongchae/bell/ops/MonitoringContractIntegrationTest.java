@@ -17,6 +17,8 @@ import java.util.TreeSet;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import kr.gongchae.bell.IntegrationTestSupport;
+import kr.gongchae.bell.alerts.AlertsMetrics;
+import kr.gongchae.bell.alerts.AlertsMetricsTestHelper;
 import kr.gongchae.bell.catalog.CatalogMetrics;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -25,9 +27,10 @@ import org.springframework.mock.web.MockHttpServletRequest;
 
 /** Every app metric the Prometheus rules and Grafana dashboard read must exist in the real scrape, with safe labels. */
 class MonitoringContractIntegrationTest extends IntegrationTestSupport {
-    static final Pattern METRIC = Pattern.compile("\\b(?:gongchae|collector|http_server_requests)_[a-z0-9_]+");
+    static final Pattern METRIC = Pattern.compile("\\b(?:gongchae|collector|alerts|http_server_requests)_[a-z0-9_]+");
     static final String SEARCH = "monitoringprobe7731";
     @Autowired CatalogMetrics catalogMetrics;
+    @Autowired AlertsMetrics alertsMetrics;
     @Autowired MeterRegistry registry;
     @Value("${local.server.port}") int appPort;
     @Value("${local.management.port}") int managementPort;
@@ -40,8 +43,9 @@ class MonitoringContractIntegrationTest extends IntegrationTestSupport {
                 client.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + appPort + path)).build(),
                         HttpResponse.BodyHandlers.discarding());
             }
-            // The source redirect counter is created on first use; a posting row is not what this test is about.
+            // Dynamic counters/timers are registered on first use; record one synthetic sample each to verify scrape contract.
             catalogMetrics.recordSourceRedirect(false, new MockHttpServletRequest());
+            AlertsMetricsTestHelper.recordSampleDeliveryMeters(alertsMetrics);
             scrape = client.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + managementPort + "/actuator/prometheus"))
                     .build(), HttpResponse.BodyHandlers.ofString()).body();
         }
@@ -53,13 +57,28 @@ class MonitoringContractIntegrationTest extends IntegrationTestSupport {
         }
         assertThat(referenced).contains("collector_regular_incomplete_consecutive", "collector_last_complete_epoch",
                 "collector_api_attempts_today", "http_server_requests_seconds_bucket", "gongchae_page_views_total",
-                "gongchae_source_redirects_total");
+                "gongchae_source_redirects_total",
+                "alerts_notification_backlog", "alerts_notification_sending_stuck",
+                "alerts_notification_failed_last1h", "alerts_notification_uncertain_last24h",
+                "alerts_notification_sent_last24h", "alerts_notification_duplicate_risk_last24h",
+                "alerts_subscriptions_active", "alerts_subscriptions_disabled", "alerts_send_total_used",
+                "alerts_delivery_delay_max_seconds", "alerts_delivery_attempts_total",
+                "alerts_delivery_duplicate_risk_total", "alerts_delivery_latency_seconds_sum",
+                "alerts_delivery_latency_seconds_count", "alerts_delivery_latency_seconds_max",
+                "alerts_delivery_collection_latency_seconds_sum",
+                "alerts_delivery_collection_latency_seconds_count",
+                "alerts_delivery_collection_latency_seconds_max");
+        // M2 timers expose count/sum/max only (no histogram buckets / p95).
+        assertThat(referenced).doesNotContain("alerts_delivery_latency_seconds_bucket",
+                "alerts_delivery_collection_latency_seconds_bucket");
         for (String name : referenced) {
             assertThat(Pattern.compile("(?m)^" + name + "[{ ]").matcher(scrape).find()).as(name).isTrue();
         }
         assertThat(scrape).containsPattern("(?m)^http_server_requests_seconds_bucket\\{.*uri=\"/jobs\".*le=\"");
         assertThat(scrape).containsPattern("(?m)^collector_api_warning_limit 500(\\.0)?$");
         assertThat(scrape).containsPattern("(?m)^collector_api_stop_limit 900(\\.0)?$");
+        assertThat(scrape).containsPattern("(?m)^alerts_notification_backlog(?:\\{[^}]*})? \\d+");
+        assertThat(scrape).containsPattern("(?m)^alerts_notification_sending_stuck(?:\\{[^}]*})? \\d+");
         // Labels carry route templates and fixed values, never a raw path, query or search term.
         assertThat(scrape).doesNotContain(SEARCH).doesNotContain("/jobs/31337").doesNotContain("keyword");
     }
