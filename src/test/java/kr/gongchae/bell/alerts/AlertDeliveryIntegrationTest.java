@@ -1103,6 +1103,86 @@ class AlertDeliveryIntegrationTest extends IntegrationTestSupport {
         assertThat(timerCount("alerts.delivery.collection.latency", "DISCORD_DEADLINE")).isEqualTo(discDlCollCount0);
     }
 
+    @Test
+    void successMetricsDoNotIncrementWhenOuterSentCommitFailsAndIncrementOnceCommitted() {
+        long jobLatCount0 = timerCount("alerts.delivery.latency", "DISCORD_NEW");
+        long collLatCount0 = timerCount("alerts.delivery.collection.latency", "DISCORD_NEW");
+        double dupRisk0 = counterCount("alerts.delivery.duplicate.risk", "DISCORD_NEW", null);
+        double attemptSuccess0 = counterCount("alerts.delivery.attempts", "DISCORD_NEW", "SUCCESS");
+        double attempt5xx0 = counterCount("alerts.delivery.attempts", "DISCORD_NEW", "HTTP_5XX");
+
+        Instant t0 = Instant.parse("2026-11-18T01:00:00Z");
+        NOW.set(t0);
+        insertActiveDiscord("https://discord.com/api/webhooks/791/commit-fail", null, null, null, null, true, false,
+                t0.minusSeconds(60));
+        long runId = runs.claim("REGULAR", "2026-11-18T10:00:00+09:00").orElseThrow();
+        ingestor.applyRegular(runId, fixtureBody(307032L, r -> r.put("pbancEndYmd", "20261125").put("ongoingYn", "Y")), t0);
+        long notifId = jdbc.sql("SELECT id FROM notification WHERE kind = 'DISCORD_NEW'").query(Long.class).single();
+
+        // Attempt 1: provider returns 5xx (UNKNOWN) -> R & A commit, job moves to RETRY (anyUnknown = true)
+        NOW.set(t0.plusSeconds(2));
+        synchronized (WEBHOOK_SCRIPT) { WEBHOOK_SCRIPT.addLast(SendOutcome.Result.of(SendOutcome.HTTP_5XX)); }
+        assertThat(worker.runOnce()).isEqualTo(1);
+        assertThat(counterCount("alerts.delivery.attempts", "DISCORD_NEW", "HTTP_5XX") - attempt5xx0).isEqualTo(1.0);
+
+        // Attempt 2: provider returns SUCCESS, R commits attempt_no=2, but outer TX A fails AT COMMIT via deferred trigger on SENT
+        NOW.set(t0.plusSeconds(10));
+        SENT_WEBHOOKS.clear();
+        jdbc.sql("""
+                CREATE OR REPLACE FUNCTION test_fail_sent_on_commit() RETURNS trigger AS $$
+                BEGIN
+                    IF NEW.status = 'SENT' THEN
+                        RAISE EXCEPTION 'DEFERRED_SENT_COMMIT_FAIL';
+                    END IF;
+                    RETURN NULL;
+                END;
+                $$ LANGUAGE plpgsql;
+                CREATE CONSTRAINT TRIGGER trg_test_fail_sent_on_commit
+                    AFTER UPDATE ON notification
+                    DEFERRABLE INITIALLY DEFERRED
+                    FOR EACH ROW
+                    EXECUTE FUNCTION test_fail_sent_on_commit();
+                """).update();
+        try {
+            assertThat(worker.runOnce()).isEqualTo(1);
+        } finally {
+            jdbc.sql("DROP TRIGGER IF EXISTS trg_test_fail_sent_on_commit ON notification").update();
+            jdbc.sql("DROP FUNCTION IF EXISTS test_fail_sent_on_commit()").update();
+        }
+
+        // HTTP actually executed, R (attempt 2, outcome=NULL) is durable, TX A rolled back so DB is still SENDING (NOT SENT)
+        assertThat(SENT_WEBHOOKS).hasSize(1);
+        assertThat(jdbc.sql("SELECT status FROM notification WHERE id = :id").param("id", notifId).query(String.class).single())
+                .isEqualTo("SENDING");
+        assertThat(jdbc.sql("SELECT count(*) FROM notification_attempt WHERE notification_id = :id AND attempt_no = 2 AND outcome IS NULL")
+                .param("id", notifId).query(Integer.class).single()).isEqualTo(1);
+        assertThat(jdbc.sql("SELECT count(*) FROM notification_item WHERE notification_id = :id")
+                .param("id", notifId).query(Integer.class).single()).isEqualTo(1);
+        assertThat(counterCount("alerts.delivery.attempts", "DISCORD_NEW", "SUCCESS") - attemptSuccess0).isEqualTo(1.0);
+
+        // Success-only metrics MUST stay unchanged because outer TX A rolled back and DB is NOT SENT
+        assertThat(timerCount("alerts.delivery.latency", "DISCORD_NEW") - jobLatCount0).isZero();
+        assertThat(timerCount("alerts.delivery.collection.latency", "DISCORD_NEW") - collLatCount0).isZero();
+        assertThat(counterCount("alerts.delivery.duplicate.risk", "DISCORD_NEW", null) - dupRisk0).isZero();
+
+        // Recovery + normal attempt 3 commits SENT -> success metrics increment exactly once
+        NOW.set(t0.plusSeconds(10).plus(DeliveryLedger.RECOVER_AFTER).plusSeconds(5));
+        assertThat(worker.runOnce()).isEqualTo(1);
+        assertThat(jdbc.sql("SELECT status FROM notification WHERE id = :id").param("id", notifId).query(String.class).single())
+                .isEqualTo("SENT");
+        assertThat(timerCount("alerts.delivery.latency", "DISCORD_NEW") - jobLatCount0).isEqualTo(1);
+        assertThat(timerCount("alerts.delivery.collection.latency", "DISCORD_NEW") - collLatCount0).isEqualTo(1);
+        assertThat(counterCount("alerts.delivery.duplicate.risk", "DISCORD_NEW", null) - dupRisk0).isEqualTo(1.0);
+        assertThat(counterCount("alerts.delivery.attempts", "DISCORD_NEW", "SUCCESS") - attemptSuccess0).isEqualTo(2.0);
+    }
+
+    private double counterCount(String name, String kind, String outcome) {
+        var search = meterRegistry.find(name).tag("kind", kind);
+        if (outcome != null) search = search.tag("outcome", outcome);
+        var counter = search.counter();
+        return counter == null ? 0.0 : counter.count();
+    }
+
     private ObjectNode pickRow(ArrayNode rows, long sn) {
         for (JsonNode row : rows) {
             if (row.path("recrutPblntSn").asLong() == sn) return ((ObjectNode) row).deepCopy();
