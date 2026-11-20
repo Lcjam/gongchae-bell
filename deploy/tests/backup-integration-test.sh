@@ -5,7 +5,11 @@ set -euo pipefail
 # - Disposable postgres:17 source container + compose.test.yml
 # - Synthetic erasure.log + sample DB rows
 # - Real restic encrypted repository (local repo; uses native restic or restic/restic container)
-# - backup.sh init + backup.sh run (pg_dump -Fc -> pg_restore --list -> restic backup -> keep-daily 14 prune)
+# - backup.sh init + backup.sh run (expire >14d by wall clock -> prune --max-unused 0 -> pg_dump -Fc ->
+#   pg_restore --list -> restic backup), ADR-0017
+# - Seeded snapshots dated with restic --time: 20d and 14d+1h gongchae-bell copies are forgotten and the data unique
+#   to them is physically gone (restic cat blob fails); a 14d-1h copy and a 30d copy with another tag stay
+# - A second repository whose copies are all past 14 days and whose dump fails ends with zero gongchae-bell copies
 # - restic restore -> separate disposable postgres:17 target container pg_restore -> row count & erasure.log check
 
 export MSYS_NO_PATHCONV=1
@@ -117,7 +121,6 @@ ERASURE_LOG_PATH=$TMP_DIR/erasure/erasure.log
 REQUIRE_ERASURE_LOG=auto
 BACKUP_LOCK_FILE=$TMP_DIR/backup.lock
 BACKUP_STAGE_ROOT=$TMP_DIR/stage
-BACKUP_KEEP_DAILY=14
 BACKUP_HOST_TAG=backup-integration-test
 EOF
 chmod 0600 "$TMP_DIR/backup.env"
@@ -153,53 +156,73 @@ chmod +x "$TMP_DIR/bin/docker"
 
 "$BACKUP_SH" init --env-file "$TMP_DIR/backup.env"
 
-# Seed two legacy random-path snapshots on distinct days to reproduce pre-fix mktemp paths (B1)
-mkdir -p "$TMP_DIR/legacy-mktemp-1" "$TMP_DIR/legacy-mktemp-2"
-printf 'legacy-1\n' >"$TMP_DIR/legacy-mktemp-1/gongchae-bell.dump"
-printf 'legacy-2\n' >"$TMP_DIR/legacy-mktemp-2/gongchae-bell.dump"
-(
-  cd "$TMP_DIR/legacy-mktemp-1"
-  RESTIC_REPOSITORY="$TMP_DIR/repo" RESTIC_PASSWORD="test-only-restic-passphrase" \
-    restic backup --host backup-integration-test --tag gongchae-bell --tag daily --time "2026-11-15 03:00:00" gongchae-bell.dump >/dev/null
-)
-(
-  cd "$TMP_DIR/legacy-mktemp-2"
-  RESTIC_REPOSITORY="$TMP_DIR/repo" RESTIC_PASSWORD="test-only-restic-passphrase" \
-    restic backup --host backup-integration-test --tag gongchae-bell --tag daily --time "2026-11-16 03:00:00" gongchae-bell.dump >/dev/null
-)
+NOW="$(date -u +%s)"
+DAY=86400
+# restic against $TMP_DIR/$1 (repo or repo2).
+rr() { local repo="$1"; shift; RESTIC_REPOSITORY="$TMP_DIR/$repo" RESTIC_PASSWORD="test-only-restic-passphrase" TZ=UTC restic "$@"; }
+# Seed one snapshot dated $3 seconds ago with tag $2 holding content $4. Content under 512 KiB is one data blob
+# whose restic ID is the SHA-256 of that content, so `cat blob` shows whether its data is still stored.
+seed() {
+  local repo="$1" tag="$2" age="$3" content="$4" dir="$TMP_DIR/seed-$RANDOM$RANDOM"
+  mkdir -p "$dir"
+  printf '%s' "$content" >"$dir/gongchae-bell.dump"
+  (cd "$dir" && rr "$repo" backup --host backup-integration-test --tag "$tag" --tag daily \
+    --time "$(date -u -d "@$((NOW - age))" '+%Y-%m-%d %H:%M:%S')" gongchae-bell.dump >/dev/null)
+}
+blob_id() { printf '%s' "$1" | sha256sum | awk '{print $1}'; }
+count_snaps() { rr "$1" snapshots --tag "$2" --json | grep -o '"short_id"' | wc -l | tr -d '[:space:]'; }
+expect_eq() { [[ "$1" == "$2" ]] || { echo "ERROR: $3: expected [$1] got [$2]" >&2; exit 1; }; }
 
-# Multi-backup retention reduction: 3 daily snapshots across 3 different paths -> keep-daily=2 prunes down to 2
-sed -i 's/^BACKUP_KEEP_DAILY=.*/BACKUP_KEEP_DAILY=2/' "$TMP_DIR/backup.env"
-if ! "$BACKUP_SH" run --env-file "$TMP_DIR/backup.env" >"$TMP_DIR/backup-keep2.log" 2>&1; then
-  cat "$TMP_DIR/backup-keep2.log" >&2 || true
-  exit 1
-fi
-grep -q "BACKUP_OK" "$TMP_DIR/backup-keep2.log"
-grep -q "SNAPSHOT_RETENTION_SUMMARY count=2" "$TMP_DIR/backup-keep2.log"
-grep -q "keep_daily=2" "$TMP_DIR/backup-keep2.log"
+EXPIRED_20D="expired 20d unique $NOW-$RANDOM"
+EXPIRED_14D1H="expired 14d+1h unique $NOW-$RANDOM"
+KEPT_14D="kept 14d-1h unique $NOW-$RANDOM"
+OTHER_TAG="other app 30d unique $NOW-$RANDOM"
+seed repo gongchae-bell $((20 * DAY)) "$EXPIRED_20D"
+seed repo gongchae-bell $((14 * DAY + 3600)) "$EXPIRED_14D1H"
+seed repo gongchae-bell $((14 * DAY - 3600)) "$KEPT_14D"
+seed repo other-app $((30 * DAY)) "$OTHER_TAG"
+rr repo cat blob "$(blob_id "$EXPIRED_20D")" >/dev/null || { echo "ERROR: seeded blob not addressable by SHA-256" >&2; exit 1; }
 
-# Reduce retention further: keep-daily=1 prunes remaining legacy snapshot down to 1
-sed -i 's/^BACKUP_KEEP_DAILY=.*/BACKUP_KEEP_DAILY=1/' "$TMP_DIR/backup.env"
 if ! "$BACKUP_SH" run --env-file "$TMP_DIR/backup.env" >"$TMP_DIR/backup.log" 2>&1; then
   cat "$TMP_DIR/backup.log" >&2 || true
   exit 1
 fi
-
+cat "$TMP_DIR/backup.log"
 grep -q "BACKUP_OK" "$TMP_DIR/backup.log"
-grep -q "SNAPSHOT_RETENTION_SUMMARY count=1" "$TMP_DIR/backup.log"
-snapshot_compact_count="$(RESTIC_REPOSITORY="$TMP_DIR/repo" RESTIC_PASSWORD="test-only-restic-passphrase" \
-  restic snapshots --tag gongchae-bell --json | grep -c '"short_id"' || true)"
-if [[ "$snapshot_compact_count" != "1" ]]; then
-  echo "ERROR: expected 1 remaining snapshot after keep-daily=1, got [$snapshot_compact_count]" >&2
-  exit 1
-fi
+grep -q "SNAPSHOT_RETENTION_SUMMARY policy=wall-clock-14d forgotten=2 total=1 expire=0 keep=1" "$TMP_DIR/backup.log"
+expect_eq 2 "$(count_snaps repo gongchae-bell)" "gongchae-bell copies after run (14d-1h copy + new backup)"
+expect_eq 1 "$(count_snaps repo other-app)" "copy with another tag must stay"
+for gone in "$EXPIRED_20D" "$EXPIRED_14D1H"; do
+  if rr repo cat blob "$(blob_id "$gone")" >/dev/null 2>&1; then
+    echo "ERROR: data of a forgotten snapshot is still stored after prune" >&2; exit 1
+  fi
+done
+rr repo cat blob "$(blob_id "$KEPT_14D")" >/dev/null
+rr repo cat blob "$(blob_id "$OTHER_TAG")" >/dev/null
 if grep -qF "test-only-restic-passphrase" "$TMP_DIR/backup.log"; then
   echo "ERROR: RESTIC_PASSWORD leaked into backup log" >&2
   exit 1
 fi
 
-RESTIC_REPOSITORY="$TMP_DIR/repo" RESTIC_PASSWORD="test-only-restic-passphrase" \
-  restic restore latest --target "$TMP_DIR/restored" >/dev/null
+# Backup outage + last copies: every copy is past 14 days and the dump fails -> zero copies remain (user decision).
+sed -e "s#^RESTIC_REPOSITORY=.*#RESTIC_REPOSITORY=$TMP_DIR/repo2#" -e 's#^POSTGRES_SERVICE=.*#POSTGRES_SERVICE=postgres-absent#' \
+  "$TMP_DIR/backup.env" >"$TMP_DIR/backup2.env"
+chmod 0600 "$TMP_DIR/backup2.env"
+"$BACKUP_SH" init --env-file "$TMP_DIR/backup2.env" >/dev/null
+seed repo2 gongchae-bell $((20 * DAY)) "outage 20d $NOW-$RANDOM"
+LAST_COPY="outage 15d last copy $NOW-$RANDOM"
+seed repo2 gongchae-bell $((15 * DAY)) "$LAST_COPY"
+if "$BACKUP_SH" run --env-file "$TMP_DIR/backup2.env" >"$TMP_DIR/backup2.log" 2>&1; then
+  echo "ERROR: run with an absent PostgreSQL service must fail" >&2; exit 1
+fi
+cat "$TMP_DIR/backup2.log"
+grep -q "forgotten=2 total=0 expire=0 keep=0" "$TMP_DIR/backup2.log"
+expect_eq 0 "$(count_snaps repo2 gongchae-bell)" "copies left after a failed dump with every copy past 14 days"
+if rr repo2 cat blob "$(blob_id "$LAST_COPY")" >/dev/null 2>&1; then
+  echo "ERROR: data of the last expired copy is still stored" >&2; exit 1
+fi
+
+rr repo restore latest --tag gongchae-bell --target "$TMP_DIR/restored" >/dev/null
 
 [[ -f "$TMP_DIR/restored/gongchae-bell.dump" ]] || { echo "Missing restored dump" >&2; exit 1; }
 [[ -f "$TMP_DIR/restored/erasure.log" ]] || { echo "Missing restored erasure.log" >&2; exit 1; }

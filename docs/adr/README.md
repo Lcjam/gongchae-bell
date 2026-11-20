@@ -20,3 +20,4 @@
 | [0014](0014-initial-settings.md) | 초기 설정값 |
 | [0015](0015-no-spring-security.md) | Spring Security를 넣지 않음 (Origin 검사) |
 | [0016](0016-supplemental-session-lock.md) | 보조 세션 잠금: 최초 적재 명령과 상세 sweep의 겹침 방지 (ADR-0003 위에 더함) |
+| [0017](0017-backup-wall-clock-retention.md) | 백업 보관: 실행 시각 기준 14일, 최후 사본 예외 없음 (ADR-0012 보관 대체) |
