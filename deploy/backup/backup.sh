@@ -396,11 +396,11 @@ select_expired() {
   local snaps="$STAGE_DIR/snapshots.json" picked="$STAGE_DIR/retention.picked" err="$STAGE_DIR/select.err"
   if ! "$RESTIC_BIN" snapshots --tag gongchae-bell --json >"$snaps" 2>"$err"; then
     redact_stream <"$err" >&2
-    fail "RESTIC_SNAPSHOTS_FAIL unable to list snapshots for retention; nothing was deleted"
+    fail "RESTIC_SNAPSHOTS_FAIL unable to list snapshots for retention; retention state unverified"
   fi
   if ! "$PYTHON_BIN" -I "$EXPIRE_SELECT" "$RUN_NOW_EPOCH" "$RETENTION_SECONDS" <"$snaps" >"$picked" 2>"$err"; then
     redact_stream <"$err" >&2
-    fail "RETENTION_SELECT_FAIL snapshot list rejected; nothing was deleted"
+    fail "RETENTION_SELECT_FAIL snapshot list rejected; retention state unverified"
   fi
   head -n 1 "$picked" >"$STAGE_DIR/retention.summary"
   tail -n +2 "$picked" | awk '{print $1}' >"$STAGE_DIR/retention.ids"
@@ -415,7 +415,7 @@ apply_retention() {
   if (( ${#ids[@]} > 0 )); then
     log "Forgetting ${#ids[@]} snapshot(s) older than 14 days: ${ids[*]}"
     run_redacted "$RESTIC_BIN" forget "${ids[@]}" \
-      || fail "RESTIC_FORGET_FAIL expired=${#ids[@]} snapshots are still listed; retention not met"
+      || fail "RESTIC_FORGET_FAIL expired=${#ids[@]} forget did not complete; snapshot deletion state unverified and retention not met"
   fi
   # Every run, so data left by an earlier failed prune is removed too. --max-unused 0 repacks every pack that
   # holds forgotten data instead of tolerating restic's default 5% of unused space.
