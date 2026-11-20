@@ -31,8 +31,11 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - name: Syntax and deploy/G4 unit tests
         run: |
-          bash -n deploy/deploy.sh deploy/g4-probe.sh deploy/tests/deploy-test.sh deploy/tests/caddy-integration-test.sh
+          bash -n deploy/deploy.sh deploy/g4-probe.sh deploy/tests/deploy-test.sh deploy/tests/caddy-integration-test.sh deploy/perf/sample-resources.sh deploy/tests/sample-resources-test.sh
+          python3 -m py_compile deploy/perf/perf-probe.py deploy/tests/perf-test.py
           ./deploy/tests/deploy-test.sh
+          python3 deploy/tests/perf-test.py
+          ./deploy/tests/sample-resources-test.sh
       - name: Compose config validation
         env:
           DB_USER: ci

@@ -1,0 +1,26 @@
+# Example URL manifest for deploy/perf/perf-probe.py (#18).
+# Copy to a run-specific file and replace example codes/sn/institution IDs with real values
+# verified from the target environment BEFORE running a measurement.
+# All query values MUST use exact lowercase JobSearchCriteria allowlist tokens:
+#   status: open | check | closed | all
+#   sort:   deadline | begin
+#   career: newcomer | newonly | career
+# Forbidden paths: /jobs/{sn}/source, /subscriptions/*
+group	case_id	path
+home	home_root	/
+list	jobs_default	/jobs
+filter	career_newcomer	/jobs?career=newcomer
+filter	region_ncs_combo	/jobs?region=R3010&ncs=R600020&status=open
+filter	keyword_all	/jobs?q=채용&status=all
+filter	deep_page_all	/jobs?status=all&page=10
+filter	sort_begin	/jobs?sort=begin
+detail	detail_1	/jobs/307027
+detail	detail_2	/jobs/307028
+detail	detail_3	/jobs/307029
+detail	detail_4	/jobs/307030
+detail	detail_5	/jobs/307031
+institution	inst_1	/institutions/C0008
+institution	inst_2	/institutions/C0661
+institution	inst_3	/institutions/C0001
+institution	inst_4	/institutions/C0002
+institution	inst_5	/institutions/C0003
