@@ -293,12 +293,12 @@ verify_expected_hashes() {
 }
 
 check_prom_clean_baseline() {
-  local alerts_json targets_json config_json
-  alerts_json="$(prom_api_get "/api/v1/alerts")"
+  local prom_alerts_json targets_json config_json
+  prom_alerts_json="$(prom_api_get "/api/v1/alerts")"
   targets_json="$(prom_api_get "/api/v1/targets?state=active")"
   config_json="$(prom_api_get "/api/v1/status/config")"
 
-  "$PYTHON_BIN" - "$alerts_json" "$targets_json" "$config_json" <<'PY'
+  "$PYTHON_BIN" - "$prom_alerts_json" "$targets_json" "$config_json" <<'PY'
 import json, sys
 alerts = json.loads(sys.argv[1])["data"]["alerts"]
 targets = json.loads(sys.argv[2])["data"]["activeTargets"]
@@ -353,12 +353,12 @@ preflight_checks() {
 
   verify_expected_hashes || fail "EXPECTED_GIT_SHA_MISMATCH"
 
-  local collector_flag alerts_flag
-  collector_flag="$(read_env_flag "COLLECTOR_ENABLED")"
-  alerts_flag="$(read_env_flag "ALERTS_ENABLED")"
-  log "Env flags: COLLECTOR_ENABLED=${collector_flag} ALERTS_ENABLED=${alerts_flag}"
-  [[ "$collector_flag" == "false" ]] || fail "COLLECTOR_ENABLED must be false (actual=${collector_flag})"
-  [[ "$alerts_flag" == "false" ]] || fail "ALERTS_ENABLED must be false (actual=${alerts_flag})"
+  local flag_collector flag_alerts
+  flag_collector="$(read_env_flag "COLLECTOR_ENABLED")"
+  flag_alerts="$(read_env_flag "ALERTS_ENABLED")"
+  log "Env flags: COLLECTOR_ENABLED=${flag_collector} ALERTS_ENABLED=${flag_alerts}"
+  [[ "$flag_collector" == "false" ]] || fail "COLLECTOR_ENABLED must be false (actual=${flag_collector})"
+  [[ "$flag_alerts" == "false" ]] || fail "ALERTS_ENABLED must be false (actual=${flag_alerts})"
 
   resolve_containers
 
@@ -518,9 +518,9 @@ wait_for_alert_state() {
   local expect_drill_prefix="${4:-true}"
   local deadline=$(( $(date +%s) + timeout_sec ))
   while [[ $(date +%s) -lt $deadline ]]; do
-    local alerts_json
-    alerts_json="$(prom_api_get "/api/v1/alerts" 2>/dev/null || true)"
-    if [[ -n "$alerts_json" ]] && "$PYTHON_BIN" - "$alerts_json" "$alert_name" "$expected_state" "$expect_drill_prefix" <<'PY'
+    local prom_alerts_json
+    prom_alerts_json="$(prom_api_get "/api/v1/alerts" 2>/dev/null || true)"
+    if [[ -n "$prom_alerts_json" ]] && "$PYTHON_BIN" - "$prom_alerts_json" "$alert_name" "$expected_state" "$expect_drill_prefix" <<'PY'
 import json, sys
 alerts = json.loads(sys.argv[1])["data"]["alerts"]
 name, want, prefix = sys.argv[2], sys.argv[3], sys.argv[4] == "true"
@@ -546,9 +546,9 @@ PY
 
 assert_no_unexpected_alerts() {
   local allowed_csv="$1"
-  local alerts_json
-  alerts_json="$(prom_api_get "/api/v1/alerts")"
-  "$PYTHON_BIN" - "$alerts_json" "$allowed_csv" <<'PY'
+  local prom_alerts_json
+  prom_alerts_json="$(prom_api_get "/api/v1/alerts")"
+  "$PYTHON_BIN" - "$prom_alerts_json" "$allowed_csv" <<'PY'
 import json, sys
 alerts = json.loads(sys.argv[1])["data"]["alerts"]
 allowed = {x for x in sys.argv[2].split(",") if x}
