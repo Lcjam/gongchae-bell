@@ -4,7 +4,8 @@
 - **요청 및 검수 근거**: `collab/2026-11-19-resume/agy-live-alert-fix-request.md`, 원안 `collab/2026-11-19-resume/agy-live-collector-alert-plan.md`(보존), 독립 검수 `collab/reviews/collector-live-alert-plan-claude.md`(보존)
 - **작업 위치 / 브랜치**: `C:/Users/lcj/orca/workspaces/my-project/issue-15-collector-drill` / `ops/#15-collector-drill`
 - **기준 `origin/main` SHA**: `eb903017c4fb256a8ece665da795d7a94f6aeb25` (`Merge pull request #31 from Lcjam/fix/#7-metric-commit`)
-- **구현 커밋 SHA**: `38e0b65c5c6e689df76ada7478c1ef0dcd5521d4` (`ops: add controlled collector alert drill harness and round 2 plan (Refs #15)`)
+- **구현 커밋 SHA**: `38e0b65c5c6e689df76ada7478c1ef0dcd5521d4` + `6aa5ae60fc9410d0294157d3d52a5f4853488def` (`MonitoringContractIntegrationTest` 지표 정규식 충돌 회피를 위해 `collector-alert-drill.sh` 지역 변수명 정리)
+- **Draft PR**: [#33](https://github.com/Lcjam/gongchae-bell/pull/33) (`ops/#15-collector-drill`)
 
 ---
 
@@ -35,6 +36,7 @@
     - 단일 파일 mount(`MOUNT_OK:single-file`) 및 디렉터리 mount(`MOUNT_OK:directory`) preflight 통과
     - 원본 `prometheus.yml`/`rules/gongchae.yml`(`for: 10m`, `30s` scrape/eval)로 `DRILL_BUDGET_WARNING_FIRING` + `DRILL_COLLECTION_FAILING_PENDING` 확인 뒤 중간 `SIGTERM` 주입 → `DRILL_RESTORE_VERIFIED_OK`, host/container SHA-256 일치, `drill-exporter` 제거, `gongchae-drill` config/target 제거, alerts `0`, DB/플래그/컨테이너 일치 확인
     - 의도적 SHA 불일치 원복 시 `DRILL_RESTORE_FAILED` + 비정상 종료 + `state=RESTORE_FAILED` + 후속 `preflight` 차단(`PREVIOUS_DRILL_NOT_RESTORED`) + 정상 SHA 멱등 재복구(`DRILL_RESTORE_VERIFIED_OK`) 확인
+  - `MonitoringContractIntegrationTest` 로컬 통과 (`BUILD SUCCESSFUL in 36s`, `deploy/monitoring/collector-alert-drill.sh`의 매칭 지표가 `collector_api_attempts_today`·`collector_regular_incomplete_consecutive` 2건뿐임을 확인).
   - `gitleaks dir --verbose` (`no leaks found`).
 - **원격 CI 및 한계**:
   - Windows 로컬 Docker Desktop에서는 `uname -s`가 Linux가 아니므로 Linux `tar` stale-inode 분기(`MOUNT_STALE_SINGLE_FILE`)는 원격 GitHub Actions `ubuntu-24.04-arm` (`Monitoring / compose-integration`)에서 실실행으로 검증합니다(PR 본문에 최종 CI run URL 기록).
