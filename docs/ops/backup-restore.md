@@ -131,8 +131,8 @@
 > 1. **운영 DB 직접 덮어쓰기 금지**: 리허설과 전환 전 검증은 **절대 운영 Compose(`compose.prod.yml`)의 `postgres` 컨테이너나 `postgres_data` 볼륨을 대상으로 실행하지 않는다.** 고유한 컨테이너·볼륨·DB·계정과 외부 통신이 차단된 Docker `--internal` 네트워크를 쓰는 **전용 일회용 `postgres:17`**에서만 복원한다. (`--clean --if-exists`가 필요할 때도 격리 일회용 DB를 재사용할 때만 적용하며 운영 `postgres`에는 쓰지 않는다.)
 > 2. **호스트 생존 시 살아 있는 최신 호스트 대장 사용**: DB 손상·실수 삭제·잘못된 마이그레이션 등 호스트가 살아 있는 사고나 리허설에서는 백업 시점 이후 해지까지 포함한 **살아 있는 호스트 대장(`/var/lib/gongchae-bell/erasure/erasure.log`)**을 재적용에 사용한다. 백업 안의 과거 `erasure.log`로 재적용하거나 살아 있는 호스트 대장을 백업 파일로 덮어쓰면 백업 이후 해지한 구독자가 부활하고 호스트 대장에서도 영구 유실된다. **VM·호스트 영구 소실(또는 호스트 대장 자체 소실) 시에만** 사용 가능한 백업(OCI 또는 NAS/PC 사본) 중 **가장 최신** 정상 사본을 택한다.
 > 3. **운영 `.env` 통째 `source` 금지 및 외부 부작용 차단**: 복원·재적용 명령은 `/opt/gongchae-bell/.env`를 `source`하지 않는다(운영 `DB_*`·`ALERTS_ENABLED=true`·`COLLECTOR_ENABLED=true`·`HEARTBEAT_*`·`RESEND_API_KEY`가 격리 컨테이너에 섞이는 사고 방지). `DB_URL`·`DB_USER`·`DB_PASSWORD`는 격리 PG로 명시하고, `ALERTS_ENABLED=false`, `COLLECTOR_ENABLED=false`, `HEARTBEAT_COLLECTOR_URL=`(빈 값)으로 고정하며, 외부 망이 차단된 `--internal` 네트워크 안에서 실행한다.
-> 4. **실행 계정(`ubuntu` UID `1001`)과 앱 컨테이너(`1000:1000`) 권한 분리**: 복원·Docker·restic 명령은 호스트 `ubuntu` 계정(`docker` 그룹)으로 실행하고, **호스트 대장 읽기, 재적용 전용 하위 디렉터리(`$RESTORE_WORK/reapply`, `1000:1000`) 생성, 새 호스트 대장 배치, 최종 `$RESTORE_WORK` 삭제(`sudo rm -rf`)에만 `sudo`를 쓴다.** `$RESTORE_WORK` 전체를 `1000:1000`으로 바꾸지 말고 **해지 대장 1개만 담은 `$RESTORE_WORK/reapply`만 컨테이너에 마운트**해 덤프·메타파일(PII 포함)이 앱 컨테이너에 노출되거나 `/tmp`에 남지 않게 한다.
-> 5. **missing·손상 대장 대체 금지**: `ErasureReapplyCommand`는 파일 누락(`ERASURE_LOG_MISSING`)이나 손상(`ERASURE_LOG_TORN_LAST_LINE`, `ERASURE_LOG_BAD_LINE_<N>`) 시 0건 삭제 후 실패 종료한다. 원인 확인 전에 빈 파일로 대체해 통과시키지 않는다. 단, 처음부터 `ALERTS_ENABLED=false`로만 운영해 대장 파일이 아직 없던 M1 전용 백업(`subscription` 행 수 `0` **AND** `backup-meta.txt`의 `erasure_included=false` **AND** M2 미활성 이력 확인)은 M2 이후 대장 필수 조건과 구분한다.
+> 4. **실행 계정(`ubuntu` UID `1001`)과 앱 컨테이너(`1000:1000`) 권한 분리**: 복원·Docker·restic 명령은 호스트 `ubuntu` 계정(`docker` 그룹)으로 실행하고, **호스트 대장 읽기, 재적용 전용 하위 디렉터리(`$RESTORE_WORK/reapply`, `1000:1000`) 생성, 새 호스트 대장 배치, 최종 `$RESTORE_WORK` 삭제(`sudo rm -rf`)에만 `sudo`를 쓴다.** `$RESTORE_WORK` 전체를 `1000:1000`으로 바꾸지 말고 **적용할 대장 L 1개만 담은 `$RESTORE_WORK/reapply`(`:rw`)와 덤프 동봉 대장 B 1개만 담은 `$RESTORE_WORK/bundle`(`:ro`)만 컨테이너에 마운트**해 덤프·메타파일(PII 포함)이 앱 컨테이너에 노출되거나 `/tmp`에 남지 않게 한다.
+> 5. **missing·손상 대장 대체 금지와 coverage 게이트**: `ErasureReapplyCommand`는 적용할 대장 L(`ALERTS_ERASURE_LOG`)과 **덤프 snapshot에 동봉된 대장 B(`--alerts.erasure-bundle-log`, 필수)**를 같은 strict 파서로 읽고, B가 L에 덮이는지(coverage) 확인한 **뒤에만** DB 행을 지운다. 파일 누락(`ERASURE_LOG_MISSING`, `ERASURE_BUNDLE_REQUIRED`, `ERASURE_BUNDLE_MISSING`), 손상(`ERASURE_LOG_TORN_LAST_LINE`, `ERASURE_LOG_BAD_LINE_<N>`, `ERASURE_BUNDLE_…`), 중복 표지(`…_DUPLICATE_MARKER`), coverage 불일치(`ERASURE_COVERAGE_NOT_PREFIX`, `ERASURE_COVERAGE_MARKER_ABSENT`) 시 0건 삭제 후 실패 종료한다. coverage 규칙과 한계는 [ADR-0013 개정 2026-11-20](../adr/0013-erasure-journal-host-file.md)을 따른다. 원인 확인 전에 빈 파일로 대체해 통과시키지 않는다. 단, 처음부터 `ALERTS_ENABLED=false`로만 운영해 대장 파일이 아직 없던 M1 전용 백업(`subscription` 행 수 `0` **AND** `backup-meta.txt`의 `erasure_included=false` **AND** M2 미활성 이력 확인)은 M2 이후 대장 필수 조건과 구분한다.
 
 ### 7.1 격리 복원 및 해지 대장 재적용 단계 (리허설·전환 전 검증 공통)
 
@@ -203,7 +203,7 @@
      - **세 조건을 모두 만족할 때만** 5·6단계 해지 대장 재적용을 건너뛴다: ① 복원된 격리 DB `SUB_COUNT == 0`, ② `ERASURE_INCLUDED == false`, ③ M2(`ALERTS_ENABLED=true`)를 한 번도 켠 적이 없는 M1 전용 운영 이력 확인(실제 호스트 `/var/lib/gongchae-bell/erasure/erasure.log`도 없음).
      - `SUB_COUNT > 0`이거나 `ERASURE_INCLUDED=true`이거나 M1 전용 여부를 확신할 수 없으면 대장 누락 시 **절대 빈 파일로 대체하지 말고 중단**한다. 또한 대장 파일이 실제로 존재한다면 `SUB_COUNT == 0`이더라도 손상(`ERASURE_LOG_TORN_LAST_LINE`, `ERASURE_LOG_BAD_LINE_<N>`) 여부를 숨기고 건너뛰지 않는다.
    - **분기 A — 호스트 생존 (리허설 또는 운영 DB 손상·실수 삭제)**:
-     - **살아 있는 호스트 대장** `/var/lib/gongchae-bell/erasure/erasure.log`를 선택한다. 백업에서 풀린 `"$RESTORE_WORK/erasure.log"`로 재적용하거나 호스트 파일을 덮어쓰지 않는다.
+     - **살아 있는 호스트 대장** `/var/lib/gongchae-bell/erasure/erasure.log`를 적용할 대장 L로 선택한다. 백업에서 풀린 `"$RESTORE_WORK/erasure.log"`는 coverage 확인용 B로만 쓰며, 그것으로 재적용하거나 호스트 파일을 덮어쓰지 않는다.
      - 호스트 대장은 `1000:1000` `0600`이므로 `ubuntu`(UID `1001`)는 `sudo`로 확인·복사한다. 리허설 중 운영 앱이 살아 있을 때는 호스트 `FileChannel.lock()` 간섭을 피하기 위해 마지막 줄 개행을 확인한 뒤 아래 공통 재적용 명령의 사본으로 검증한다:
        ```bash
        JOURNAL_SRC="/var/lib/gongchae-bell/erasure/erasure.log"
@@ -225,15 +225,18 @@
        sudo install -d -o 1000 -g 1000 -m 0750 /var/lib/gongchae-bell/erasure
        sudo install -o 1000 -g 1000 -m 0600 "$JOURNAL_SRC" /var/lib/gongchae-bell/erasure/erasure.log
        ```
-   - **공통 격리 재적용 실행 (`reapply` 전용 하위 디렉터리만 마운트)**:
-     - `ErasureJournal.readStrict()`가 `FileChannel.lock()`을 위해 `READ, WRITE` + UID `1000:1000`(`0600`)을 요구하므로, `"$RESTORE_WORK/reapply"` 하위 디렉터리만 `1000:1000`으로 만들어 **대장 파일 1개만** 컨테이너 `/restore`에 `:rw` 마운트한다(`$RESTORE_WORK`의 `gongchae-bell.dump`와 `backup-meta.txt`는 `ubuntu` 소유 그대로 유지하며 컨테이너에 마운트하지 않는다).
+   - **공통 격리 재적용 실행 (L은 `reapply`, B는 `bundle` 하위 디렉터리만 마운트)**:
+     - L은 기존 OS 잠금(`FileChannel.lock()`) 때문에 `READ, WRITE` + UID `1000:1000`(`0600`)이 필요하므로 `"$RESTORE_WORK/reapply"`를 컨테이너 `/restore`에 `:rw`로 마운트한다. B(복원한 덤프와 같은 snapshot의 `"$RESTORE_WORK/erasure.log"`)는 잠금 없이 읽으므로 `"$RESTORE_WORK/bundle"`을 `/bundle`에 **`:ro`**로 마운트한다. `$RESTORE_WORK`의 `gongchae-bell.dump`와 `backup-meta.txt`는 `ubuntu` 소유 그대로 두고 컨테이너에 마운트하지 않는다. 덤프 snapshot에 `erasure.log`가 없으면 아래 `install`이 실패하므로 그 자리에서 멈춘다(M1 3조건 분기가 아니면 빈 파일로 대체하지 않는다).
        ```bash
        sudo install -d -o 1000 -g 1000 -m 0700 "$RESTORE_WORK/reapply"
        sudo install -o 1000 -g 1000 -m 0600 "$JOURNAL_SRC" "$RESTORE_WORK/reapply/erasure.log"
+       sudo install -d -o 1000 -g 1000 -m 0500 "$RESTORE_WORK/bundle"
+       sudo install -o 1000 -g 1000 -m 0400 "$RESTORE_WORK/erasure.log" "$RESTORE_WORK/bundle/erasure.log"
 
        docker run --rm --network "$RESTORE_NET" \
          -u 1000:1000 \
          -v "$RESTORE_WORK/reapply:/restore:rw" \
+         -v "$RESTORE_WORK/bundle:/bundle:ro" \
          -e DB_URL="jdbc:postgresql://${RESTORE_PG}:5432/${RESTORE_DB}" \
          -e DB_USER="$RESTORE_USER" \
          -e DB_PASSWORD="$RESTORE_PASS" \
@@ -243,9 +246,10 @@
          -e ALERTS_ERASURE_LOG=/restore/erasure.log \
          "${APP_IMAGE}:${TARGET_TAG}" \
          --spring.main.web-application-type=none \
-         --alerts.erasure-reapply=true
+         --alerts.erasure-reapply=true \
+         --alerts.erasure-bundle-log=/bundle/erasure.log
        ```
-     - 출력 로그의 **`ERASURE_REAPPLY_COMPLETE deleted=N`**과 종료 코드 **`0`**을 확인한다. `ERASURE_LOG_MISSING`·`ERASURE_LOG_TORN_LAST_LINE`·`ERASURE_LOG_BAD_LINE_<N>`이 나오면 아무 행도 삭제하지 않은 채 실패하므로 원인을 해결하기 전까지 진행·발송을 켜지 않는다.
+     - 출력 로그에서 **`ERASURE_COVERAGE_VERIFIED rule=…`**(게이트 통과)와 **`ERASURE_REAPPLY_COMPLETE deleted=N`**(삭제 완료)을 **둘 다**, 그리고 종료 코드 **`0`**을 확인한다. 앞의 것이 없는 `COMPLETE` 로그는 이 게이트가 없는 옛 이미지의 결과이므로 통과로 보지 않는다. 원칙 5의 실패 코드가 나오면 아무 행도 삭제하지 않은 채 실패하므로 원인을 해결하기 전까지 진행·발송을 켜지 않는다.
 6. **사후 0건 검증, 실제 전환 직전 최종 대장 재적용, 발송 재개(`ALERTS_ENABLED=true`) 게이트**:
    - **6.1 사후 삭제 확인 (리허설·전환 공통)**:
      - 선택했던 대장 `"$JOURNAL_SRC"`의 첫 열 UUID를 격리 DB의 `subscription` 테이블과 대조해 잔여 행이 **`0`건**인지 확인한다(`0`건이 아니면 중단):
@@ -269,6 +273,7 @@
        docker run --rm --network "$RESTORE_NET" \
          -u 1000:1000 \
          -v /var/lib/gongchae-bell/erasure:/erasure:rw \
+         -v "$RESTORE_WORK/bundle:/bundle:ro" \
          -e DB_URL="jdbc:postgresql://${RESTORE_PG}:5432/${RESTORE_DB}" \
          -e DB_USER="$RESTORE_USER" \
          -e DB_PASSWORD="$RESTORE_PASS" \
@@ -278,7 +283,8 @@
          -e ALERTS_ERASURE_LOG=/erasure/erasure.log \
          "${APP_IMAGE}:${TARGET_TAG}" \
          --spring.main.web-application-type=none \
-         --alerts.erasure-reapply=true
+         --alerts.erasure-reapply=true \
+         --alerts.erasure-bundle-log=/bundle/erasure.log
 
        JOURNAL_SRC="/var/lib/gongchae-bell/erasure/erasure.log"
        # 이어서 6.1의 REMAINING_UNSUBS=0 대조 명령을 /var/lib/gongchae-bell/erasure/erasure.log 기준으로 재실행

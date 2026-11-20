@@ -519,9 +519,10 @@ class DeliveryLedgerTest {
         Pending a = pending();
         Pending b = pending();
         Path file = dir.resolve("erasure.log");
+        Path bundle = Files.createFile(dir.resolve("bundle.log"));  // the dump's own journal: empty, nothing erased then
         // A path typo or a mount the restore missed, and a path that is a directory: failures, never "nothing to re-apply".
         for (Path wrong : List.of(file, dir)) {
-            var command = new ErasureReapplyCommand(new ErasureJournal(wrong), jdbc, manager, new GenericApplicationContext());
+            var command = reapply(new ErasureJournal(wrong), bundle);
             assertThatThrownBy(() -> command.run(null)).as(wrong.toString())
                     .isInstanceOf(ErasureJournal.CorruptJournal.class).hasMessage("ERASURE_LOG_MISSING");
         }
@@ -529,7 +530,7 @@ class DeliveryLedgerTest {
         var journal = new ErasureJournal(file);
         journal.append(a.id(), clock.now);
         Files.writeString(file, "torn", StandardOpenOption.APPEND);
-        var torn = new ErasureReapplyCommand(journal, jdbc, manager, new GenericApplicationContext());
+        var torn = reapply(journal, bundle);
         assertThatThrownBy(() -> torn.run(null)).isInstanceOf(ErasureJournal.CorruptJournal.class).hasMessage("ERASURE_LOG_TORN_LAST_LINE");
         assertThat(output).as("no completion is reported for a failed run").doesNotContain("ERASURE_REAPPLY_COMPLETE");
         assertThat(jdbc.sql("SELECT count(*) FROM subscription").query(Integer.class).single()).as("fail closed").isEqualTo(2);
@@ -537,9 +538,56 @@ class DeliveryLedgerTest {
         Files.writeString(file, "");
         assertThat(torn.reapply()).as("an existing empty journal: prepared, nothing erased yet").isZero();
         Files.writeString(file, a.id() + "\t" + clock.now + "\n" + b.id() + "\t" + clock.now + "\n");
-        new ErasureReapplyCommand(journal, jdbc, manager, new GenericApplicationContext()).run(null);
-        assertThat(output).contains("ERASURE_REAPPLY_COMPLETE deleted=2");
+        reapply(journal, bundle).run(null);
+        assertThat(output).contains("ERASURE_COVERAGE_VERIFIED rule=LEGACY_PREFIX").contains("ERASURE_REAPPLY_COMPLETE deleted=2");
         assertThat(jdbc.sql("SELECT count(*) FROM subscription").query(Integer.class).single()).isZero();
+    }
+
+    @Test
+    void theRestoreGateRunsBeforeAnyDeleteAndMarkersAreNeverDeleted(@TempDir Path dir, CapturedOutput output) throws Exception {
+        Pending a = pending();
+        Pending b = pending();
+        Pending stand = pending();
+        // A subscription row that happens to carry a marker id (only possible by hand): the marker line must not delete it.
+        UUID marker = UUID.fromString("67636862-6172-8a1b-9c3d-4e5f60718293");
+        jdbc.sql("DELETE FROM notification WHERE subscription_id = :id").param("id", stand.id()).update();
+        jdbc.sql("UPDATE subscription SET id = :marker WHERE id = :id").param("marker", marker).param("id", stand.id()).update();
+        String at = "\t" + clock.now + "\n";
+        Path latest = dir.resolve("erasure.log");
+        Path bundle = dir.resolve("bundle.log");
+        var journal = new ErasureJournal(latest);
+
+        // Missing B: nothing is deleted even though L is valid.
+        Files.writeString(latest, a.id() + at + b.id() + at);
+        assertThatThrownBy(() -> new ErasureReapplyCommand(journal, "", jdbc, manager, new GenericApplicationContext()).run(null))
+                .isInstanceOf(ErasureJournal.CorruptJournal.class).hasMessage("ERASURE_BUNDLE_REQUIRED");
+        assertThatThrownBy(() -> reapply(journal, bundle).reapply()).hasMessage("ERASURE_BUNDLE_MISSING");
+
+        // A valid head in L but B not covered (B lists b first): the gate fails and no row is deleted.
+        Files.writeString(bundle, b.id() + at);
+        assertThatThrownBy(() -> reapply(journal, bundle).run(null))
+                .isInstanceOf(ErasureJournal.CorruptJournal.class).hasMessage("ERASURE_COVERAGE_NOT_PREFIX");
+        // A valid head in L and a malformed later line: no row is deleted either.
+        Files.writeString(bundle, a.id() + at);
+        Files.writeString(latest, a.id() + at + b.id() + "\t2026-02-30T00:00:00Z\n");
+        assertThatThrownBy(() -> reapply(journal, bundle).run(null)).hasMessage("ERASURE_LOG_BAD_LINE_2");
+        assertThat(output).doesNotContain("ERASURE_COVERAGE_VERIFIED").doesNotContain("ERASURE_REAPPLY_COMPLETE");
+        assertThat(jdbc.sql("SELECT count(*) FROM subscription").query(Integer.class).single()).as("fail closed").isEqualTo(3);
+
+        // S2: L starts with the marker the dump's B also holds. The marker is not a subscription to delete.
+        Files.writeString(bundle, a.id() + at + marker + at + b.id() + at);
+        Files.writeString(latest, marker + at + a.id() + at + b.id() + at);
+        assertThatThrownBy(() -> reapply(journal, bundle).reapply()).as("B's tail after the marker is not a prefix of L")
+                .hasMessage("ERASURE_COVERAGE_NOT_PREFIX");
+        Files.writeString(bundle, b.id() + at + marker + at + a.id() + at);
+        reapply(journal, bundle).run(null);
+        assertThat(output).contains("ERASURE_COVERAGE_VERIFIED rule=MARKER_SUFFIX").contains("ERASURE_REAPPLY_COMPLETE deleted=2");
+        assertThat(jdbc.sql("SELECT id FROM subscription").query(UUID.class).list()).containsExactly(marker);
+        assertThat(reapply(journal, bundle).reapply()).as("a rerun deletes nothing more").isZero();
+    }
+
+    private ErasureReapplyCommand reapply(ErasureJournal journal, Path bundle) {
+        return new ErasureReapplyCommand(journal, bundle.toString(), jdbc, manager, new GenericApplicationContext());
     }
 
     @Test

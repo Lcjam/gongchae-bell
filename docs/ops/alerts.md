@@ -65,11 +65,12 @@
 - 해지하면 구독 행 잠금 아래에서 `<구독 UUID>\t<UTC 시각>` 한 줄을 쓰고, 파일과 디렉터리를 fsync한다. 디렉터리 fsync는 POSIX에서만 하며, 매번 파일 잠금을 쥔 채로 한다. 그 뒤에 행을 지운다. 대장 쓰기가 실패하면(파일이 없거나 fsync 실패) 해지 요청이 실패하고 아무것도 지우지 않는다.
 - 복원 (전체 단계와 복사·정리 명령은 [백업과 복구 §7](backup-restore.md#7-격리-복원-리허설-및-장애-복구-절차-adr-0012--adr-0013--fail-closed)):
   1. **운영 DB에 직접 덮어쓰지 않고** 전용 일회용 `postgres:17` 격리 DB에 `ALERTS_ENABLED=false`, `COLLECTOR_ENABLED=false`, 외부 연결 차단(`--internal`) 상태로 덤프를 복원한다. (운영 `/opt/gongchae-bell/.env`를 통째로 `source`하지 않고, 이미지·태그는 `APP_IMAGE` 1줄 추출 + 배포 상태 파일에서 읽는다.)
-  2. OCI 호스트에는 Java나 `/app/gongchae-bell.jar`가 없으므로 **앱 컨테이너(`-u 1000:1000`)로만** 실행하며, 대장 1개만 담은 전용 하위 디렉터리(`$RESTORE_WORK/reapply`, `sudo install`로 `1000:1000` `0700`/`0600` 설정)만 `:rw` 마운트해 격리 DB에 재적용한다(덤프·메타파일은 마운트하지 않는다):
+  2. OCI 호스트에는 Java나 `/app/gongchae-bell.jar`가 없으므로 **앱 컨테이너(`-u 1000:1000`)로만** 실행한다. 적용할 대장 L 1개만 담은 `$RESTORE_WORK/reapply`(`sudo install`로 `1000:1000` `0700`/`0600`)를 `:rw`로, 복원한 덤프와 같은 snapshot의 동봉 대장 B 1개만 담은 `$RESTORE_WORK/bundle`(`0500`/`0400`)을 `:ro`로 마운트해 격리 DB에 재적용한다(덤프·메타파일은 마운트하지 않는다):
      ```bash
      docker run --rm --network "<격리-internal-net>" \
        -u 1000:1000 \
        -v "$RESTORE_WORK/reapply:/restore:rw" \
+       -v "$RESTORE_WORK/bundle:/bundle:ro" \
        -e DB_URL="jdbc:postgresql://<격리-pg>:5432/<격리-db>" \
        -e DB_USER="<격리-user>" \
        -e DB_PASSWORD="<격리-pw>" \
@@ -79,11 +80,13 @@
        -e ALERTS_ERASURE_LOG=/restore/erasure.log \
        "${APP_IMAGE}:${TARGET_TAG}" \
        --spring.main.web-application-type=none \
-       --alerts.erasure-reapply=true
+       --alerts.erasure-reapply=true \
+       --alerts.erasure-bundle-log=/bundle/erasure.log
      ```
+     - **coverage 게이트**: 명령은 L과 B를 같은 strict 파서로 읽고, B가 L에 덮이는지 확인한 **뒤에만** DB 행을 지운다. L 첫 줄이 표지가 아니면 B 전체가 L의 바이트 앞부분이어야 하고, L 첫 줄이 표지 H이면 B에 H가 있고 B의 H부터 끝까지가 L의 앞부분이어야 한다. 표지 줄은 구독 ID가 아니므로 지우지 않는다. 규칙과 한계는 [ADR-0013 개정 2026-11-20](../adr/0013-erasure-journal-host-file.md)에 있다.
      - **대장 출처 선택**: 호스트가 살아 있는 사고나 리허설에서는 **살아 있는 최신 호스트 대장(`/var/lib/gongchae-bell/erasure/erasure.log`)**을 사용하고(리허설 시에는 운영 앱과 잠금 간섭을 피하기 위해 사본으로 검증), **절대 백업 안의 과거 사본으로 호스트 대장을 덮어쓰지 않는다.** VM·호스트 자체를 잃었을 때만 사용 가능한 백업(OCI 또는 NAS/PC 사본) 중 대장이 포함된 **가장 최신** snapshot의 `/erasure.log`만 별도 디렉터리에 추출해 사용한다.
-     - `ErasureJournal.readStrict()`가 `FileChannel.lock()`을 위해 쓰기 가능(`READ, WRITE`, `1000:1000`, `0600`) 열기를 요구하므로 컨테이너 마운트는 `:rw`로 둔다.
-     - 로그 `ERASURE_REAPPLY_COMPLETE deleted=N`과 종료 코드 `0`을 확인한다.
+     - L은 기존 OS 잠금(`FileChannel.lock()`) 때문에 쓰기 가능(`READ, WRITE`, `1000:1000`, `0600`) 열기가 필요하므로 `:rw`로 둔다. B는 잠금 없이 읽으므로 `:ro`로 충분하다.
+     - 로그 `ERASURE_COVERAGE_VERIFIED rule=…`(게이트 통과)와 `ERASURE_REAPPLY_COMPLETE deleted=N`(삭제 완료), 종료 코드 `0`을 모두 확인한다. 앞의 것이 없는 `COMPLETE`는 게이트 없는 옛 이미지의 결과이므로 통과로 보지 않는다.
   3. **사후 검증·전환 직전 재적용·발송 재개 후속 게이트**:
      - 격리 DB의 `subscription` 테이블에 대장 UUID가 `0`건 남았는지 SQL로 직접 대조한다.
      - **실제 장애 복구 전환 시에는** 리허설 사본 재적용 이후 전환 직전까지 웹(`/subscriptions/unsubscribe*`)을 통해 들어온 추가 해지를 반영하기 위해, `app-blue`·`app-green` **모든 운영 앱 컨테이너를 중지한 뒤** `/var/lib/gongchae-bell/erasure:/erasure:rw`를 직접 마운트해 멱등 재적용과 0건 대조를 1회 더 통과해야 한다.
@@ -91,6 +94,10 @@
 - 아래 경우 명령은 실패한다. 완료 로그가 없고, 종료 코드가 0이 아니며, 아무것도 지우지 않는다. 운영자가 원인을 확인한 뒤 다시 실행한다. 그동안 알림을 켜지 않으며 **missing·손상 대장을 빈 대장으로 대체해 통과시키지 않는다.** (단, 복원 DB `subscription` 행 수 `0` **AND** `backup-meta.txt` `erasure_included=false` **AND** M2 미활성 이력이 모두 확인되는 M1 전용 백업만 대장 재적용을 건너뛰며, 대장 파일이 존재하면 `0`건이어도 손상 검사를 건너뛰지 않는다.)
   - 경로에 파일이 없음(경로 오타, 대장을 되살리지 않음, 디렉터리를 가리킴): `ERASURE_LOG_MISSING`. 빈 대장으로 보지 않는다. 해지가 한 번도 없었던 경우에도 준비해 둔 빈 파일이 백업에 있어야 한다.
   - 대장에 잘리거나 형식이 틀린 줄: `ERASURE_LOG_TORN_LAST_LINE` 또는 `ERASURE_LOG_BAD_LINE_<줄 번호>`.
+  - B 인자가 없거나 B 파일이 없음: `ERASURE_BUNDLE_REQUIRED`, `ERASURE_BUNDLE_MISSING`. B의 잘린·틀린 줄은 `ERASURE_BUNDLE_TORN_LAST_LINE`, `ERASURE_BUNDLE_BAD_LINE_<줄 번호>`.
+  - 같은 표지가 한 파일에 두 번: `ERASURE_LOG_DUPLICATE_MARKER`, `ERASURE_BUNDLE_DUPLICATE_MARKER`.
+  - B가 L에 덮이지 않음(순서 역전, B가 L보다 김, L이 비어 다시 만들어짐, L의 첫 표지 이전 덤프): `ERASURE_COVERAGE_NOT_PREFIX`, `ERASURE_COVERAGE_MARKER_ABSENT`.
+  - 오류 메시지는 고정 코드와 줄 번호뿐이며 UUID나 대장 내용을 담지 않는다.
 - 정리: 자동 정리는 없다. 해지 시각 이전에 만든 모든 백업 사본의 삭제가 확인된 뒤에만 그 줄을 지울 수 있다. 파일을 다시 쓰는 정리는 두 앱을 멈춘 상태에서 한다. 사본 삭제를 확인할 방법과 주기를 정하기 전까지 대장은 정리하지 않는다(처리방침에도 '미정'으로 표시).
 
 ## 발송 기록·비동기 워커·지표 (#7)
