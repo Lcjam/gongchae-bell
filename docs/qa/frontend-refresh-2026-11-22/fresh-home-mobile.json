@@ -1,0 +1,131 @@
+{
+    "url":  "http://127.0.0.1:18089/",
+    "width":  360,
+    "clientWidth":  360,
+    "scrollWidth":  360,
+    "header":  1,
+    "skip":  1,
+    "main":  1,
+    "footer":  1,
+    "headerCta":  0,
+    "delay":  false,
+    "container":  {
+                      "x":  0,
+                      "y":  0,
+                      "w":  360,
+                      "h":  56
+                  },
+    "headerStyles":  [
+                         {
+                             "text":  "공채벨\n    \n      채용공고",
+                             "color":  "rgb(29, 29, 31)",
+                             "bg":  "oklab(0.999994 0.0000455678 0.0000200868 / 0.88)",
+                             "border":  "rgb(29, 29, 31) rgb(29, 29, 31) rgb(232, 232, 237)",
+                             "outline":  "rgb(29, 29, 31) none 3px",
+                             "shadow":  "none",
+                             "radius":  "0px",
+                             "rect":  {
+                                          "x":  0,
+                                          "y":  0,
+                                          "w":  360,
+                                          "h":  57
+                                      },
+                             "contrast":  null
+                         }
+                     ],
+    "footerStyles":  [
+                         {
+                             "text":  "데이터 기준 2026.11.22 11:55 KST\n      \n    \n    공",
+                             "color":  "rgb(110, 110, 115)",
+                             "bg":  "rgb(245, 245, 247)",
+                             "border":  "rgb(232, 232, 237) rgb(110, 110, 115) rgb(110, 110, 115)",
+                             "outline":  "rgb(110, 110, 115) none 3px",
+                             "shadow":  "none",
+                             "radius":  "0px",
+                             "rect":  {
+                                          "x":  0,
+                                          "y":  5102.703125,
+                                          "w":  360,
+                                          "h":  228.03125
+                                      },
+                             "contrast":  4.66
+                         }
+                     ],
+    "primary":  [
+                    {
+                        "text":  "채용공고 둘러보기",
+                        "color":  "rgb(255, 255, 255)",
+                        "bg":  "rgb(0, 113, 227)",
+                        "border":  "rgb(0, 113, 227)",
+                        "outline":  "rgb(255, 255, 255) none 3px",
+                        "shadow":  "none",
+                        "radius":  "980px",
+                        "rect":  {
+                                     "x":  36,
+                                     "y":  339.1875,
+                                     "w":  162.765625,
+                                     "h":  44
+                                 },
+                        "contrast":  4.7
+                    }
+                ],
+    "success":  [
+                    {
+                        "text":  "진행 중",
+                        "color":  "rgb(255, 255, 255)",
+                        "bg":  "rgb(21, 128, 61)",
+                        "border":  "rgb(255, 255, 255)",
+                        "outline":  "rgb(255, 255, 255) none 3px",
+                        "shadow":  "none",
+                        "radius":  "980px",
+                        "rect":  {
+                                     "x":  141.25,
+                                     "y":  2436.046875,
+                                     "w":  50.59375,
+                                     "h":  20.0625
+                                 },
+                        "contrast":  5.02
+                    },
+                    {
+                        "text":  "진행 중",
+                        "color":  "rgb(255, 255, 255)",
+                        "bg":  "rgb(21, 128, 61)",
+                        "border":  "rgb(255, 255, 255)",
+                        "outline":  "rgb(255, 255, 255) none 3px",
+                        "shadow":  "none",
+                        "radius":  "980px",
+                        "rect":  {
+                                     "x":  141.25,
+                                     "y":  2552.546875,
+                                     "w":  50.59375,
+                                     "h":  20.0625
+                                 },
+                        "contrast":  5.02
+                    },
+                    {
+                        "text":  "진행 중",
+                        "color":  "rgb(255, 255, 255)",
+                        "bg":  "rgb(21, 128, 61)",
+                        "border":  "rgb(255, 255, 255)",
+                        "outline":  "rgb(255, 255, 255) none 3px",
+                        "shadow":  "none",
+                        "radius":  "980px",
+                        "rect":  {
+                                     "x":  141.25,
+                                     "y":  2669.046875,
+                                     "w":  50.59375,
+                                     "h":  20.0625
+                                 },
+                        "contrast":  5.02
+                    }
+                ],
+    "input":  [
+
+              ],
+    "badges":  [
+
+               ],
+    "overflow":  [
+
+                 ]
+}

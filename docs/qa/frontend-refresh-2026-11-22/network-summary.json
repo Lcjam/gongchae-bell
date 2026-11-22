@@ -1,0 +1,29 @@
+{
+    "truncated":  false,
+    "entryCount":  162,
+    "nonLocalHttp":  [
+
+                     ],
+    "assets":  [
+                   {
+                       "Name":  "200, text/css",
+                       "Count":  101
+                   },
+                   {
+                       "Name":  "200, text/javascript",
+                       "Count":  9
+                   }
+               ],
+    "expectedErrors":  [
+                           {
+                               "url":  "http://127.0.0.1:18090/subscriptions/email",
+                               "method":  "POST",
+                               "status":  400
+                           },
+                           {
+                               "url":  "http://127.0.0.1:18089/does-not-exist",
+                               "method":  "GET",
+                               "status":  404
+                           }
+                       ]
+}
