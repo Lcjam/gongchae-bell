@@ -482,15 +482,19 @@ def format_latency_cell(stats: Dict[str, object], key: str, max_key: str, n_key:
 
 
 def render_summary_md(summary: Dict[str, object]) -> str:
+    w_err = summary.get("warmup_errors", {"http_5xx": 0, "non_200": 0, "timeout": 0, "connect_tls": 0})
     lines = [
         "# 성능 측정 요약 (#18)",
         "",
         f"- 상태: **{summary['run_status']}**"
         + (f" (`{summary['abort_reason']}`)" if summary.get("abort_reason") else ""),
-        f"- 시작/종료(UTC): `{summary['started_utc']}` ~ `{summary['finished_utc']}` (측정 {summary['measure_elapsed_sec']}s)",
+        f"- 시작/종료(UTC): `{summary['started_utc']}` ~ `{summary['finished_utc']}` "
+        f"(총 부하 {summary['load_elapsed_sec']}s = 워밍업 {summary['warmup_elapsed_sec']}s + 측정 {summary['measure_elapsed_sec']}s)",
         f"- 방식: closed-loop keep-alive (`concurrency={summary['config']['concurrency']}`, "
         f"`reconnect_count={summary['reconnect_count']}`, `reused_conn={summary['overall']['reused_conn_count']}/{summary['overall']['n_total']}`)",
-        "- 주의: closed-loop 동시성 응답 시간이며 포화 상태 open-loop 도착률 성능이 아니다. 타임아웃 경과 시간은 타임아웃 상한에서 잘린 관측이다.",
+        f"- 워밍업(측정 분모 제외, 안전 중단 동일 적용): `requests={summary['warmup_requests']}`, "
+        f"`errors={w_err['http_5xx']}/{w_err['non_200']}/{w_err['timeout']}/{w_err['connect_tls']}` (5xx/non200/to/conn)",
+        "- 주의: closed-loop 동시성 응답 시간이며 포화 상태 open-loop 도착률 성능이 아니다. 타임아웃 경과 시간은 소켓 연결·읽기 1회 대기 상한(`--timeout`)에서 잘린 관측이며 응답 전체 경과 상한이 아니다.",
         "",
         "## 화면군별 집계 (measure 단계, nearest-rank)",
         "",
@@ -503,13 +507,14 @@ def render_summary_md(summary: Dict[str, object]) -> str:
         if st["n_err"] > 0:
             all_p95 = format_latency_cell(st, "p95_all_ms", "max_all_ms", "n_total")
             if st.get("timeout_truncated_at_ms"):
-                all_p95 += f" (to>={int(st['timeout_truncated_at_ms'])}ms)"
+                all_p95 += f" (socket_to>={int(st['timeout_truncated_at_ms'])}ms)"
+        max_ok = f"{st['max_ok_ms']}ms" if st["max_ok_ms"] is not None else "-"
         lines.append(
             f"| `{grp}` | {st['n_total']} | {st['n_ok']} | {st['error_rate']*100:.2f}% | "
             f"{'Y' if st['min_sample_20_met'] else 'N'} | "
             f"{format_latency_cell(st, 'p50_ok_ms', 'max_ok_ms', 'n_ok')} | "
             f"{format_latency_cell(st, 'p95_ok_ms', 'max_ok_ms', 'n_ok')} | "
-            f"{st['max_ok_ms'] if st['max_ok_ms'] is not None else '-'}ms | "
+            f"{max_ok} | "
             f"{all_p95} | "
             f"{errs['http_5xx']}/{errs['non_200']}/{errs['timeout']}/{errs['connect_tls']} |"
         )
@@ -523,10 +528,11 @@ def render_summary_md(summary: Dict[str, object]) -> str:
     ]
     for key, st in summary["by_case"].items():
         grp, cid = key.split("/", 1)
+        max_ok = f"{st['max_ok_ms']}ms" if st["max_ok_ms"] is not None else "-"
         lines.append(
             f"| `{grp}` | `{cid}` | {st['n_total']} | {st['n_ok']} | {st['error_rate']*100:.2f}% | "
             f"{format_latency_cell(st, 'p95_ok_ms', 'max_ok_ms', 'n_ok')} | "
-            f"{st['max_ok_ms'] if st['max_ok_ms'] is not None else '-'}ms |"
+            f"{max_ok} |"
         )
     return "\n".join(lines) + "\n"
 
@@ -542,8 +548,8 @@ def render_conditions_md(summary: Dict[str, object], cases: List[UrlCase], meta:
         f"| 대상 Base URL | `{summary['config']['base_url']}` |",
         f"| 시작 / 종료 (UTC) | `{summary['started_utc']}` / `{summary['finished_utc']}` |",
         f"| 프로파일 / 동시성 | `{summary['config']['profile']}` / `C={summary['config']['concurrency']}` |",
-        f"| 시간 / 요청 상한 | `duration={summary['config']['duration_sec']}s`, `max_requests={summary['config']['max_requests']}`, `per_group_requests={summary['config']['per_group_requests']}` |",
-        f"| 타임아웃 / 워밍업 | `timeout={summary['config']['timeout_sec']}s`, `warmup_rounds={summary['config']['warmup_rounds']}` |",
+        f"| 시간 / 요청 상한 | `total_load_duration={summary['config']['duration_sec']}s (warmup+measure)`, `max_requests={summary['config']['max_requests']}`, `per_group_requests={summary['config']['per_group_requests']}` |",
+        f"| 소켓 타임아웃 / 워밍업 | `socket_timeout={summary['config']['timeout_sec']}s (per connect/read, not total response cap)`, `warmup_rounds={summary['config']['warmup_rounds']}` |",
         f"| 고정 헤더 | `{INTERNAL_HEADER_NAME}: {INTERNAL_HEADER_VALUE}`, `User-Agent: {DEFAULT_UA}` |",
         f"| 사전 검증 RTT (min/med/max) | `{summary['preflight']['min_rtt_ms']} / {summary['preflight']['median_rtt_ms']} / {summary['preflight']['max_rtt_ms']} ms` |",
         f"| 클라이언트 위치 | `{meta['client_location']}` |",
@@ -568,12 +574,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--out-dir", type=pathlib.Path, help="Output directory (refuses to overwrite existing raw data)")
     p.add_argument("--profile", choices=("S1", "S2", "custom"), default="S1", help="Preset load profile (S1 or S2)")
     p.add_argument("--concurrency", type=int, default=None, help="Worker thread count (S1=1, S2=4)")
-    p.add_argument("--duration", type=float, default=None, help="Max measure duration seconds (S1=180, S2=120)")
+    p.add_argument("--duration", type=float, default=None, help="Max total load duration seconds including warmup + measure (S1=180, S2=120)")
     p.add_argument("--max-requests", type=int, default=None, help="Max total measure requests (S2=1500)")
     p.add_argument("--per-group-requests", type=int, default=None, help="Target measure requests per screen group (S1=40)")
-    p.add_argument("--warmup-rounds", type=int, default=1, help="Warmup rounds of the URL schedule per worker (excluded from measure)")
-    p.add_argument("--timeout", type=float, default=10.0, help="Per-request read/connect timeout in seconds (default 10)")
-    p.add_argument("--stop-file", type=pathlib.Path, default=None, help="Stop cleanly when this file appears")
+    p.add_argument("--warmup-rounds", type=int, default=1, help="Warmup rounds of the URL schedule per worker (excluded from measure metrics, bounded by --duration and safety abort)")
+    p.add_argument("--timeout", type=float, default=10.0, help="Per-socket connect/read timeout in seconds (http.client socket timeout, not total response elapsed cap; default 10)")
+    p.add_argument("--stop-file", type=pathlib.Path, default=None, help="Stop cleanly when this file appears (recommended primary stop mechanism, especially on Windows)")
     p.add_argument("--preflight-only", action="store_true", help="Run preflight validation only and exit")
     p.add_argument("--allow-empty-query", action="store_true", help="Allow q= filter with 0 results during preflight")
     p.add_argument("--abort-error-rate", type=float, default=0.02, help="Rolling error rate safety abort threshold (default 0.02)")
@@ -678,6 +684,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             run_status = status
             abort_reason = reason
             stop_event.set()
+        warmup_barrier.abort()
 
     def handle_signal(signum: int, _frame: object) -> None:
         with state_lock:
@@ -689,9 +696,74 @@ def main(argv: Optional[List[str]] = None) -> int:
         prev_sigterm = signal.signal(signal.SIGTERM, handle_signal)
 
     started_utc = utc_now_iso()
+    load_start_mono = time.monotonic()
+    load_deadline_mono = load_start_mono + duration_sec
     measure_start_mono: Optional[float] = None
-    measure_deadline_mono: Optional[float] = None
     warmup_barrier = threading.Barrier(concurrency)
+
+    def record_result(
+        phase: str,
+        ts: str,
+        worker_id: int,
+        case: UrlCase,
+        status: int,
+        elapsed_ms: float,
+        nbytes: int,
+        reused: int,
+        err_kind: str,
+        now_m: float,
+        had_prior_conn: bool,
+        was_closed: bool,
+    ) -> None:
+        nonlocal cum_5xx, consecutive_timeouts, reconnect_count
+        row = {
+            "ts_start_utc": ts,
+            "phase": phase,
+            "worker": worker_id,
+            "group": case.group,
+            "case_id": case.case_id,
+            "path": case.path,
+            "status": status,
+            "elapsed_ms": round(elapsed_ms, 2),
+            "bytes_read": nbytes,
+            "reused_conn": reused,
+            "error_kind": err_kind,
+        }
+        with state_lock:
+            if had_prior_conn and was_closed:
+                reconnect_count += 1
+            raw_rows.append(row)
+            if phase == "measure":
+                measure_rows.append(row)
+
+            is_err = err_kind != "none"
+            if err_kind == "http_5xx":
+                cum_5xx += 1
+            if err_kind == "timeout":
+                consecutive_timeouts += 1
+            else:
+                consecutive_timeouts = 0
+
+            rolling_window.append((now_m, is_err))
+            cutoff = now_m - args.abort_window_sec
+            while rolling_window and rolling_window[0][0] < cutoff:
+                rolling_window.popleft()
+
+            if cum_5xx >= args.abort_max_5xx:
+                trigger_stop("ABORTED_SAFETY", f"http_5xx={cum_5xx}>={args.abort_max_5xx} (phase={phase})")
+            elif consecutive_timeouts >= args.abort_consecutive_timeouts:
+                trigger_stop(
+                    "ABORTED_SAFETY",
+                    f"consecutive_timeouts={consecutive_timeouts}>={args.abort_consecutive_timeouts} (phase={phase})",
+                )
+            elif len(rolling_window) >= args.abort_min_window_requests:
+                win_errs = sum(1 for _, e in rolling_window if e)
+                win_rate = win_errs / len(rolling_window)
+                if win_rate > args.abort_error_rate:
+                    trigger_stop(
+                        "ABORTED_SAFETY",
+                        f"rolling_{int(args.abort_window_sec)}s_error_rate={win_rate:.4f}>{args.abort_error_rate} (phase={phase})",
+                    )
 
     def next_measure_case() -> Optional[UrlCase]:
         nonlocal measure_dispatched, schedule_cursor
@@ -701,7 +773,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             trigger_stop("STOPPED_BY_STOP_FILE", f"stop_file={args.stop_file}")
             return None
         now_m = time.monotonic()
-        if measure_deadline_mono is not None and now_m >= measure_deadline_mono:
+        if now_m >= load_deadline_mono:
             return None
         if max_requests is not None and measure_dispatched >= max_requests:
             return None
@@ -724,20 +796,26 @@ def main(argv: Optional[List[str]] = None) -> int:
         return cand
 
     def worker_fn(worker_id: int) -> None:
-        nonlocal cum_5xx, consecutive_timeouts, reconnect_count, measure_start_mono, measure_deadline_mono
+        nonlocal measure_start_mono
         conn = make_connection(parsed_base, args.timeout, ssl_context)
         had_prior_conn = False
         passed_barrier = False
         try:
-            # Phase 1: warmup
+            # Phase 1: warmup (same safety thresholds & total load deadline as measure; separate phase/metrics)
+            warmup_halted = False
             for _ in range(max(0, args.warmup_rounds)):
                 for case in schedule:
-                    if stop_event.is_set():
-                        break
-                    if args.stop_file is not None and args.stop_file.exists():
-                        with state_lock:
+                    with state_lock:
+                        if stop_event.is_set():
+                            warmup_halted = True
+                            break
+                        if args.stop_file is not None and args.stop_file.exists():
                             trigger_stop("STOPPED_BY_STOP_FILE", f"stop_file={args.stop_file}")
-                        break
+                            warmup_halted = True
+                            break
+                        if time.monotonic() >= load_deadline_mono:
+                            warmup_halted = True
+                            break
                     ts = utc_now_iso()
                     was_closed = conn.sock is None
                     status, elapsed_ms, nbytes, reused, err_kind, _, should_close = request_once(
@@ -745,27 +823,27 @@ def main(argv: Optional[List[str]] = None) -> int:
                     )
                     if should_close:
                         conn.close()
-                    with state_lock:
-                        if had_prior_conn and was_closed:
-                            reconnect_count += 1
-                        had_prior_conn = True
-                        raw_rows.append(
-                            {
-                                "ts_start_utc": ts,
-                                "phase": "warmup",
-                                "worker": worker_id,
-                                "group": case.group,
-                                "case_id": case.case_id,
-                                "path": case.path,
-                                "status": status,
-                                "elapsed_ms": round(elapsed_ms, 2),
-                                "bytes_read": nbytes,
-                                "reused_conn": reused,
-                                "error_kind": err_kind,
-                            }
-                        )
-                if stop_event.is_set():
+                    record_result(
+                        phase="warmup",
+                        ts=ts,
+                        worker_id=worker_id,
+                        case=case,
+                        status=status,
+                        elapsed_ms=elapsed_ms,
+                        nbytes=nbytes,
+                        reused=reused,
+                        err_kind=err_kind,
+                        now_m=time.monotonic(),
+                        had_prior_conn=had_prior_conn,
+                        was_closed=was_closed,
+                    )
+                    had_prior_conn = True
+                if warmup_halted or stop_event.is_set() or time.monotonic() >= load_deadline_mono:
                     break
+
+            if warmup_halted or stop_event.is_set() or time.monotonic() >= load_deadline_mono:
+                warmup_barrier.abort()
+                return
 
             try:
                 warmup_barrier.wait()
@@ -774,9 +852,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 return
 
             with state_lock:
+                if stop_event.is_set() or time.monotonic() >= load_deadline_mono:
+                    return
                 if measure_start_mono is None:
                     measure_start_mono = time.monotonic()
-                    measure_deadline_mono = measure_start_mono + duration_sec
 
             # Phase 2: measure
             while True:
@@ -791,55 +870,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                 )
                 if should_close:
                     conn.close()
-                now_m = time.monotonic()
-                row = {
-                    "ts_start_utc": ts,
-                    "phase": "measure",
-                    "worker": worker_id,
-                    "group": case.group,
-                    "case_id": case.case_id,
-                    "path": case.path,
-                    "status": status,
-                    "elapsed_ms": round(elapsed_ms, 2),
-                    "bytes_read": nbytes,
-                    "reused_conn": reused,
-                    "error_kind": err_kind,
-                }
-                with state_lock:
-                    if had_prior_conn and was_closed:
-                        reconnect_count += 1
-                    had_prior_conn = True
-                    raw_rows.append(row)
-                    measure_rows.append(row)
-
-                    is_err = err_kind != "none"
-                    if err_kind == "http_5xx":
-                        cum_5xx += 1
-                    if err_kind == "timeout":
-                        consecutive_timeouts += 1
-                    else:
-                        consecutive_timeouts = 0
-
-                    rolling_window.append((now_m, is_err))
-                    cutoff = now_m - args.abort_window_sec
-                    while rolling_window and rolling_window[0][0] < cutoff:
-                        rolling_window.popleft()
-
-                    if cum_5xx >= args.abort_max_5xx:
-                        trigger_stop("ABORTED_SAFETY", f"http_5xx={cum_5xx}>={args.abort_max_5xx}")
-                    elif consecutive_timeouts >= args.abort_consecutive_timeouts:
-                        trigger_stop(
-                            "ABORTED_SAFETY",
-                            f"consecutive_timeouts={consecutive_timeouts}>={args.abort_consecutive_timeouts}",
-                        )
-                    elif len(rolling_window) >= args.abort_min_window_requests:
-                        win_errs = sum(1 for _, e in rolling_window if e)
-                        win_rate = win_errs / len(rolling_window)
-                        if win_rate > args.abort_error_rate:
-                            trigger_stop(
-                                "ABORTED_SAFETY",
-                                f"rolling_{int(args.abort_window_sec)}s_error_rate={win_rate:.4f}>{args.abort_error_rate}",
-                            )
+                record_result(
+                    phase="measure",
+                    ts=ts,
+                    worker_id=worker_id,
+                    case=case,
+                    status=status,
+                    elapsed_ms=elapsed_ms,
+                    nbytes=nbytes,
+                    reused=reused,
+                    err_kind=err_kind,
+                    now_m=time.monotonic(),
+                    had_prior_conn=had_prior_conn,
+                    was_closed=was_closed,
+                )
+                had_prior_conn = True
         finally:
             if not passed_barrier:
                 warmup_barrier.abort()
@@ -849,14 +894,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     for t in threads:
         t.start()
     for t in threads:
-        t.join()
+        while t.is_alive():
+            t.join(timeout=0.2)
 
     signal.signal(signal.SIGINT, prev_sigint)
     if prev_sigterm is not None:
         signal.signal(signal.SIGTERM, prev_sigterm)
 
+    finished_mono = time.monotonic()
     finished_utc = utc_now_iso()
-    measure_elapsed_sec = round(time.monotonic() - measure_start_mono, 2) if measure_start_mono is not None else 0.0
+    load_elapsed_sec = round(max(0.0, finished_mono - load_start_mono), 2)
+    if measure_start_mono is not None:
+        warmup_elapsed_sec = round(max(0.0, measure_start_mono - load_start_mono), 2)
+        measure_elapsed_sec = round(max(0.0, finished_mono - measure_start_mono), 2)
+    else:
+        warmup_elapsed_sec = load_elapsed_sec
+        measure_elapsed_sec = 0.0
 
     # Write raw CSV
     csv_path = args.out_dir / "requests.csv"
@@ -889,14 +942,23 @@ def main(argv: Optional[List[str]] = None) -> int:
             [r for r in measure_rows if r["group"] == c.group and r["case_id"] == c.case_id], args.timeout
         )
 
+    warmup_rows = [r for r in raw_rows if r["phase"] == "warmup"]
     summary = {
         "run_status": run_status,
         "abort_reason": abort_reason or None,
         "started_utc": started_utc,
         "finished_utc": finished_utc,
+        "load_elapsed_sec": load_elapsed_sec,
+        "warmup_elapsed_sec": warmup_elapsed_sec,
         "measure_elapsed_sec": measure_elapsed_sec,
         "reconnect_count": reconnect_count,
-        "warmup_requests": sum(1 for r in raw_rows if r["phase"] == "warmup"),
+        "warmup_requests": len(warmup_rows),
+        "warmup_errors": {
+            "http_5xx": sum(1 for r in warmup_rows if r["error_kind"] == "http_5xx"),
+            "non_200": sum(1 for r in warmup_rows if r["error_kind"] == "non_200"),
+            "timeout": sum(1 for r in warmup_rows if r["error_kind"] == "timeout"),
+            "connect_tls": sum(1 for r in warmup_rows if r["error_kind"] == "connect_tls"),
+        },
         "config": {
             "base_url": args.base_url,
             "profile": args.profile,

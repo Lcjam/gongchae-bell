@@ -33,26 +33,28 @@
 
 | 프로파일 | 동시성 (`C`) | 상한 (먼저 도달 시 종료) | 비고 |
 |---|---|---|---|
-| `S1` | `1` | 화면군당 `40`요청 또는 최대 `180초` | 순차 기준선, 워밍업 1라운드 제외 |
-| `S2` | `4` | 최대 `120초` 또는 최대 `1,500`요청 | 결정적 라운드로빈 순환, 일일 부하 총량 `15분` 이내는 운영 실행 기록으로 준수 |
+| `S1` | `1` | 화면군당 `40`요청 또는 총 부하 최대 `180초` | 순차 기준선, 워밍업 1라운드(성능 분모 제외, 총 부하 시간 및 안전 중단 포함) |
+| `S2` | `4` | 총 부하 최대 `120초` 또는 측정 최대 `1,500`요청 | 결정적 라운드로빈 순환, 일일 부하 총량 `15분` 이내는 운영 실행 기록으로 준수 |
 
-- 최대 시간이나 최대 요청 수를 넘어 분모를 강제로 채우지 않는다.
+- `--duration`은 **워밍업과 측정을 합친 총 부하 시간 상한**(`S1=180초`, `S2=120초`)이다. 워밍업에 걸린 시간을 포함한 총 부하 시간이 `--duration`에 도달하면 새 요청 dispatch를 중단해 제한 부하가 무한히 연장되지 않게 하며, 측정(`measure`)은 워밍업 완료 후 남은 시간 안에서 수행한다. 최대 시간이나 최대 요청 수를 넘어 분모를 강제로 채우지 않는다.
 - **closed-loop keep-alive**: 워커당 `http.client.HTTPSConnection` 1개를 재사용하며 원자료에 `reused_conn`(`0|1`)과 `reconnect_count`를 남긴다. 오류 요청은 자동 재시도하지 않고 오류로 기록한 뒤 다음 요청에서 연결을 복구한다. 결과는 **closed-loop 동시성 응답 시간**이며 포화 상태 open-loop 도착률 성능이 아니다.
-- **분모·오류·p95**: `measure` 단계 전체 요청을 `n_total`로 삼고, 비200(3xx 포함)·타임아웃(기본 10초)·연결/TLS 오류를 구분 집계한다. nearest-rank(`ceil(0.95 * n)`)로 성공 표본 `p95_ok`(`n_ok`)를 기본 보고하고, 오류가 1건 이상이면 전체 표본 `p95_all`(타임아웃 상한 절단 표기)을 병기한다. `n < 20`인 화면군·케이스는 p95 대신 `n`과 `max`만 적는다.
+- **분모·오류·p95·타임아웃 의미**: `measure` 단계 전체 요청을 `n_total`로 삼고(`warmup`은 원자료 `requests.csv`에 `phase=warmup`으로 별도 보존하며 성능 분모에서 제외), 비200(3xx 포함)·타임아웃(기본 10초)·연결/TLS 오류를 구분 집계한다. `--timeout`은 Python `http.client`의 **소켓 연결·읽기 1회 대기 상한**이며 응답 전체 경과 상한이 아니므로, 조금씩 흘러나오는 응답은 `--timeout`을 넘길 수 있다(`timeout_truncated_at_ms`는 소켓 대기 상한 절단 표기). nearest-rank(`ceil(0.95 * n)`)로 성공 표본 `p95_ok`(`n_ok`)를 기본 보고하고, 오류가 1건 이상이면 전체 표본 `p95_all`(소켓 타임아웃 상한 절단 표기)을 병기한다. `n < 20`인 화면군·케이스는 p95 대신 `n`과 `max`만 적는다.
 
 ### 3.2 안전 중단 및 원자료 보존
 
 - **`perf-probe.py` 자동 HTTP 안전 중단 (`ABORTED_SAFETY`, exit `3`)**:
+  - **`warmup`과 `measure` 모든 부하 요청에 동일하게 적용**한다(성능 분모는 `measure`만 유지).
   - 직전 `30초` 창 오류율 `> 2%` (최소 창 표본 10건 이상)
   - 누적 HTTP `5xx >= 3건`
   - 연속 타임아웃 `>= 2회`
-  - 또는 `--stop-file` 생성 / `SIGINT`·`SIGTERM` 수신(`STOPPED_BY_*`)
+  - 임계 도달 직후 새 요청 dispatch를 중단하고(`C=4` 워밍업 barrier 포함), 이미 진행 중이던 요청은 완료 시 원자료에 정직하게 기록한 뒤 종료한다.
+  - 수동 중단: `--stop-file` 생성 / `SIGINT`·`SIGTERM` 수신(`STOPPED_BY_*`). **특히 Windows 운영자 PC에서는 `--stop-file`을 기본 수동 중단 수단으로 권장**한다(`perf-probe.py`는 메인 스레드 `join(timeout=0.2)`으로 `SIGINT` 전달 지연을 줄였으나 터미널 환경 차이와 진행 중 소켓 대기를 고려해 `--stop-file`이 가장 확실하다).
   - 중단 시에도 수집된 원자료 CSV와 요약을 저장하고 `ABORTED_SAFETY` 상태를 숨기지 않는다.
 - **`sample-resources.sh` 호스트 경고 (자동 재시작 없음)**:
   - `MemAvailable < 1,536 MiB` (`WARN_MEM_AVAILABLE_LOW`)
   - `/` 디스크 사용률 `> 80%` (`WARN_DISK_USAGE_HIGH`)
-  - 컨테이너 `RestartCount` 증가 (`WARN_CONTAINER_RESTART`)
-  - 경고 관측 시 운영자가 외부 `perf-probe.py`에 `--stop-file` 또는 `SIGINT`로 즉시 부하를 중단한다.
+  - 컨테이너 `RestartCount` 증가 (`WARN_CONTAINER_RESTART`): `(container_name, container_id)` 단위로 추적해, 측정 시작(baseline) 이후 새로 생긴 컨테이너(`blue/green` 신규 앱 등)의 첫 관측값을 저장하고 `0→1` 증가(및 첫 관측 시 이미 `>0`인 경우)를 탐지한다. 같은 이름의 컨테이너가 새 `container_id`로 재생성되어 카운터가 `0`으로 돌아간 경우에도 ID 변화를 구별해 새 기준선에서 재시작 증가를 탐지하며, `containers.csv`에 `container_id`를 함께 남긴다.
+  - 경고 관측 시 운영자가 외부 `perf-probe.py`에 `--stop-file`(권장) 또는 `SIGINT`로 즉시 부하를 중단한다.
 - **원자료 덮어쓰기 금지**: 두 도구 모두 출력 디렉터리에 기존 결과 파일(`requests.csv`, `summary.json`, `resources.csv` 등)이 있으면 즉시 실패(`OUTPUT_EXISTS`)한다. `conditions.md`에는 알 수 없는 메타 값을 추측하지 않고 `미확인`으로 남긴다.
 
 ### 3.3 자원 표본 정의 (`sample-resources.sh`)

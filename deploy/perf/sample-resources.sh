@@ -126,31 +126,61 @@ capture_disk_snapshot() {
   } >"$out_file"
 }
 
+declare -A BASELINE_CONTAINER_ID=()
 declare -A BASELINE_RESTARTS=()
+declare -A CURRENT_CONTAINER_ID=()
 declare -A CURRENT_RESTARTS=()
 
 read_container_restarts() {
   local is_baseline="$1"
-  local ids line name count
+  local ids cid name count short_id prev_id prev_short_id base
+  CURRENT_CONTAINER_ID=()
   CURRENT_RESTARTS=()
   ids="$("$DOCKER_BIN" ps -aq 2>/dev/null || true)"
   [[ -n "$ids" ]] || return 0
   # shellcheck disable=SC2086
-  while IFS='|' read -r name count; do
-    [[ -n "$name" ]] || continue
+  while IFS='|' read -r cid name count; do
+    [[ -n "$cid" && -n "$name" ]] || continue
     name="${name#/}"
     count="${count:-0}"
+    short_id="${cid:0:12}"
+    CURRENT_CONTAINER_ID["$name"]="$short_id"
     CURRENT_RESTARTS["$name"]="$count"
     if [[ "$is_baseline" == "1" ]]; then
+      BASELINE_CONTAINER_ID["$name"]="$cid"
       BASELINE_RESTARTS["$name"]="$count"
+      continue
+    fi
+    if [[ -z "${BASELINE_CONTAINER_ID[$name]+x}" ]]; then
+      # New container appeared after baseline (e.g. blue/green deployment target).
+      # Record its initial observation so subsequent 0->1 increases are caught, and
+      # warn immediately if it already restarted (>0) before the first poll.
+      BASELINE_CONTAINER_ID["$name"]="$cid"
+      BASELINE_RESTARTS["$name"]="$count"
+      if [[ "$count" =~ ^[0-9]+$ ]] && (( count > 0 )); then
+        warn_msg "WARN_CONTAINER_RESTART container=$name id=$short_id baseline=0 current=$count origin=new_container"
+      fi
+    elif [[ "${BASELINE_CONTAINER_ID[$name]}" != "$cid" ]]; then
+      # Same container name recreated with a new container ID; reset baseline for the new ID.
+      prev_id="${BASELINE_CONTAINER_ID[$name]}"
+      prev_short_id="${prev_id:0:12}"
+      BASELINE_CONTAINER_ID["$name"]="$cid"
+      BASELINE_RESTARTS["$name"]="$count"
+      if [[ "$count" =~ ^[0-9]+$ ]] && (( count > 0 )); then
+        warn_msg "WARN_CONTAINER_RESTART container=$name id=$short_id prev_id=$prev_short_id baseline=0 current=$count origin=recreated_container"
+      fi
     else
-      local base="${BASELINE_RESTARTS[$name]:-$count}"
-      if [[ "$count" =~ ^[0-9]+$ && "$base" =~ ^[0-9]+$ && "$count" -gt "$base" ]]; then
-        warn_msg "WARN_CONTAINER_RESTART container=$name baseline=$base current=$count"
-        BASELINE_RESTARTS["$name"]="$count"
+      base="${BASELINE_RESTARTS[$name]}"
+      if [[ "$count" =~ ^[0-9]+$ && "$base" =~ ^[0-9]+$ ]]; then
+        if (( count > base )); then
+          warn_msg "WARN_CONTAINER_RESTART container=$name id=$short_id baseline=$base current=$count"
+          BASELINE_RESTARTS["$name"]="$count"
+        elif (( count < base )); then
+          BASELINE_RESTARTS["$name"]="$count"
+        fi
       fi
     fi
-  done < <("$DOCKER_BIN" inspect --format '{{.Name}}|{{.RestartCount}}' $ids 2>/dev/null || true)
+  done < <("$DOCKER_BIN" inspect --format '{{.Id}}|{{.Name}}|{{.RestartCount}}' $ids 2>/dev/null || true)
 }
 
 cat >"$OUT_DIR/resources.csv" <<'EOF'
@@ -158,7 +188,7 @@ sample_seq,scheduled_utc,actual_utc,skipped_since_prev,cpu_user,cpu_nice,cpu_sys
 EOF
 
 cat >"$OUT_DIR/containers.csv" <<'EOF'
-sample_seq,scheduled_utc,actual_utc,container,cpu_perc_raw,cpu_host_pct_normalized,mem_usage_cgroup_raw,mem_perc_raw,net_io_raw,block_io_raw,pids,restart_count
+sample_seq,scheduled_utc,actual_utc,container,cpu_perc_raw,cpu_host_pct_normalized,mem_usage_cgroup_raw,mem_perc_raw,net_io_raw,block_io_raw,pids,restart_count,container_id
 EOF
 
 : >"$OUT_DIR/warnings.log"
@@ -174,6 +204,7 @@ warn_mem_mib=$WARN_MEM_MIB
 warn_disk_pct=$WARN_DISK_PCT
 cpu_note=docker CPUPerc is per-core 100% scale; cpu_host_pct_normalized divides by host_vcpu
 mem_note=mem_usage_cgroup_raw is Docker cgroup display usage (NOT process RSS); use host mem_available_mib for headroom
+restart_note=tracks (name, container_id); post-baseline new containers save initial count and detect 0->1 (or >0 on first poll); recreated same-name containers reset baseline on new container_id
 EOF
 
 capture_disk_snapshot "before"
@@ -278,8 +309,9 @@ while true; do
     [[ -n "$cname" ]] || continue
     cpu_norm="$(awk -v raw="$ccpu" -v vcpu="$HOST_VCPU" 'BEGIN { gsub(/%/, "", raw); printf "%.2f", (raw + 0) / vcpu }')"
     rcount="${CURRENT_RESTARTS[$cname]:-0}"
-    printf '%d,%s,%s,%s,%s,%s,"%s",%s,"%s","%s",%s,%s\n' \
-      "$sample_seq" "$scheduled_utc" "$actual_utc" "$cname" "$ccpu" "$cpu_norm" "$cmem" "$cmemp" "$cnet" "$cblk" "$cpids" "$rcount" \
+    cid_short="${CURRENT_CONTAINER_ID[$cname]:-unknown}"
+    printf '%d,%s,%s,%s,%s,%s,"%s",%s,"%s","%s",%s,%s,%s\n' \
+      "$sample_seq" "$scheduled_utc" "$actual_utc" "$cname" "$ccpu" "$cpu_norm" "$cmem" "$cmemp" "$cnet" "$cblk" "$cpids" "$rcount" "$cid_short" \
       >>"$OUT_DIR/containers.csv"
   done < <("$DOCKER_BIN" stats --no-stream --format '{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}|{{.MemPerc}}|{{.NetIO}}|{{.BlockIO}}|{{.PIDs}}' 2>/dev/null || true)
 

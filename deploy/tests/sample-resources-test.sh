@@ -17,7 +17,7 @@ FAKE_PROC="$TMP_DIR/proc"
 STATE_DIR="$TMP_DIR/state"
 mkdir -p "$MOCK_BIN" "$FAKE_PROC" "$STATE_DIR"
 
-echo "=== [1/4] bash -n syntax check ==="
+echo "=== [1/6] bash -n syntax check ==="
 bash -n "$SAMPLER"
 
 # Synthetic /proc files
@@ -61,7 +61,7 @@ case "\$cmd" in
     ;;
   inspect)
     rc="\$(cat "$STATE_DIR/restart_count")"
-    printf '/gongchae-bell-prod-app-blue-1|%s\n/gongchae-bell-prod-postgres-1|0\n' "\$rc"
+    printf 'cid1aaaaaaaaaaaa|/gongchae-bell-prod-app-blue-1|%s\ncid2bbbbbbbbbbbb|/gongchae-bell-prod-postgres-1|0\n' "\$rc"
     ;;
   stats)
     c="\$(cat "$STATE_DIR/stats_calls")"
@@ -92,7 +92,7 @@ printf '/dev/sda1 50000000000 42500000000 7500000000 85%% /\n'
 EOF
 chmod +x "$MOCK_BIN/df"
 
-echo "=== [2/4] monotonic schedule, overrun tick skip, normalization, and warnings ==="
+echo "=== [2/6] monotonic schedule, overrun tick skip, normalization, and warnings ==="
 OUT1="$TMP_DIR/out1"
 PROC_ROOT="$FAKE_PROC" \
 DOCKER_BIN="$MOCK_BIN/docker" \
@@ -107,28 +107,29 @@ skipped_s2="$(awk -F, 'NR==3 {print $4}' "$OUT1/resources.csv")"
 [[ "$skipped_s2" -ge 1 ]] || { echo "FAIL: expected skipped_since_prev >= 1 on overrun sample 2, got $skipped_s2" >&2; exit 1; }
 grep -q 'total_skipped_ticks=[1-9]' "$OUT1/sampler-meta.txt" || { echo "FAIL: total_skipped_ticks missing" >&2; exit 1; }
 
-# Check Docker CPU 2-vCPU normalization (120.00% -> 60.00) and cgroup MemUsage metadata distinction
-grep -q 'gongchae-bell-prod-app-blue-1,120.00%,60.00,"412MiB / 11.6GiB"' "$OUT1/containers.csv" \
-  || { echo "FAIL: container CPU normalization or raw MemUsage missing" >&2; cat "$OUT1/containers.csv" >&2; exit 1; }
+# Check Docker CPU 2-vCPU normalization (120.00% -> 60.00), cgroup MemUsage, and container_id column
+grep -q 'gongchae-bell-prod-app-blue-1,120.00%,60.00,"412MiB / 11.6GiB",3.47%,"10MB / 5MB","0B / 0B",42,1,cid1aaaaaaaa' "$OUT1/containers.csv" \
+  || { echo "FAIL: container CPU normalization, MemUsage, or container_id missing" >&2; cat "$OUT1/containers.csv" >&2; exit 1; }
 grep -q 'NOT process RSS' "$OUT1/sampler-meta.txt" || { echo "FAIL: RSS distinction missing in meta" >&2; exit 1; }
 
 # Check before/after disk snapshots exist
 [[ -s "$OUT1/disk-before.txt" && -s "$OUT1/disk-after.txt" ]] || { echo "FAIL: before/after disk snapshots missing" >&2; exit 1; }
 grep -q 'docker system df' "$OUT1/disk-before.txt" || { echo "FAIL: docker system df missing" >&2; exit 1; }
 
-# Check all 3 safety warnings fired
+# Check all 3 safety warnings fired (including static initial app 0->1 regression)
 grep -q 'WARN_MEM_AVAILABLE_LOW' "$OUT1/warnings.log" || { echo "FAIL: WARN_MEM_AVAILABLE_LOW missing" >&2; exit 1; }
 grep -q 'WARN_DISK_USAGE_HIGH' "$OUT1/warnings.log" || { echo "FAIL: WARN_DISK_USAGE_HIGH missing" >&2; exit 1; }
-grep -q 'WARN_CONTAINER_RESTART' "$OUT1/warnings.log" || { echo "FAIL: WARN_CONTAINER_RESTART missing" >&2; exit 1; }
+grep -q 'WARN_CONTAINER_RESTART container=gongchae-bell-prod-app-blue-1 id=cid1aaaaaaaa baseline=0 current=1' "$OUT1/warnings.log" \
+  || { echo "FAIL: static app WARN_CONTAINER_RESTART missing" >&2; cat "$OUT1/warnings.log" >&2; exit 1; }
 
-echo "=== [3/4] refuses to overwrite existing output directory ==="
+echo "=== [3/6] refuses to overwrite existing output directory ==="
 if PROC_ROOT="$FAKE_PROC" DOCKER_BIN="$MOCK_BIN/docker" DF_BIN="$MOCK_BIN/df" MONOTONIC_CMD="$MOCK_BIN/mono-clock" \
     bash "$SAMPLER" --out-dir "$OUT1" --interval 0.1 --max-samples 1 >/dev/null 2>&1; then
   echo "FAIL: sampler should refuse to overwrite existing resources.csv" >&2
   exit 1
 fi
 
-echo "=== [4/4] stops cleanly on --stop-file ==="
+echo "=== [4/6] stops cleanly on --stop-file ==="
 OUT2="$TMP_DIR/out2"
 STOP_FILE="$TMP_DIR/sampler.stop"
 touch "$STOP_FILE"
@@ -136,5 +137,118 @@ PROC_ROOT="$FAKE_PROC" DOCKER_BIN="$MOCK_BIN/docker" DF_BIN="$MOCK_BIN/df" MONOT
   bash "$SAMPLER" --out-dir "$OUT2" --interval 0.1 --max-samples 10 --stop-file "$STOP_FILE" >/dev/null 2>&1
 row_count2="$(tail -n +2 "$OUT2/resources.csv" | wc -l | tr -d '[:space:]')"
 [[ "$row_count2" == "0" ]] || { echo "FAIL: expected 0 rows when stop-file already exists, got $row_count2" >&2; exit 1; }
+
+echo "=== [5/6] detects post-baseline new container 0->1 restart and immediate >0 new container ==="
+sed -i 's/^MemAvailable:.*/MemAvailable:    10485760 kB/' "$FAKE_PROC/meminfo"
+printf '10000\n' >"$STATE_DIR/clock_ms"
+printf '0\n' >"$STATE_DIR/bg_inspect_calls"
+cat >"$MOCK_BIN/docker-bg" <<EOF
+#!/usr/bin/env bash
+cmd="\${1:-}"
+case "\$cmd" in
+  system)
+    printf 'TYPE\tTOTAL\tACTIVE\tSIZE\nImages\t5\t5\t1.2GB\n'
+    ;;
+  ps)
+    printf 'cid_blue\ncid_green\n'
+    ;;
+  inspect)
+    c="\$(cat "$STATE_DIR/bg_inspect_calls")"
+    c=\$((c + 1))
+    printf '%d\n' "\$c" >"$STATE_DIR/bg_inspect_calls"
+    if [[ "\$c" -eq 1 ]]; then
+      # Baseline: only app-blue exists
+      printf 'cidblue111111111|/gongchae-bell-prod-app-blue-1|0\n'
+    elif [[ "\$c" -eq 2 ]]; then
+      # Sample 1: new app-green appears with count=0 (must save baseline=0, no warning yet)
+      printf 'cidblue111111111|/gongchae-bell-prod-app-blue-1|0\n'
+      printf 'cidgreen22222222|/gongchae-bell-prod-app-green-1|0\n'
+    elif [[ "\$c" -eq 3 ]]; then
+      # Sample 2: app-green restarts 0->1 (must warn!)
+      printf 'cidblue111111111|/gongchae-bell-prod-app-blue-1|0\n'
+      printf 'cidgreen22222222|/gongchae-bell-prod-app-green-1|1\n'
+    else
+      # Sample 3: another post-baseline container appears already at count=1 (must warn immediately!)
+      printf 'cidblue111111111|/gongchae-bell-prod-app-blue-1|0\n'
+      printf 'cidgreen22222222|/gongchae-bell-prod-app-green-1|1\n'
+      printf 'cidfast333333333|/gongchae-bell-prod-app-canary-1|1\n'
+    fi
+    ;;
+  stats)
+    cur="\$(cat "$STATE_DIR/clock_ms")"
+    printf '%d\n' \$((cur + 100)) >"$STATE_DIR/clock_ms"
+    printf 'gongchae-bell-prod-app-blue-1|10.00%%|300MiB / 11.6GiB|2.50%%|1MB / 1MB|0B / 0B|30\n'
+    printf 'gongchae-bell-prod-app-green-1|20.00%%|350MiB / 11.6GiB|2.90%%|1MB / 1MB|0B / 0B|32\n'
+    ;;
+esac
+EOF
+chmod +x "$MOCK_BIN/docker-bg"
+
+OUT3="$TMP_DIR/out3"
+PROC_ROOT="$FAKE_PROC" \
+DOCKER_BIN="$MOCK_BIN/docker-bg" \
+DF_BIN="$MOCK_BIN/df" \
+MONOTONIC_CMD="$MOCK_BIN/mono-clock" \
+  bash "$SAMPLER" --out-dir "$OUT3" --interval 0.1 --max-samples 3 --host-vcpu 2 --warn-mem-mib 1536 --warn-disk-pct 99 >/dev/null 2>&1
+
+grep -q 'WARN_CONTAINER_RESTART container=gongchae-bell-prod-app-green-1 id=cidgreen2222 baseline=0 current=1' "$OUT3/warnings.log" \
+  || { echo "FAIL: post-baseline new container 0->1 restart not detected" >&2; cat "$OUT3/warnings.log" >&2; exit 1; }
+grep -q 'WARN_CONTAINER_RESTART container=gongchae-bell-prod-app-canary-1 id=cidfast33333 baseline=0 current=1 origin=new_container' "$OUT3/warnings.log" \
+  || { echo "FAIL: post-baseline new container immediate >0 restart not detected" >&2; cat "$OUT3/warnings.log" >&2; exit 1; }
+green_warns="$(grep -c 'container=gongchae-bell-prod-app-green-1' "$OUT3/warnings.log" || true)"
+[[ "$green_warns" == "1" ]] || { echo "FAIL: expected exactly 1 restart warning for app-green, got $green_warns" >&2; cat "$OUT3/warnings.log" >&2; exit 1; }
+grep -q 'gongchae-bell-prod-app-green-1,.*cidgreen2222' "$OUT3/containers.csv" \
+  || { echo "FAIL: new container_id missing from containers.csv" >&2; cat "$OUT3/containers.csv" >&2; exit 1; }
+
+echo "=== [6/6] distinguishes same-name recreated container ID (counter reset 3 -> new_id 0 -> 1) ==="
+printf '10000\n' >"$STATE_DIR/clock_ms"
+printf '0\n' >"$STATE_DIR/recreate_inspect_calls"
+cat >"$MOCK_BIN/docker-recreate" <<EOF
+#!/usr/bin/env bash
+cmd="\${1:-}"
+case "\$cmd" in
+  system)
+    printf 'TYPE\tTOTAL\tACTIVE\tSIZE\nImages\t5\t5\t1.2GB\n'
+    ;;
+  ps)
+    printf 'cid_app\n'
+    ;;
+  inspect)
+    c="\$(cat "$STATE_DIR/recreate_inspect_calls")"
+    c=\$((c + 1))
+    printf '%d\n' "\$c" >"$STATE_DIR/recreate_inspect_calls"
+    if [[ "\$c" -eq 1 ]]; then
+      # Baseline: old container ID had historical RestartCount=3
+      printf 'cidold0000000001|/gongchae-bell-prod-app-blue-1|3\n'
+    elif [[ "\$c" -eq 2 ]]; then
+      # Sample 1: recreated with NEW container ID and count=0 (must reset baseline to 0, NO warning)
+      printf 'cidnew0000000002|/gongchae-bell-prod-app-blue-1|0\n'
+    else
+      # Sample 2: recreated container restarts 0->1 (must warn even though 1 < old baseline 3!)
+      printf 'cidnew0000000002|/gongchae-bell-prod-app-blue-1|1\n'
+    fi
+    ;;
+  stats)
+    cur="\$(cat "$STATE_DIR/clock_ms")"
+    printf '%d\n' \$((cur + 100)) >"$STATE_DIR/clock_ms"
+    printf 'gongchae-bell-prod-app-blue-1|15.00%%|320MiB / 11.6GiB|2.70%%|1MB / 1MB|0B / 0B|30\n'
+    ;;
+esac
+EOF
+chmod +x "$MOCK_BIN/docker-recreate"
+
+OUT4="$TMP_DIR/out4"
+PROC_ROOT="$FAKE_PROC" \
+DOCKER_BIN="$MOCK_BIN/docker-recreate" \
+DF_BIN="$MOCK_BIN/df" \
+MONOTONIC_CMD="$MOCK_BIN/mono-clock" \
+  bash "$SAMPLER" --out-dir "$OUT4" --interval 0.1 --max-samples 2 --host-vcpu 2 --warn-mem-mib 1536 --warn-disk-pct 99 >/dev/null 2>&1
+
+grep -q 'WARN_CONTAINER_RESTART container=gongchae-bell-prod-app-blue-1 id=cidnew000000 baseline=0 current=1' "$OUT4/warnings.log" \
+  || { echo "FAIL: recreated same-name container 0->1 restart not detected" >&2; cat "$OUT4/warnings.log" >&2; exit 1; }
+recreate_warns="$(grep -c 'WARN_CONTAINER_RESTART' "$OUT4/warnings.log" || true)"
+[[ "$recreate_warns" == "1" ]] || { echo "FAIL: expected exactly 1 restart warning for recreated container, got $recreate_warns" >&2; cat "$OUT4/warnings.log" >&2; exit 1; }
+grep -q 'gongchae-bell-prod-app-blue-1,.*cidnew000000' "$OUT4/containers.csv" \
+  || { echo "FAIL: recreated container_id missing from containers.csv" >&2; cat "$OUT4/containers.csv" >&2; exit 1; }
 
 echo "ALL_SAMPLE_RESOURCES_TESTS_PASSED"

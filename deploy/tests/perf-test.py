@@ -13,6 +13,7 @@ import http.server
 import importlib.util
 import json
 import pathlib
+import signal
 import socketserver
 import tempfile
 import threading
@@ -124,6 +125,8 @@ class FakeState:
         self.conn_ids: list[int] = []
         self.mode = "ok"
         self.call_seq = 0
+        self.preflight_count = 0
+        self.inflight_barrier: threading.Barrier | None = None
         self.stop_file_to_create: pathlib.Path | None = None
         self.stop_after_calls: int = 0
 
@@ -198,6 +201,41 @@ class FakeHandler(http.server.BaseHTTPRequestHandler):
             return
         if mode == "slow_10ms":
             time.sleep(0.01)
+        if mode == "slow_80ms" and seq > st.preflight_count:
+            time.sleep(0.08)
+        if mode == "fail_warmup_5xx" and seq > st.preflight_count:
+            self._send_html(503, "warmup error")
+            return
+        if mode == "fail_warmup_timeout" and seq > st.preflight_count:
+            time.sleep(0.25)
+            self._send_html(200, "late")
+            return
+        if mode == "fail_warmup_redirect" and seq > st.preflight_count:
+            self.send_response(302)
+            self.send_header("Location", "https://external.example/warmup-redirect")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if mode == "c4_warmup_5xx_inflight" and seq > st.preflight_count:
+            if st.inflight_barrier is not None and seq <= st.preflight_count + 4:
+                try:
+                    st.inflight_barrier.wait()
+                except threading.BrokenBarrierError:
+                    pass
+            if seq == st.preflight_count + 4:
+                # Delay 4th in-flight worker slightly so threshold (3) triggers while 4th is still in-flight
+                time.sleep(0.05)
+            self._send_html(503, "c4 warmup error")
+            return
+        if mode == "c4_warmup_barrier_waiting_abort" and seq > st.preflight_count:
+            # First 2 post-preflight requests succeed quickly so one worker finishes warmup and waits at barrier,
+            # while subsequent requests return 503 after a brief delay and trigger ABORTED_SAFETY.
+            if seq <= st.preflight_count + 2:
+                pass
+            else:
+                time.sleep(0.04)
+                self._send_html(503, "barrier abort error")
+                return
 
         route = parsed.path
         if route == "/":
@@ -500,6 +538,202 @@ class PerfProbeTest(unittest.TestCase):
         self.assertGreaterEqual(len(cases), 10)
         self.assertTrue(all(not c.path.endswith("/source") for c in cases))
         self.assertTrue(all(not c.path.startswith("/subscriptions") for c in cases))
+
+    def test_warmup_safety_abort_5xx_timeout_and_rolling_error_rate(self) -> None:
+        five_home_tsv = "\n".join(
+            ["group\tcase_id\tpath"] + [f"home\th{i}\t/" for i in range(1, 6)]
+        ) + "\n"
+        urls = self.write_urls(five_home_tsv, "five_home.tsv")
+
+        # 1) 5xx cumulative >= 3 during warmup stops before finishing warmup and keeps measure denominator separate
+        self.state.mode = "fail_warmup_5xx"
+        self.state.call_seq = 0
+        self.state.preflight_count = 5
+        out_5xx = self.tmp_path / "warmup_abort_5xx"
+        rc = perf_probe.main(
+            [
+                "--base-url", self.base_url, "--urls", str(urls), "--out-dir", str(out_5xx),
+                "--profile", "custom", "--concurrency", "1", "--max-requests", "20",
+                "--warmup-rounds", "2", "--abort-max-5xx", "3", "--abort-min-window-requests", "100",
+            ]
+        )
+        self.assertEqual(rc, 3)
+        s5 = json.loads((out_5xx / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(s5["run_status"], "ABORTED_SAFETY")
+        self.assertIn("http_5xx=3>=3", s5["abort_reason"])
+        self.assertIn("phase=warmup", s5["abort_reason"])
+        self.assertEqual(s5["warmup_requests"], 3)
+        self.assertEqual(s5["warmup_errors"]["http_5xx"], 3)
+        self.assertEqual(s5["overall"]["n_total"], 0)
+        self.assertEqual(self.state.call_seq, 5 + 3)
+        with (out_5xx / "requests.csv").open(encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(all(r["phase"] == "warmup" and r["error_kind"] == "http_5xx" for r in rows))
+        self.assertTrue((out_5xx / "summary.md").exists() and (out_5xx / "conditions.md").exists())
+
+        # 2) Consecutive timeouts >= 2 during warmup stops immediately
+        self.state.mode = "fail_warmup_timeout"
+        self.state.call_seq = 0
+        self.state.preflight_count = 5
+        out_to = self.tmp_path / "warmup_abort_to"
+        rc = perf_probe.main(
+            [
+                "--base-url", self.base_url, "--urls", str(urls), "--out-dir", str(out_to),
+                "--profile", "custom", "--concurrency", "1", "--max-requests", "20",
+                "--warmup-rounds", "2", "--timeout", "0.1", "--abort-consecutive-timeouts", "2",
+                "--abort-min-window-requests", "100",
+            ]
+        )
+        self.assertEqual(rc, 3)
+        sto = json.loads((out_to / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(sto["run_status"], "ABORTED_SAFETY")
+        self.assertIn("consecutive_timeouts=2>=2", sto["abort_reason"])
+        self.assertIn("phase=warmup", sto["abort_reason"])
+        self.assertEqual(sto["warmup_requests"], 2)
+        self.assertEqual(sto["warmup_errors"]["timeout"], 2)
+        self.assertEqual(sto["overall"]["n_total"], 0)
+        self.assertEqual(self.state.call_seq, 5 + 2)
+
+        # 3) Rolling error rate > 2% during warmup (302 redirects, non-5xx, non-timeout)
+        self.state.mode = "fail_warmup_redirect"
+        self.state.call_seq = 0
+        self.state.preflight_count = 5
+        out_rate = self.tmp_path / "warmup_abort_rate"
+        rc = perf_probe.main(
+            [
+                "--base-url", self.base_url, "--urls", str(urls), "--out-dir", str(out_rate),
+                "--profile", "custom", "--concurrency", "1", "--max-requests", "20",
+                "--warmup-rounds", "2", "--abort-error-rate", "0.02", "--abort-min-window-requests", "4",
+            ]
+        )
+        self.assertEqual(rc, 3)
+        sr = json.loads((out_rate / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(sr["run_status"], "ABORTED_SAFETY")
+        self.assertIn("error_rate", sr["abort_reason"])
+        self.assertIn("phase=warmup", sr["abort_reason"])
+        self.assertEqual(sr["warmup_requests"], 4)
+        self.assertEqual(sr["warmup_errors"]["non_200"], 4)
+        self.assertEqual(sr["overall"]["n_total"], 0)
+
+    def test_c4_warmup_abort_does_not_deadlock_barrier_and_records_inflight(self) -> None:
+        # Subcase 1: All 4 workers in-flight simultaneously; 3 trigger ABORTED_SAFETY, 4th finishes & is honestly recorded, no 5th dispatched.
+        urls4 = self.write_urls(
+            "group\tcase_id\tpath\nhome\th1\t/\nlist\tl1\t/jobs\ndetail\td1\t/jobs/307027\ninstitution\ti1\t/institutions/C0008\n",
+            "urls4.tsv",
+        )
+        self.state.mode = "c4_warmup_5xx_inflight"
+        self.state.call_seq = 0
+        self.state.preflight_count = 4
+        self.state.inflight_barrier = threading.Barrier(4, timeout=2.0)
+        out_c4 = self.tmp_path / "c4_warmup_inflight"
+        t0 = time.monotonic()
+        rc = perf_probe.main(
+            [
+                "--base-url", self.base_url, "--urls", str(urls4), "--out-dir", str(out_c4),
+                "--profile", "S2", "--concurrency", "4", "--duration", "10", "--max-requests", "100",
+                "--warmup-rounds", "3", "--abort-max-5xx", "3", "--abort-min-window-requests", "100",
+            ]
+        )
+        elapsed = time.monotonic() - t0
+        self.assertLess(elapsed, 3.0)
+        self.assertEqual(rc, 3)
+        sc4 = json.loads((out_c4 / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(sc4["run_status"], "ABORTED_SAFETY")
+        self.assertIn("http_5xx=3>=3", sc4["abort_reason"])
+        self.assertEqual(sc4["overall"]["n_total"], 0)
+        # With C=4 and threshold=3, at most (C-1)=3 other workers can already have an in-flight request
+        # when the 3rd 5xx triggers ABORTED_SAFETY, so total warmup requests must be in [3, 6] (far below 4*4*3=48),
+        # and every request received by the server after preflight must be honestly recorded in requests.csv.
+        expected_post_preflight = self.state.call_seq - 4
+        self.assertGreaterEqual(sc4["warmup_requests"], 3)
+        self.assertLessEqual(sc4["warmup_requests"], 3 + (4 - 1))
+        self.assertEqual(sc4["warmup_requests"], expected_post_preflight)
+        self.assertEqual(sc4["warmup_errors"]["http_5xx"], expected_post_preflight)
+        with (out_c4 / "requests.csv").open(encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+        self.assertEqual(len(rows), expected_post_preflight)
+        self.assertTrue(all(r["phase"] == "warmup" for r in rows))
+
+        # Subcase 2: One worker finishes warmup and waits at warmup_barrier while others abort -> must unblock barrier cleanly
+        urls1 = self.write_urls("group\tcase_id\tpath\nhome\th1\t/\n", "urls1.tsv")
+        self.state.mode = "c4_warmup_barrier_waiting_abort"
+        self.state.call_seq = 0
+        self.state.preflight_count = 1
+        self.state.inflight_barrier = None
+        out_bar = self.tmp_path / "c4_warmup_barrier"
+        t0 = time.monotonic()
+        rc2 = perf_probe.main(
+            [
+                "--base-url", self.base_url, "--urls", str(urls1), "--out-dir", str(out_bar),
+                "--profile", "S2", "--concurrency", "4", "--duration", "10", "--max-requests", "100",
+                "--warmup-rounds", "2", "--abort-max-5xx", "3", "--abort-min-window-requests", "100",
+            ]
+        )
+        elapsed2 = time.monotonic() - t0
+        self.assertLess(elapsed2, 3.0)
+        self.assertEqual(rc2, 3)
+        sbar = json.loads((out_bar / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(sbar["run_status"], "ABORTED_SAFETY")
+        self.assertEqual(sbar["overall"]["n_total"], 0)
+        self.assertGreaterEqual(sbar["warmup_requests"], 3)
+
+    def test_warmup_duration_cap_prevents_unbounded_extension(self) -> None:
+        urls = self.write_urls("group\tcase_id\tpath\nhome\thome_root\t/\nlist\tjobs_default\t/jobs\n")
+        self.state.mode = "slow_80ms"
+        self.state.call_seq = 0
+        self.state.preflight_count = 2
+        out_cap = self.tmp_path / "warmup_duration_cap"
+        t0 = time.monotonic()
+        rc = perf_probe.main(
+            [
+                "--base-url", self.base_url, "--urls", str(urls), "--out-dir", str(out_cap),
+                "--profile", "custom", "--concurrency", "1", "--duration", "0.35",
+                "--max-requests", "50", "--warmup-rounds", "10", "--timeout", "1.0",
+            ]
+        )
+        elapsed = time.monotonic() - t0
+        self.assertEqual(rc, 0)
+        # Without warmup time cap, 10 rounds * 2 cases * 80ms = 1.6s + 0.35s measure (~2s).
+        # With total load duration cap, warmup halts once 0.35s elapses.
+        self.assertLess(elapsed, 1.2)
+        sc = json.loads((out_cap / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(sc["run_status"], "COMPLETED")
+        self.assertGreater(sc["warmup_requests"], 0)
+        self.assertLess(sc["warmup_requests"], 15)
+        self.assertEqual(sc["overall"]["n_total"], 0)
+        self.assertEqual(sc["measure_elapsed_sec"], 0.0)
+        self.assertGreaterEqual(sc["load_elapsed_sec"], 0.3)
+
+    def test_sigint_stops_cleanly_promptly_and_preserves_raw_outputs(self) -> None:
+        urls = self.write_urls("group\tcase_id\tpath\nhome\thome_root\t/\nlist\tjobs_default\t/jobs\n")
+        self.state.mode = "slow_80ms"
+        self.state.call_seq = 0
+        self.state.preflight_count = 2
+        out_sig = self.tmp_path / "run_sigint"
+
+        def send_sigint() -> None:
+            time.sleep(0.2)
+            signal.raise_signal(signal.SIGINT)
+
+        timer = threading.Thread(target=send_sigint, daemon=True)
+        timer.start()
+        t0 = time.monotonic()
+        rc = perf_probe.main(
+            [
+                "--base-url", self.base_url, "--urls", str(urls), "--out-dir", str(out_sig),
+                "--profile", "custom", "--concurrency", "1", "--duration", "10",
+                "--max-requests", "200", "--warmup-rounds", "1",
+            ]
+        )
+        elapsed = time.monotonic() - t0
+        self.assertEqual(rc, 0)
+        self.assertLess(elapsed, 2.0)
+        ss = json.loads((out_sig / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(ss["run_status"], "STOPPED_BY_SIGNAL")
+        self.assertTrue((out_sig / "requests.csv").exists())
+        self.assertTrue((out_sig / "summary.md").exists())
+        self.assertTrue((out_sig / "conditions.md").exists())
 
 
 if __name__ == "__main__":
