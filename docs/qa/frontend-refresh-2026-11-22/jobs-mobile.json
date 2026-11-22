@@ -1,0 +1,193 @@
+{
+    "url":  "http://127.0.0.1:18089/jobs?q=2026%EB%85%84%EC%A0%95%EB%B3%B4",
+    "width":  360,
+    "clientWidth":  360,
+    "scrollWidth":  360,
+    "header":  1,
+    "skip":  1,
+    "main":  1,
+    "footer":  1,
+    "headerCta":  0,
+    "delay":  true,
+    "container":  {
+                      "x":  0,
+                      "y":  0,
+                      "w":  360,
+                      "h":  56
+                  },
+    "headerStyles":  [
+                         {
+                             "text":  "공채벨\n    \n      채용공고",
+                             "color":  "rgb(29, 29, 31)",
+                             "bg":  "oklab(0.999994 0.0000455678 0.0000200868 / 0.88)",
+                             "border":  "rgb(29, 29, 31) rgb(29, 29, 31) rgb(232, 232, 237)",
+                             "outline":  "rgb(29, 29, 31) none 3px",
+                             "shadow":  "none",
+                             "radius":  "0px",
+                             "rect":  {
+                                          "x":  0,
+                                          "y":  0,
+                                          "w":  360,
+                                          "h":  57
+                                      },
+                             "contrast":  null
+                         }
+                     ],
+    "footerStyles":  [
+                         {
+                             "text":  "데이터 기준 2026.11.22 08:10 KST\n      수집 지연\n    \n",
+                             "color":  "rgb(110, 110, 115)",
+                             "bg":  "rgb(245, 245, 247)",
+                             "border":  "rgb(232, 232, 237) rgb(110, 110, 115) rgb(110, 110, 115)",
+                             "outline":  "rgb(110, 110, 115) none 3px",
+                             "shadow":  "none",
+                             "radius":  "0px",
+                             "rect":  {
+                                          "x":  0,
+                                          "y":  1181.28125,
+                                          "w":  360,
+                                          "h":  228.03125
+                                      },
+                             "contrast":  4.66
+                         }
+                     ],
+    "primary":  [
+                    {
+                        "text":  "검색",
+                        "color":  "rgb(255, 255, 255)",
+                        "bg":  "rgb(0, 113, 227)",
+                        "border":  "rgb(0, 113, 227)",
+                        "outline":  "rgb(255, 255, 255) none 3px",
+                        "shadow":  "none",
+                        "radius":  "980px",
+                        "rect":  {
+                                     "x":  199.28125,
+                                     "y":  647.9375,
+                                     "w":  55.484375,
+                                     "h":  36
+                                 },
+                        "contrast":  4.7
+                    }
+                ],
+    "success":  [
+                    {
+                        "text":  "진행 중",
+                        "color":  "rgb(255, 255, 255)",
+                        "bg":  "rgb(21, 128, 61)",
+                        "border":  "rgb(255, 255, 255)",
+                        "outline":  "rgb(255, 255, 255) none 3px",
+                        "shadow":  "none",
+                        "radius":  "980px",
+                        "rect":  {
+                                     "x":  280.40625,
+                                     "y":  804.96875,
+                                     "w":  50.59375,
+                                     "h":  20.0625
+                                 },
+                        "contrast":  5.02
+                    }
+                ],
+    "input":  [
+                  {
+                      "text":  "전체 직무\n          정보통신·전기전자·경영회계사무·환경에너지안전분야통합직",
+                      "color":  "rgb(29, 29, 31)",
+                      "bg":  "rgb(255, 255, 255)",
+                      "border":  "rgb(210, 210, 215)",
+                      "outline":  "rgb(29, 29, 31) none 3px",
+                      "shadow":  "none",
+                      "radius":  "8px",
+                      "rect":  {
+                                   "x":  29,
+                                   "y":  285.90625,
+                                   "w":  302,
+                                   "h":  36
+                               },
+                      "contrast":  16.83
+                  },
+                  {
+                      "text":  "전체 지역\n          서울·부산·대구·인천·광주·대전·울산·세종·경기·강원",
+                      "color":  "rgb(29, 29, 31)",
+                      "bg":  "rgb(255, 255, 255)",
+                      "border":  "rgb(210, 210, 215)",
+                      "outline":  "rgb(29, 29, 31) none 3px",
+                      "shadow":  "none",
+                      "radius":  "8px",
+                      "rect":  {
+                                   "x":  29,
+                                   "y":  358.3125,
+                                   "w":  302,
+                                   "h":  36
+                               },
+                      "contrast":  16.83
+                  },
+                  {
+                      "text":  "전체 형태\n          정규직·무기계약직·비정규직·청년인턴체험형·청년인턴채용",
+                      "color":  "rgb(29, 29, 31)",
+                      "bg":  "rgb(255, 255, 255)",
+                      "border":  "rgb(210, 210, 215)",
+                      "outline":  "rgb(29, 29, 31) none 3px",
+                      "shadow":  "none",
+                      "radius":  "8px",
+                      "rect":  {
+                                   "x":  29,
+                                   "y":  430.71875,
+                                   "w":  302,
+                                   "h":  36
+                               },
+                      "contrast":  16.83
+                  }
+              ],
+    "badges":  [
+                   {
+                       "text":  "정보통신·전기전자·경영회계사무·환경에너지안전분야통합직무장문검증",
+                       "color":  "rgb(0, 0, 0)",
+                       "bg":  "rgb(245, 245, 247)",
+                       "border":  "rgb(0, 0, 0)",
+                       "outline":  "rgb(0, 0, 0) none 3px",
+                       "shadow":  "none",
+                       "radius":  "980px",
+                       "rect":  {
+                                    "x":  29,
+                                    "y":  926.90625,
+                                    "w":  302,
+                                    "h":  37.90625
+                                },
+                       "contrast":  19.29
+                   },
+                   {
+                       "text":  "서울·부산·대구·인천·광주·대전·울산·세종·경기·강원·충북·충남·전북·전남·경북·",
+                       "color":  "rgb(0, 0, 0)",
+                       "bg":  "rgb(245, 245, 247)",
+                       "border":  "rgb(0, 0, 0)",
+                       "outline":  "rgb(0, 0, 0) none 3px",
+                       "shadow":  "none",
+                       "radius":  "980px",
+                       "rect":  {
+                                    "x":  29,
+                                    "y":  968.8125,
+                                    "w":  302,
+                                    "h":  37.90625
+                                },
+                       "contrast":  19.29
+                   },
+                   {
+                       "text":  "정규직·무기계약직·비정규직·청년인턴체험형·청년인턴채용형",
+                       "color":  "rgb(0, 0, 0)",
+                       "bg":  "rgb(245, 245, 247)",
+                       "border":  "rgb(0, 0, 0)",
+                       "outline":  "rgb(0, 0, 0) none 3px",
+                       "shadow":  "none",
+                       "radius":  "980px",
+                       "rect":  {
+                                    "x":  29,
+                                    "y":  1010.71875,
+                                    "w":  298.28125,
+                                    "h":  23.40625
+                                },
+                       "contrast":  19.29
+                   }
+               ],
+    "overflow":  [
+
+                 ]
+}

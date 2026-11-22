@@ -1,0 +1,184 @@
+﻿[
+    {
+        "name":  "kr.gongchae.bell.alerts.AlertDeliveryIntegrationTest",
+        "tests":  10,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    },
+    {
+        "name":  "kr.gongchae.bell.alerts.AlertDispatchPropertiesTest",
+        "tests":  3,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    },
+    {
+        "name":  "kr.gongchae.bell.alerts.AlertPayloadBuilderTest",
+        "tests":  2,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    },
+    {
+        "name":  "kr.gongchae.bell.alerts.AlertsDisabledIntegrationTest",
+        "tests":  1,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    },
+    {
+        "name":  "kr.gongchae.bell.alerts.AlertsSecurityTest",
+        "tests":  5,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    },
+    {
+        "name":  "kr.gongchae.bell.alerts.DeliveryLedgerTest",
+        "tests":  21,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    },
+    {
+        "name":  "kr.gongchae.bell.alerts.ErasureJournalTest",
+        "tests":  9,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    },
+    {
+        "name":  "kr.gongchae.bell.alerts.ErasureReapplyCommandWiringTest",
+        "tests":  1,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    },
+    {
+        "name":  "kr.gongchae.bell.alerts.SubscriptionFlowIntegrationTest",
+        "tests":  15,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    },
+    {
+        "name":  "kr.gongchae.bell.alerts.TransportTest",
+        "tests":  5,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    },
+    {
+        "name":  "kr.gongchae.bell.catalog.CatalogIntegrationTest",
+        "tests":  6,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    },
+    {
+        "name":  "kr.gongchae.bell.catalog.CatalogUnitTest",
+        "tests":  6,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    },
+    {
+        "name":  "kr.gongchae.bell.DeploymentConfigIntegrationTest",
+        "tests":  2,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    },
+    {
+        "name":  "kr.gongchae.bell.FoundationIntegrationTest",
+        "tests":  4,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    },
+    {
+        "name":  "kr.gongchae.bell.ingestion.ListResponseParserTest",
+        "tests":  8,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    },
+    {
+        "name":  "kr.gongchae.bell.ingestion.PostingIngestorIntegrationTest",
+        "tests":  20,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    },
+    {
+        "name":  "kr.gongchae.bell.ingestion.runtime.BackfillCommandIntegrationTest",
+        "tests":  1,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    },
+    {
+        "name":  "kr.gongchae.bell.ingestion.runtime.BackfillRangeTest",
+        "tests":  1,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    },
+    {
+        "name":  "kr.gongchae.bell.ingestion.runtime.BackfillRuntimeTest",
+        "tests":  14,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    },
+    {
+        "name":  "kr.gongchae.bell.ingestion.runtime.CollectorPropertiesTest",
+        "tests":  3,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    },
+    {
+        "name":  "kr.gongchae.bell.ingestion.runtime.CollectorWiringIntegrationTest",
+        "tests":  2,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    },
+    {
+        "name":  "kr.gongchae.bell.ingestion.runtime.OfficialFixtureIntegrationTest",
+        "tests":  3,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    },
+    {
+        "name":  "kr.gongchae.bell.ingestion.runtime.RecruitmentClientTest",
+        "tests":  10,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    },
+    {
+        "name":  "kr.gongchae.bell.ingestion.runtime.RuntimeDatabaseTest",
+        "tests":  18,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    },
+    {
+        "name":  "kr.gongchae.bell.ops.HeartbeatTest",
+        "tests":  4,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    },
+    {
+        "name":  "kr.gongchae.bell.ops.MonitoringContractIntegrationTest",
+        "tests":  2,
+        "failures":  0,
+        "errors":  0,
+        "skipped":  0
+    }
+]
