@@ -39,7 +39,7 @@ sudo chown -R ubuntu:ubuntu /opt/gongchae-bell
 sudo chown -R 1000:1000 /var/lib/gongchae-bell/erasure
 sudo chmod 0750 /opt/gongchae-bell /opt/gongchae-bell/deploy/state /var/lib/gongchae-bell/erasure
 ```
-- M2 알림(`ALERTS_ENABLED=true`)을 처음 켜기 전에는 운영자가 빈 해지 대장 파일을 미리 생성해야 한다(`sudo install -o 1000 -g 1000 -m 600 /dev/null /var/lib/gongchae-bell/erasure/erasure.log && sync`). 앱은 이 파일을 자동 생성하지 않으며, `ALERTS_ENABLED=true` 상태에서 파일이 없으면 `ALERTS_ERASURE_LOG_MISSING`으로 시작하지 않는다. (`ALERTS_ENABLED=false` 상태에서는 디렉터리 준비만으로 기동된다.)
+- M2 알림(`ALERTS_ENABLED=true`)을 처음 켜기 전에 해지 대장을 준비해야 한다. 준비는 **감독 정비 작업(앱 정지·권한·보존 사본 확인, 아직 미구현)**이 파일 도구 `erasure-journal init`으로 한다([알림 운영 §해지 대장](ops/alerts.md#해지-대장과-복원-adr-0013)). 그 작업이 병합·검수되기 전에는 운영에서 대장을 만들지 않으며, 빈 파일도 손으로 만들지 않는다(빈 파일은 `init`이 거부한다). 앱은 이 파일을 자동 생성하지 않으며, `ALERTS_ENABLED=true` 상태에서 파일이 없으면 `ALERTS_ERASURE_LOG_MISSING`으로 시작하지 않는다. (`ALERTS_ENABLED=false` 상태에서는 디렉터리 준비만으로 기동된다.)
 
 ### 1.4 GitHub Secrets / Variables / GHCR 설정
 1. Repository / `production` Environment **Secrets** (값은 GitHub Secrets에만 저장, 로그·문서·코드 출력 금지):

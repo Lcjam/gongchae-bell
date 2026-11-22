@@ -11,7 +11,7 @@
 - Discord: 국외 처리와 법적 관계(위탁인지, 독립 처리자인지)를 확정한다.
 - 브라우저: `Referrer-Policy: no-referrer` 페이지의 POST가 보내는 `Origin`을 실제 HTTPS와 Firefox·Safari에서 확인한다(지금은 Chromium 루프백 관측뿐이다).
 - 프록시: Caddy만 `X-Forwarded-For`를 넘기고, 외부 요청이 그 헤더를 직접 넣지 못한다. 접근 로그에서 쿼리 `t`를 지운다.
-- 해지 대장: 처음 켜기 전에 운영자가 빈 파일을 만든다(예: `install -m 600 /dev/null <경로>` 뒤 `sync`). 앱은 대장을 만들지 않는다. 알림을 켰을 때 그 경로에 파일이 없으면 `ALERTS_ERASURE_LOG_MISSING`으로 시작하지 않는다. 그 호스트 파일이 blue·green 두 컨테이너에 같은 파일로 바인드되고 restic 백업에 들어가는지 확인한다. Docker는 없는 호스트 경로를 디렉터리로 만들기 때문에, 파일을 먼저 만들어야 한다. 대장 정리 시점은 아래 "해지 대장"을 본다.
+- 해지 대장: 처음 켜기 전에 준비한다. 준비는 감독 정비 작업(아직 미구현)이 아래 파일 도구 `init`으로 하며, 그 작업이 병합·검수되기 전에는 운영에서 만들지 않는다. 빈 파일을 손으로 만들지 않는다(`init`이 거부한다). 앱은 대장을 만들지 않는다. 알림을 켰을 때 그 경로에 파일이 없으면 `ALERTS_ERASURE_LOG_MISSING`으로 시작하지 않는다. 그 호스트 파일이 blue·green 두 컨테이너에 같은 파일로 바인드되고 restic 백업에 들어가는지 확인한다. Docker는 없는 호스트 경로를 디렉터리로 만들기 때문에, 파일이 먼저 있어야 한다. 대장 정리 시점은 아래 "해지 대장"을 본다.
 - 백업 사본(OCI·NAS·PC)이 실제로 14일 뒤 지워지는지 확인한다.
 
 ## 설정 (값은 환경변수·GitHub Secrets에만)
@@ -22,7 +22,7 @@
 | `ALERTS_TOKEN_KEY` | 관리·해지 HMAC 키. base64, 32바이트 이상 |
 | `ALERTS_HMAC_KEY` | 목적지·요청 제한 HMAC 키. 위와 다른 값, base64, 32바이트 이상 |
 | `ALERTS_WEBHOOK_KEY`, `ALERTS_WEBHOOK_KEY_ID` | 웹훅 URL AES-256-GCM 키(base64, 정확히 32바이트)와 그 ID(`[A-Za-z0-9_-]{1,40}`) |
-| `ALERTS_ERASURE_LOG` | 해지 대장 파일 경로. DB 볼륨과 다른 호스트 디렉터리. 켜기 전에 빈 파일로 준비해 둔다 |
+| `ALERTS_ERASURE_LOG` | 해지 대장 파일 경로. DB 볼륨과 다른 호스트 디렉터리. 켜기 전에 감독 작업이 `erasure-journal init`으로 준비한다 |
 | `RESEND_API_KEY`, `ALERTS_MAIL_FROM` | Resend API 키, 발신 주소(인증된 도메인) |
 | `HEARTBEAT_DIGEST_URL` | 일일 이메일 묶음(`DIGEST`) 슬롯 선점 완료 후 GET 핑 URL (선택, 비어 있으면 끔) |
 | `ALERTS_WORKER_CONCURRENCY`, `ALERTS_BATCH_SIZE`, `ALERTS_SCHEDULER_ENABLED` | 비동기 워커 동시성(기본 `2`, 최대 `4`), 1회 선점 배치(기본 `20`), 스케줄러 켜기(기본 `true`) |
@@ -63,6 +63,15 @@
 ## 해지 대장과 복원 (ADR-0013)
 
 - 해지하면 구독 행 잠금 아래에서 `<구독 UUID>\t<UTC 시각>` 한 줄을 쓰고, 파일과 디렉터리를 fsync한다. 디렉터리 fsync는 POSIX에서만 하며, 매번 파일 잠금을 쥔 채로 한다. 그 뒤에 행을 지운다. 대장 쓰기가 실패하면(파일이 없거나 fsync 실패) 해지 요청이 실패하고 아무것도 지우지 않는다.
+- **파일 도구** `java -jar gongchae-bell.jar erasure-journal <명령> <파일>` (#17, [합의](../../collab/2026-11-22-recovery-barrier/final.md)). `main`의 첫 인자로 갈라져 Spring·DB 없이 돈다. 파서와 표지 규칙은 앱과 같은 코드다.
+  - `version`은 `ERASURE_TOOL v1`을 출력한다. `check`는 잠금 없이 읽기만 하는 strict 검사다(읽기 전용 사본도 된다). 문법만 보며 디스크 반영은 보장하지 않는다.
+  - `verify`는 대장 L을 앱과 같은 OS 잠금 아래 strict 검사하고, 소유자·그룹·권한 계약을 확인하고, 파일과 디렉터리를 fsync한다.
+  - `init`은 파일이 없을 때만 새 표지 한 줄짜리 파일을 만든다(`0640`, 디렉터리와 같은 소유자·그룹). 이미 표지 한 줄이면 `ERASURE_INIT_ALREADY`다. 빈 파일, 다른 내용, 손상된 파일은 거부한다.
+  - `mark`는 마지막 줄이 해지 줄일 때 새 표지 한 줄을 붙인다. 기존 바이트·소유자·그룹·권한은 그대로다. 마지막 줄이 표지면 `ERASURE_MARK_NOOP`이다. 없거나 빈 대장은 거부한다(첫 표지는 `init`의 일이다).
+  - 쓰기 순서: 같은 디렉터리의 임시 파일에 전부 쓰기 → 다시 읽어 strict 검사 → 권한·소유자·그룹 확인 → 파일 fsync → 게시(`init`은 기존 파일을 덮지 않는 `link`, `mark`는 `rename`) → 디렉터리 fsync → 다시 열어 바이트 확인. NOOP·ALREADY·`verify`도 파일·디렉터리 fsync와 권한 확인을 한다. 디렉터리 fsync가 실패한 게시는 같은 명령을 다시 실행하면 마저 끝난다.
+  - 출력은 고정 코드와 숫자 한 줄뿐이다. UUID, 대장 내용, 경로, 환경값, 예외 원문은 출력하지 않는다. 종료 코드는 `0` 완료(NOOP·ALREADY 포함), `2` 사용법, `3` 거부(도구가 파일을 바꾸지 않음), `4` I/O 실패다. `…_UNCONFIRMED`는 새 파일은 게시됐지만 디스크 반영을 확인하지 못했다는 뜻이며, 같은 명령을 다시 실행한다. 다른 프로세스가 잠금을 쥐고 있으면 기다리지 않고 `ERASURE_TOOL_LOCK_BUSY`로 거부한다.
+  - Linux POSIX 전용이다. 파일의 소유자·그룹은 디렉터리와 같아야 하고 모드는 `0600`이나 `0640`이어야 한다. root로 실행하면 `ERASURE_TOOL_OWNER_MISMATCH`로 거부한다.
+  - **하지 않는 일**: 앱과 수동 writer의 정지, DB 연결 0, 보존 백업 사본 확인. 옛 파일에 쥔 잠금으로 교체 뒤의 writer를 막지도 못한다. 이 조건은 다음 감독 작업이 맡는다. **감독 작업이 병합·검수되기 전에는 운영에서 `init`·`mark`를 실행하지 않는다.**
 - 복원 (전체 단계와 복사·정리 명령은 [백업과 복구 §7](backup-restore.md#7-격리-복원-리허설-및-장애-복구-절차-adr-0012--adr-0013--fail-closed)):
   1. **운영 DB에 직접 덮어쓰지 않고** 전용 일회용 `postgres:17` 격리 DB에 `ALERTS_ENABLED=false`, `COLLECTOR_ENABLED=false`, 외부 연결 차단(`--internal`) 상태로 덤프를 복원한다. (운영 `/opt/gongchae-bell/.env`를 통째로 `source`하지 않고, 이미지·태그는 `APP_IMAGE` 1줄 추출 + 배포 상태 파일에서 읽는다.)
   2. OCI 호스트에는 Java나 `/app/gongchae-bell.jar`가 없으므로 **앱 컨테이너(`-u 1000:1000`)로만** 실행한다. 적용할 대장 L 1개만 담은 `$RESTORE_WORK/reapply`(`sudo install`로 `1000:1000` `0700`/`0600`)를 `:rw`로, 복원한 덤프와 같은 snapshot의 동봉 대장 B 1개만 담은 `$RESTORE_WORK/bundle`(`0500`/`0400`)을 `:ro`로 마운트해 격리 DB에 재적용한다(덤프·메타파일은 마운트하지 않는다):
@@ -92,7 +101,7 @@
      - **실제 장애 복구 전환 시에는** 리허설 사본 재적용 이후 전환 직전까지 웹(`/subscriptions/unsubscribe*`)을 통해 들어온 추가 해지를 반영하기 위해, `app-blue`·`app-green` **모든 운영 앱 컨테이너를 중지한 뒤** `/var/lib/gongchae-bell/erasure:/erasure:rw`를 직접 마운트해 멱등 재적용과 0건 대조를 1회 더 통과해야 한다.
      - 실제 발송 재개(`ALERTS_ENABLED=true`) 전에는 호스트 대장 보존·배치(`1000:1000`, `0600`), 키 정합성(웹훅 키 ID·HMAC·토큰 키), 실운영 DB 전환 완료, 정리(`sudo rm -rf "$RESTORE_WORK"`)를 별도로 확인한다.
 - 아래 경우 명령은 실패한다. 완료 로그가 없고, 종료 코드가 0이 아니며, 아무것도 지우지 않는다. 운영자가 원인을 확인한 뒤 다시 실행한다. 그동안 알림을 켜지 않으며 **missing·손상 대장을 빈 대장으로 대체해 통과시키지 않는다.** (단, 복원 DB `subscription` 행 수 `0` **AND** `backup-meta.txt` `erasure_included=false` **AND** M2 미활성 이력이 모두 확인되는 M1 전용 백업만 대장 재적용을 건너뛰며, 대장 파일이 존재하면 `0`건이어도 손상 검사를 건너뛰지 않는다.)
-  - 경로에 파일이 없음(경로 오타, 대장을 되살리지 않음, 디렉터리를 가리킴): `ERASURE_LOG_MISSING`. 빈 대장으로 보지 않는다. 해지가 한 번도 없었던 경우에도 준비해 둔 빈 파일이 백업에 있어야 한다.
+  - 경로에 파일이 없음(경로 오타, 대장을 되살리지 않음, 디렉터리를 가리킴): `ERASURE_LOG_MISSING`. 빈 대장으로 보지 않는다. 해지가 한 번도 없었던 경우에도 준비해 둔 대장 파일이 백업에 있어야 한다.
   - 대장에 잘리거나 형식이 틀린 줄: `ERASURE_LOG_TORN_LAST_LINE` 또는 `ERASURE_LOG_BAD_LINE_<줄 번호>`.
   - B 인자가 없거나 B 파일이 없음: `ERASURE_BUNDLE_REQUIRED`, `ERASURE_BUNDLE_MISSING`. B의 잘린·틀린 줄은 `ERASURE_BUNDLE_TORN_LAST_LINE`, `ERASURE_BUNDLE_BAD_LINE_<줄 번호>`.
   - 같은 표지가 한 파일에 두 번: `ERASURE_LOG_DUPLICATE_MARKER`, `ERASURE_BUNDLE_DUPLICATE_MARKER`.
