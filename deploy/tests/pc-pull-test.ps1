@@ -53,7 +53,12 @@ $DAY = 86400
 $WINDOW = 14 * $DAY
 $BASE_NOW = 1800000000L
 
-$baseTemp = if (-not [string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath() }
+# Prefer $env:LOCALAPPDATA\Temp (full long path without 8.3 RUNNER~1 on GitHub Actions windows-latest, on C: NTFS)
+$baseTemp = if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA) -and (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA "Temp"))) {
+  Join-Path $env:LOCALAPPDATA "Temp"
+} else {
+  [System.IO.Path]::GetTempPath()
+}
 $TMP_ROOT = Join-Path $baseTemp ("gongchae-pc-pull-test-" + [Guid]::NewGuid().ToString("N").Substring(0, 10))
 New-Item -ItemType Directory -Path $TMP_ROOT -Force | Out-Null
 
@@ -120,7 +125,7 @@ function Set-ReadOnlyTreeAcl {
   }
   $script:ReadOnlyDirsToRestore += $DirPath
   $meSid = "*" + [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-  $out = & icacls.exe $DirPath /deny "${meSid}:(OI)(CI)(WD,AD,DE,DC)" 2>&1
+  $out = & icacls.exe $DirPath /T /deny "${meSid}:(OI)(CI)(WD,AD,DE,DC)" 2>&1
   if ($LASTEXITCODE -ne 0) { throw "icacls deny write failed on $DirPath : $out" }
 }
 
@@ -132,7 +137,7 @@ function Restore-WritableTreeAcl {
     return
   }
   $meSid = "*" + [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-  $null = & icacls.exe $DirPath /remove:d $meSid 2>&1
+  $null = & icacls.exe $DirPath /T /remove:d $meSid 2>&1
 }
 
 function Invoke-ResticDirect {
