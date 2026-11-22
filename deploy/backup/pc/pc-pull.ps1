@@ -389,6 +389,14 @@ function Assert-SafeLocalPath {
   if (Test-HasRemoteBackendScheme $expanded) {
     Fail-Run "${ErrorPrefix}_MUST_BE_LOCAL $Role must be a local filesystem path, refusing remote/UNC target: $expanded"
   }
+  if ($env:OS -eq "Windows_NT") {
+    # Check raw expanded segments BEFORE GetFullPath (PS 7/.NET GetFullPath expands existing 8.3 aliases).
+    foreach ($rawSeg in ($expanded -split '[\\/]')) {
+      if ($rawSeg -match '~[0-9]+(\.[^.]+)?$') {
+        Fail-Run "${ErrorPrefix}_SHORT_NAME_FORBIDDEN refusing 8.3 short-name path component '$rawSeg' for $Role ($expanded); use full long path"
+      }
+    }
+  }
   $norm = ""
   try {
     $norm = Normalize-LocalPath $expanded
