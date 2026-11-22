@@ -31,6 +31,8 @@ RECREATE_CMD="${DRILL_RECREATE_CMD:-}"
 ALLOW_RECREATE_PROMETHEUS="false"
 LOCK_WAIT_SEC="${DRILL_LOCK_WAIT_SEC:-30}"
 CMD_TIMEOUT_SEC="${DRILL_CMD_TIMEOUT_SEC:-20}"
+CMD_KILL_AFTER_SEC="${DRILL_CMD_KILL_AFTER_SEC:-5}"
+RECREATE_TIMEOUT_SEC="${DRILL_RECREATE_TIMEOUT_SEC:-90}"
 
 # Real production thresholds and timing guardrails (never shortened to fake rule passage).
 readonly BUDGET_INJECT_VALUE=500
@@ -51,9 +53,16 @@ LOCK_DIR_HELD=0
 LOCK_FILE=""
 OWNER_FILE=""
 MUTATIONS_STARTED=0
+RESTORE_ATTEMPTED=0
 RESTORE_DONE=0
 SUPERVISOR_SIGNAL=""
+SUPERVISOR_PID=""
+SUPERVISOR_START_TIME=""
 WORKER_PID=""
+WORKER_START_TIME=""
+WORKER_LOCK_FILE=""
+WORKER_REVOKED_FILE=""
+ATTEMPT_DIR=""
 RUN_ID=""
 DRILL_PROM_SHA256=""
 DRILL_RULES_SHA256=""
@@ -115,6 +124,12 @@ while [[ $# -gt 0 ]]; do
     --recreate-cmd) RECREATE_CMD="$2"; shift 2 ;;
     --allow-recreate-prometheus) ALLOW_RECREATE_PROMETHEUS="true"; shift ;;
     --lock-wait-sec) LOCK_WAIT_SEC="$2"; shift 2 ;;
+    --run-id) RUN_ID="$2"; shift 2 ;;
+    --attempt-dir) ATTEMPT_DIR="$2"; shift 2 ;;
+    --supervisor-pid) SUPERVISOR_PID="$2"; shift 2 ;;
+    --supervisor-start-time) SUPERVISOR_START_TIME="$2"; shift 2 ;;
+    --worker-lock-file) WORKER_LOCK_FILE="$2"; shift 2 ;;
+    --worker-revoked-file) WORKER_REVOKED_FILE="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) printf 'Unknown argument: %s\n' "$1" >&2; usage >&2; exit 2 ;;
   esac
@@ -159,7 +174,142 @@ docker_host_path() {
 run_bounded() {
   local secs="$1"
   shift
-  timeout "$secs" "$@"
+  # Reset INT/TERM/HUP to default inside a subshell before exec'ing timeout so
+  # restore's `trap '' INT TERM HUP` (SIG_IGN) is never inherited by bounded children.
+  # Close deploy-root lock FD 9 so bounded children can never retain the root lock.
+  # GNU timeout (without --foreground) puts the child in its own process group, so
+  # `-k` escalates to SIGKILL for the entire child process group (child + descendants).
+  (
+    trap - INT TERM HUP
+    exec timeout -k "$CMD_KILL_AFTER_SEC" "$secs" "$@" 9>&-
+  )
+}
+
+# Returns: 0 if EXPORTER_NAME exists, 1 if docker ps succeeded and it is absent, 2 on error/timeout.
+exporter_container_exists() {
+  local names
+  names="$(run_bounded "$CMD_TIMEOUT_SEC" docker ps -a --format '{{.Names}}')" || return 2
+  if printf '%s\n' "$names" | grep -Fxq "$EXPORTER_NAME"; then
+    return 0
+  fi
+  return 1
+}
+
+read_proc_start_time() {
+  local pid="$1"
+  [[ -n "$pid" && "$pid" =~ ^[0-9]+$ && -r "/proc/${pid}/stat" ]] || return 1
+  local raw rest
+  raw="$(cat "/proc/${pid}/stat" 2>/dev/null)" || return 1
+  rest="${raw##*) }"
+  [[ "$rest" != "$raw" ]] || return 1
+  awk '{ if (NF >= 20) print $20; else exit 1 }' <<< "$rest"
+}
+
+proc_cmdline_has_worker_run_id() {
+  local pid="$1"
+  local run_id="$2"
+  [[ -n "$pid" && "$pid" =~ ^[0-9]+$ && -n "$run_id" && -r "/proc/${pid}/cmdline" ]] || return 1
+  cat "/proc/${pid}/cmdline" 2>/dev/null | tr '\0' '\n' | awk -v rid="$run_id" '
+    $0 == "_worker" { has_worker = 1 }
+    prev == "--run-id" && $0 == rid { has_run_id = 1 }
+    { prev = $0 }
+    END { exit((has_worker && has_run_id) ? 0 : 1) }
+  '
+}
+
+proc_cmdline_has_supervisor_run() {
+  local pid="$1"
+  [[ -n "$pid" && "$pid" =~ ^[0-9]+$ && -r "/proc/${pid}/cmdline" ]] || return 1
+  cat "/proc/${pid}/cmdline" 2>/dev/null | tr '\0' '\n' | awk '
+    $0 == "run" { found = 1 }
+    END { exit(found ? 0 : 1) }
+  '
+}
+
+is_verified_worker_pid() {
+  local pid="$1"
+  local run_id="$2"
+  local expected_start="${3:-}"
+  [[ -n "$pid" && "$pid" =~ ^[0-9]+$ && -n "$run_id" ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  proc_cmdline_has_worker_run_id "$pid" "$run_id" || return 1
+  if [[ -n "$expected_start" ]]; then
+    local cur_start
+    cur_start="$(read_proc_start_time "$pid" 2>/dev/null || true)"
+    [[ -n "$cur_start" && "$cur_start" == "$expected_start" ]] || return 1
+  fi
+  return 0
+}
+
+is_verified_supervisor_pid() {
+  local pid="$1"
+  local expected_start="${2:-}"
+  [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  proc_cmdline_has_supervisor_run "$pid" || return 1
+  if [[ -n "$expected_start" ]]; then
+    local cur_start
+    cur_start="$(read_proc_start_time "$pid" 2>/dev/null || true)"
+    [[ -n "$cur_start" && "$cur_start" == "$expected_start" ]] || return 1
+  fi
+  return 0
+}
+
+list_child_pids() {
+  local ppid="$1"
+  local p raw rest c_ppid
+  [[ -n "$ppid" && "$ppid" =~ ^[0-9]+$ ]] || return 0
+  for p in /proc/[0-9]*; do
+    p="${p#/proc/}"
+    [[ "$p" =~ ^[0-9]+$ ]] || continue
+    [[ -r "/proc/${p}/stat" ]] || continue
+    raw="$(cat "/proc/${p}/stat" 2>/dev/null || true)"
+    rest="${raw##*) }"
+    [[ "$rest" != "$raw" ]] || continue
+    c_ppid="$(awk '{ print $2 }' <<< "$rest" 2>/dev/null || true)"
+    if [[ "$c_ppid" == "$ppid" ]]; then
+      printf '%s\n' "$p"
+    fi
+  done
+}
+
+list_descendant_pids() {
+  local parent="$1"
+  local depth="${2:-0}"
+  [[ "$depth" -lt 8 ]] || return 0
+  local c
+  while IFS= read -r c; do
+    [[ -n "$c" && "$c" != "$parent" ]] || continue
+    list_descendant_pids "$c" $(( depth + 1 ))
+    printf '%s\n' "$c"
+  done < <(list_child_pids "$parent")
+}
+
+# Returns 0 only if no process holds the worker lease lock (Linux flock) and no /proc _worker matches RUN_ID.
+is_worker_lease_free() {
+  local lock_path="$1"
+  local run_id="$2"
+  if [[ -n "$lock_path" ]] && command -v flock >/dev/null 2>&1; then
+    if [[ -f "$lock_path" ]]; then
+      if ! (
+        exec 7>"$lock_path"
+        flock -n 7
+      ) 2>/dev/null; then
+        return 1
+      fi
+    fi
+  fi
+  if [[ -n "$run_id" ]]; then
+    local p
+    for p in /proc/[0-9]*; do
+      p="${p#/proc/}"
+      [[ "$p" =~ ^[0-9]+$ ]] || continue
+      if proc_cmdline_has_worker_run_id "$p" "$run_id"; then
+        return 1
+      fi
+    done
+  fi
+  return 0
 }
 
 host_sha256() {
@@ -190,6 +340,15 @@ acquire_root_lock() {
         LOCK_DIR_HELD=1
         break
       fi
+      # Reap stale lockdir only if its recorded PID is confirmed dead (e.g. after supervisor SIGKILL on Windows).
+      if [[ -f "${ldir}/pid" ]]; then
+        local holder_pid
+        holder_pid="$(cat "${ldir}/pid" 2>/dev/null || true)"
+        if [[ -n "$holder_pid" && "$holder_pid" =~ ^[0-9]+$ ]] && ! kill -0 "$holder_pid" 2>/dev/null; then
+          rm -rf "$ldir" 2>/dev/null || true
+          continue
+        fi
+      fi
       if [[ "$mode" == "nonblock" || $(date +%s) -ge $deadline ]]; then
         fail "DRILL_LOCK_BUSY: another drill run or restore holds ${ldir}"
       fi
@@ -216,11 +375,18 @@ RUN_ID=${RUN_ID}
 ROOT_DIR=${ROOT_DIR}
 BACKUP_DIR=${BACKUP_DIR}
 WORK_DIR=${WORK_DIR}
+ATTEMPT_DIR=${ATTEMPT_DIR}
 EXPORTER_NAME=${EXPORTER_NAME}
 EXPECTED_PROM_SHA256=${EXPECTED_PROM_SHA256}
 EXPECTED_RULES_SHA256=${EXPECTED_RULES_SHA256}
 DRILL_PROM_SHA256=${DRILL_PROM_SHA256}
 DRILL_RULES_SHA256=${DRILL_RULES_SHA256}
+SUPERVISOR_PID=${SUPERVISOR_PID}
+SUPERVISOR_START_TIME=${SUPERVISOR_START_TIME}
+WORKER_PID=${WORKER_PID}
+WORKER_START_TIME=${WORKER_START_TIME}
+WORKER_LOCK_FILE=${WORKER_LOCK_FILE}
+WORKER_REVOKED_FILE=${WORKER_REVOKED_FILE}
 STATE=${state}
 EOF
 )"
@@ -494,6 +660,82 @@ verify_expected_hashes() {
   return 0
 }
 
+# Returns: 0 if any gongchae-drill series has value > 0, 1 if clean (all 0 or absent), 2 on query error.
+prom_has_nonzero_drill_series() {
+  local q1 q2
+  q1="$(prom_api_get "/api/v1/query?query=collector_api_attempts_today%7Bjob%3D%22gongchae-drill%22%7D" 2>/dev/null)" || return 2
+  q2="$(prom_api_get "/api/v1/query?query=collector_regular_incomplete_consecutive%7Bjob%3D%22gongchae-drill%22%7D" 2>/dev/null)" || return 2
+  "$PYTHON_BIN" - "$q1" "$q2" <<'PY'
+import json, sys
+for raw in sys.argv[1:]:
+    data = json.loads(raw)
+    if data.get("status") != "success":
+        raise SystemExit(2)
+    for item in data.get("data", {}).get("result", []):
+        val = float(item["value"][1])
+        if val > 0.0:
+            raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+wait_for_drill_zero_baseline() {
+  local timeout_sec="${1:-60}"
+  local deadline=$(( $(date +%s) + timeout_sec ))
+  while [[ $(date +%s) -lt $deadline ]]; do
+    local q1 q2
+    q1="$(prom_api_get "/api/v1/query?query=collector_api_attempts_today%7Bjob%3D%22gongchae-drill%22%7D" 2>/dev/null || true)"
+    q2="$(prom_api_get "/api/v1/query?query=collector_regular_incomplete_consecutive%7Bjob%3D%22gongchae-drill%22%7D" 2>/dev/null || true)"
+    if [[ -n "$q1" && -n "$q2" ]] && "$PYTHON_BIN" - "$q1" "$q2" <<'PY'
+import json, sys
+for raw in sys.argv[1:]:
+    data = json.loads(raw)
+    if data.get("status") != "success":
+        raise SystemExit(1)
+    res = data.get("data", {}).get("result", [])
+    if len(res) != 1 or float(res[0]["value"][1]) != 0.0:
+        raise SystemExit(1)
+raise SystemExit(0)
+PY
+    then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+prom_rule_group_last_eval() {
+  local rules_json
+  rules_json="$(prom_api_get "/api/v1/rules?type=alert" 2>/dev/null)" || return 1
+  "$PYTHON_BIN" - "$rules_json" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+if data.get("status") != "success":
+    raise SystemExit(1)
+for g in data.get("data", {}).get("groups", []):
+    if g.get("name") == "gongchae":
+        print(g.get("lastEvaluation", ""))
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+wait_for_prom_rule_eval_after() {
+  local prev_eval="$1"
+  local timeout_sec="${2:-60}"
+  local deadline=$(( $(date +%s) + timeout_sec ))
+  while [[ $(date +%s) -lt $deadline ]]; do
+    local cur_eval
+    cur_eval="$(prom_rule_group_last_eval 2>/dev/null || true)"
+    if [[ -n "$cur_eval" && "$cur_eval" != 0001-01-01* && "$cur_eval" != "$prev_eval" ]]; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
 check_prom_clean_baseline() {
   local prom_alerts_json targets_json config_json
   prom_alerts_json="$(prom_api_get "/api/v1/alerts")" || return 1
@@ -523,6 +765,15 @@ if not app_up:
 
 print("PROM_BASELINE_OK active_app=" + ",".join(t["labels"].get("instance", "?") for t in app_up))
 PY
+  local nz_rc=0
+  prom_has_nonzero_drill_series || nz_rc=$?
+  if [[ "$nz_rc" -eq 0 ]]; then
+    printf 'LINGERING_DRILL_SERIES_NONZERO: job="gongchae-drill" still has >0 samples in Prometheus TSDB\n' >&2
+    return 1
+  elif [[ "$nz_rc" -ne 1 ]]; then
+    printf 'PROM_DRILL_SERIES_CHECK_FAILED: unable to query gongchae-drill TSDB baseline\n' >&2
+    return 1
+  fi
 }
 
 preflight_checks() {
@@ -550,8 +801,12 @@ preflight_checks() {
     fail "PREVIOUS_DRILL_NOT_RESTORED: ${BACKUP_DIR}/state is $(cat "${BACKUP_DIR}/state"); run restore first"
   fi
 
-  if run_bounded "$CMD_TIMEOUT_SEC" docker ps -a --format '{{.Names}}' | grep -Fxq "$EXPORTER_NAME"; then
+  local exp_rc=0
+  exporter_container_exists || exp_rc=$?
+  if [[ "$exp_rc" -eq 0 ]]; then
     fail "STALE_EXPORTER_EXISTS: container ${EXPORTER_NAME} already exists"
+  elif [[ "$exp_rc" -ne 1 ]]; then
+    fail "DOCKER_PS_FAILED: cannot inspect containers for ${EXPORTER_NAME} (rc=${exp_rc})"
   fi
 
   if grep -q 'job_name: gongchae-drill' "$PROM_CONFIG"; then
@@ -573,8 +828,9 @@ preflight_checks() {
   mount_status="$(inspect_prom_mounts)" || mount_rc=$?
   if [[ "$mount_rc" -eq 10 ]]; then
     if [[ "$ACTION" == "run" && "$ALLOW_RECREATE_PROMETHEUS" == "true" ]]; then
-      log "Stale single-file bind mount detected; recreating Prometheus via opt-in command..."
-      bash -c "$RECREATE_CMD"
+      log "Stale single-file bind mount detected; recreating Prometheus via opt-in bounded command (timeout=${RECREATE_TIMEOUT_SEC}s, kill_after=${CMD_KILL_AFTER_SEC}s)..."
+      run_bounded "$RECREATE_TIMEOUT_SEC" bash -c "$RECREATE_CMD" \
+        || fail "RECREATE_PROMETHEUS_FAILED: opt-in recreate command failed or timed out"
       PROM_CONTAINER=""
       resolve_containers
       wait_prom_ready || fail "Prometheus failed to become ready after recreate"
@@ -596,22 +852,58 @@ preflight_checks() {
   log "DB baseline captured ($(printf '%s' "$db_snap" | tr '\n' ' '))"
 }
 
+verify_worker_attempt_active() {
+  if [[ "$ACTION" != "_worker" ]]; then
+    return 0
+  fi
+  if [[ -z "$RUN_ID" || -z "$ATTEMPT_DIR" ]]; then
+    fail "WORKER_IDENTITY_MISSING: refusing to mutate metrics without RUN_ID/ATTEMPT_DIR"
+  fi
+  if [[ -n "$WORKER_REVOKED_FILE" && -f "$WORKER_REVOKED_FILE" ]]; then
+    fail "WORKER_REVOKED: revocation marker present (${WORKER_REVOKED_FILE})"
+  fi
+  if [[ -f "${ATTEMPT_DIR}/revoked" ]]; then
+    fail "WORKER_REVOKED: attempt revocation marker present (${ATTEMPT_DIR}/revoked)"
+  fi
+  if [[ ! -d "$ATTEMPT_DIR" || ! -f "${ATTEMPT_DIR}/run_id" ]]; then
+    fail "WORKER_ATTEMPT_GONE: attempt directory missing (${ATTEMPT_DIR})"
+  fi
+  if [[ "$(cat "${ATTEMPT_DIR}/run_id" 2>/dev/null || true)" != "$RUN_ID" ]]; then
+    fail "WORKER_RUN_ID_MISMATCH: attempt run_id mismatch"
+  fi
+  if [[ -f "$OWNER_FILE" ]]; then
+    local owner_run owner_state
+    owner_run="$(read_meta_key "$OWNER_FILE" "RUN_ID" || true)"
+    owner_state="$(read_meta_key "$OWNER_FILE" "STATE" || true)"
+    if [[ "$owner_run" != "$RUN_ID" || "$owner_state" != "ARMED" ]]; then
+      fail "WORKER_OWNERSHIP_LOST: owner run_id=${owner_run} state=${owner_state} expected=${RUN_ID}/ARMED"
+    fi
+  else
+    fail "WORKER_OWNERSHIP_LOST: missing ${OWNER_FILE}"
+  fi
+  if [[ -n "$SUPERVISOR_PID" ]]; then
+    if ! is_verified_supervisor_pid "$SUPERVISOR_PID" "$SUPERVISOR_START_TIME"; then
+      fail "WORKER_SUPERVISOR_GONE: supervisor pid=${SUPERVISOR_PID} no longer active"
+    fi
+  fi
+}
+
 write_metrics() {
   local budget="$1"
   local failing="$2"
-  if [[ -f "${WORK_DIR}/revoked" ]]; then
-    fail "WORKER_REVOKED: refusing to mutate metrics after handoff"
-  fi
+  verify_worker_attempt_active
+  [[ -n "$ATTEMPT_DIR" && -d "$ATTEMPT_DIR" ]] || fail "WORKER_ATTEMPT_GONE: missing ${ATTEMPT_DIR}"
   printf '# TYPE collector_api_attempts_today gauge\ncollector_api_attempts_today %s\n# TYPE collector_regular_incomplete_consecutive gauge\ncollector_regular_incomplete_consecutive %s\n' \
-    "$budget" "$failing" > "${WORK_DIR}/metrics.prom"
+    "$budget" "$failing" > "${ATTEMPT_DIR}/metrics.prom"
 }
 
 prepare_drill_files() {
-  mkdir -p "${WORK_DIR}/rules_stage"
-  chmod 0700 "$WORK_DIR"
-  rm -f "${WORK_DIR}/revoked"
+  mkdir -p "${ATTEMPT_DIR}/rules_stage"
+  chmod 0700 "$WORK_DIR" "${WORK_DIR}/runs" "$ATTEMPT_DIR"
+  rm -f "${ATTEMPT_DIR}/revoked"
+  printf '%s\n' "$RUN_ID" > "${ATTEMPT_DIR}/run_id"
 
-  cat > "${WORK_DIR}/Caddyfile" <<'EOF'
+  cat > "${ATTEMPT_DIR}/Caddyfile" <<'EOF'
 :8081 {
 	handle /actuator/prometheus {
 		header Content-Type "text/plain; version=0.0.4; charset=utf-8"
@@ -624,7 +916,7 @@ EOF
 
   write_metrics 0 0
 
-  "$PYTHON_BIN" - "$(docker_host_path "${BACKUP_DIR}/prometheus.yml")" "$(docker_host_path "${WORK_DIR}/prometheus.drill.yml")" <<'PY'
+  "$PYTHON_BIN" - "$(docker_host_path "${BACKUP_DIR}/prometheus.yml")" "$(docker_host_path "${ATTEMPT_DIR}/prometheus.drill.yml")" <<'PY'
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src, "r", encoding="utf-8").read()
@@ -645,7 +937,7 @@ assert "job_name: gongchae-drill" in out
 assert text.rstrip("\n") in out
 PY
 
-  "$PYTHON_BIN" - "$(docker_host_path "${BACKUP_DIR}/gongchae.yml")" "$(docker_host_path "${WORK_DIR}/rules_stage/gongchae.yml")" <<'PY'
+  "$PYTHON_BIN" - "$(docker_host_path "${BACKUP_DIR}/gongchae.yml")" "$(docker_host_path "${ATTEMPT_DIR}/rules_stage/gongchae.yml")" <<'PY'
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 orig_lines = open(src, "r", encoding="utf-8").read().splitlines(keepends=True)
@@ -682,13 +974,13 @@ if "for: 10m" not in joined:
 open(dst, "w", encoding="utf-8", newline="\n").write(joined)
 PY
 
-  DRILL_PROM_SHA256="$(host_sha256 "${WORK_DIR}/prometheus.drill.yml")"
-  DRILL_RULES_SHA256="$(host_sha256 "${WORK_DIR}/rules_stage/gongchae.yml")"
+  DRILL_PROM_SHA256="$(host_sha256 "${ATTEMPT_DIR}/prometheus.drill.yml")"
+  DRILL_RULES_SHA256="$(host_sha256 "${ATTEMPT_DIR}/rules_stage/gongchae.yml")"
 
   # Validate modified config and rules with promtool before touching live files.
   run_bounded 30 docker run --rm \
-    -v "$(docker_host_path "${WORK_DIR}/prometheus.drill.yml"):/etc/prometheus/prometheus.yml:ro" \
-    -v "$(docker_host_path "${WORK_DIR}/rules_stage"):/etc/prometheus/rules:ro" \
+    -v "$(docker_host_path "${ATTEMPT_DIR}/prometheus.drill.yml"):/etc/prometheus/prometheus.yml:ro" \
+    -v "$(docker_host_path "${ATTEMPT_DIR}/rules_stage"):/etc/prometheus/rules:ro" \
     --entrypoint promtool "$PROM_IMAGE" \
     check config /etc/prometheus/prometheus.yml >/dev/null
   log "promtool check config/rules passed for staged drill files"
@@ -782,6 +1074,7 @@ load_meta_for_restore() {
     return 1
   fi
   local m_root m_prom m_rules m_dprom m_drules m_exp m_work m_run
+  local m_attempt m_spid m_sstart m_wpid m_wstart m_wlock m_wrev
   m_run="$(read_meta_key "$meta_file" "RUN_ID")" || return 1
   m_root="$(read_meta_key "$meta_file" "ROOT_DIR")" || return 1
   m_prom="$(read_meta_key "$meta_file" "EXPECTED_PROM_SHA256")" || return 1
@@ -790,6 +1083,13 @@ load_meta_for_restore() {
   m_drules="$(read_meta_key "$meta_file" "DRILL_RULES_SHA256")" || return 1
   m_exp="$(read_meta_key "$meta_file" "EXPORTER_NAME")" || return 1
   m_work="$(read_meta_key "$meta_file" "WORK_DIR")" || return 1
+  m_attempt="$(read_meta_key "$meta_file" "ATTEMPT_DIR" 2>/dev/null || true)"
+  m_spid="$(read_meta_key "$meta_file" "SUPERVISOR_PID" 2>/dev/null || true)"
+  m_sstart="$(read_meta_key "$meta_file" "SUPERVISOR_START_TIME" 2>/dev/null || true)"
+  m_wpid="$(read_meta_key "$meta_file" "WORKER_PID" 2>/dev/null || true)"
+  m_wstart="$(read_meta_key "$meta_file" "WORKER_START_TIME" 2>/dev/null || true)"
+  m_wlock="$(read_meta_key "$meta_file" "WORKER_LOCK_FILE" 2>/dev/null || true)"
+  m_wrev="$(read_meta_key "$meta_file" "WORKER_REVOKED_FILE" 2>/dev/null || true)"
 
   if [[ "$m_root" != "$ROOT_DIR" ]]; then
     printf 'DRILL_RESTORE_FAILED backup ROOT_DIR=%s does not match current ROOT_DIR=%s\n' "$m_root" "$ROOT_DIR" >&2
@@ -811,11 +1111,83 @@ load_meta_for_restore() {
   DRILL_RULES_SHA256="$m_drules"
   EXPORTER_NAME="$m_exp"
   WORK_DIR="$m_work"
+  ATTEMPT_DIR="${m_attempt:-${m_work}/runs/${m_run}}"
+  SUPERVISOR_PID="$m_spid"
+  SUPERVISOR_START_TIME="$m_sstart"
+  WORKER_PID="$m_wpid"
+  WORKER_START_TIME="$m_wstart"
+  WORKER_LOCK_FILE="${m_wlock:-${STATE_DIR}/worker-${m_run}.lock}"
+  WORKER_REVOKED_FILE="${m_wrev:-${STATE_DIR}/worker-${m_run}.revoked}"
+  return 0
+}
+
+fence_and_terminate_worker() {
+  # 1) Persist revocation markers before signaling so any awake worker immediately refuses writes.
+  if [[ -n "$WORKER_REVOKED_FILE" ]]; then
+    mkdir -p "$(dirname "$WORKER_REVOKED_FILE")" 2>/dev/null || true
+    printf '%s\n' "${RUN_ID:-revoked}" > "$WORKER_REVOKED_FILE" 2>/dev/null || true
+  fi
+  if [[ -n "$ATTEMPT_DIR" && -d "$ATTEMPT_DIR" ]]; then
+    printf '%s\n' "${RUN_ID:-revoked}" > "${ATTEMPT_DIR}/revoked" 2>/dev/null || true
+  fi
+
+  # 2) Only signal WORKER_PID if its /proc cmdline (_worker --run-id <RUN_ID>) and starttime match.
+  #    Never signal an unrelated process that reused WORKER_PID!
+  if [[ -n "$WORKER_PID" ]]; then
+    if is_verified_worker_pid "$WORKER_PID" "$RUN_ID" "$WORKER_START_TIME"; then
+      log "Fencing verified worker pid=${WORKER_PID} run_id=${RUN_ID}..."
+      local cpid i
+      while IFS= read -r cpid; do
+        [[ -n "$cpid" ]] || continue
+        kill -TERM "$cpid" 2>/dev/null || true
+      done < <(list_descendant_pids "$WORKER_PID")
+      if is_verified_worker_pid "$WORKER_PID" "$RUN_ID" "$WORKER_START_TIME"; then
+        kill -TERM "$WORKER_PID" 2>/dev/null || true
+      fi
+      for i in 1 2 3 4 5; do
+        is_verified_worker_pid "$WORKER_PID" "$RUN_ID" "$WORKER_START_TIME" || break
+        sleep 1
+      done
+      if is_verified_worker_pid "$WORKER_PID" "$RUN_ID" "$WORKER_START_TIME"; then
+        log "Verified worker pid=${WORKER_PID} did not exit after SIGTERM; sending SIGKILL"
+        while IFS= read -r cpid; do
+          [[ -n "$cpid" ]] || continue
+          kill -KILL "$cpid" 2>/dev/null || true
+        done < <(list_descendant_pids "$WORKER_PID")
+        if is_verified_worker_pid "$WORKER_PID" "$RUN_ID" "$WORKER_START_TIME"; then
+          kill -KILL "$WORKER_PID" 2>/dev/null || true
+        fi
+        for i in 1 2 3 4 5; do
+          is_verified_worker_pid "$WORKER_PID" "$RUN_ID" "$WORKER_START_TIME" || break
+          sleep 1
+        done
+      fi
+      if [[ "$ACTION" == "run" ]]; then
+        wait "$WORKER_PID" 2>/dev/null || true
+      fi
+    else
+      log "Recorded worker pid=${WORKER_PID} is no longer active for run_id=${RUN_ID} (already exited or PID reused; not signaling)"
+    fi
+  fi
+
+  # 3) Confirm neither verified worker PID nor the kernel-enforced worker lease remains active.
+  if [[ -n "$WORKER_PID" ]] && is_verified_worker_pid "$WORKER_PID" "$RUN_ID" "$WORKER_START_TIME"; then
+    printf 'DRILL_RESTORE_FAILED UNVERIFIED_WORKER_ALIVE verified worker pid=%s still alive for run_id=%s\n' "$WORKER_PID" "$RUN_ID" >&2
+    return 1
+  fi
+  if ! is_worker_lease_free "$WORKER_LOCK_FILE" "$RUN_ID"; then
+    printf 'DRILL_RESTORE_FAILED UNVERIFIED_WORKER_ALIVE worker lease %s is still held for run_id=%s (refusing to mark RESTORED)\n' \
+      "$WORKER_LOCK_FILE" "$RUN_ID" >&2
+    return 1
+  fi
+  WORKER_PID=""
+  WORKER_START_TIME=""
   return 0
 }
 
 restore_and_verify() {
   # Mask INT/TERM/HUP throughout restore so repeated signals cannot interrupt in-flight recovery.
+  # run_bounded resets these dispositions inside each bounded child subshell.
   trap '' INT TERM HUP
 
   if [[ "$RESTORE_DONE" -eq 1 ]]; then
@@ -832,9 +1204,17 @@ restore_and_verify() {
   # R3: Already-RESTORED backup must NEVER overwrite newer valid production config!
   if [[ "$cur_state" == "RESTORED" ]]; then
     log "Backup state is already RESTORED; running read-only verification without overwriting config files..."
-    local nrc=0
-    if run_bounded "$CMD_TIMEOUT_SEC" docker ps -a --format '{{.Names}}' | grep -Fxq "$EXPORTER_NAME"; then
+    local nrc=0 exp_rc=0 nz_rc=0
+    if ! is_worker_lease_free "$WORKER_LOCK_FILE" "$RUN_ID"; then
+      printf 'DRILL_RESTORE_FAILED UNVERIFIED_WORKER_ALIVE worker lease still held on RESTORED state: %s\n' "$WORKER_LOCK_FILE" >&2
+      nrc=1
+    fi
+    exporter_container_exists || exp_rc=$?
+    if [[ "$exp_rc" -eq 0 ]]; then
       printf 'DRILL_RESTORE_FAILED owned exporter still exists on RESTORED state: %s\n' "$EXPORTER_NAME" >&2
+      nrc=1
+    elif [[ "$exp_rc" -ne 1 ]]; then
+      printf 'DRILL_RESTORE_FAILED docker ps failed/timed out on RESTORED state check\n' >&2
       nrc=1
     fi
     if grep -q 'job_name: gongchae-drill' "$PROM_CONFIG" 2>/dev/null; then
@@ -847,6 +1227,11 @@ restore_and_verify() {
     fi
     if resolve_containers 2>/dev/null; then
       wait_for_drill_config_and_target absent 15 || nrc=1
+      prom_has_nonzero_drill_series || nz_rc=$?
+      if [[ "$nz_rc" -ne 1 ]]; then
+        printf 'DRILL_RESTORE_FAILED lingering non-zero gongchae-drill series or query failure on RESTORED state (rc=%s)\n' "$nz_rc" >&2
+        nrc=1
+      fi
     fi
     if [[ "$nrc" -eq 0 ]]; then
       RESTORE_DONE=1
@@ -857,7 +1242,7 @@ restore_and_verify() {
     return "$nrc"
   fi
 
-  local rrc=0
+  local rrc=0 worker_fenced_ok=0
   log "Starting idempotent restore and post-condition verification (run_id=${RUN_ID})..."
 
   if [[ "$TEST_RESTORE_HOLD_SEC" -gt 0 ]]; then
@@ -868,6 +1253,43 @@ restore_and_verify() {
   if [[ ! -f "${BACKUP_DIR}/prometheus.yml" || ! -f "${BACKUP_DIR}/gongchae.yml" || ! -f "${BACKUP_DIR}/orig.sha256" ]]; then
     printf 'DRILL_RESTORE_FAILED missing backup files in %s\n' "$BACKUP_DIR" >&2
     return 1
+  fi
+
+  # 0) Fence and terminate any surviving worker (including after supervisor SIGKILL) before touching resources.
+  if fence_and_terminate_worker; then
+    worker_fenced_ok=1
+  else
+    rrc=1
+  fi
+
+  # 0b) Unconditionally overwrite metrics.prom to 0/0 FIRST (before querying Prometheus) so no in-flight or
+  #     upcoming scrape can ingest stale 500/2 right before exporter removal. Then wait for any already-ingested
+  #     non-zero gongchae-drill samples in TSDB to be overwritten by a 0/0 scrape before SIGHUP removes the job.
+  if [[ "$worker_fenced_ok" -eq 1 && -n "$ATTEMPT_DIR" && -d "$ATTEMPT_DIR" ]]; then
+    printf '# TYPE collector_api_attempts_today gauge\ncollector_api_attempts_today 0\n# TYPE collector_regular_incomplete_consecutive gauge\ncollector_regular_incomplete_consecutive 0\n' \
+      > "${ATTEMPT_DIR}/metrics.prom"
+    if resolve_containers 2>/dev/null; then
+      local flush_exp_rc=0 flush_nz_rc=0
+      exporter_container_exists || flush_exp_rc=$?
+      if [[ "$flush_exp_rc" -eq 0 ]]; then
+        # Brief pause so any scrape that started just before the 0/0 write finishes ingesting before we query TSDB.
+        sleep 2
+        prom_has_nonzero_drill_series || flush_nz_rc=$?
+        if [[ "$flush_nz_rc" -eq 0 ]]; then
+          log "Flushing 0/0 to live drill exporter before removing gongchae-drill job..."
+          local flush_deadline=$(( $(date +%s) + 75 ))
+          while [[ $(date +%s) -lt $flush_deadline ]]; do
+            flush_nz_rc=0
+            prom_has_nonzero_drill_series || flush_nz_rc=$?
+            if [[ "$flush_nz_rc" -eq 1 ]]; then
+              log "DRILL_TSDB_FLUSHED_ZERO"
+              break
+            fi
+            sleep 3
+          done
+        fi
+      fi
+    fi
   fi
 
   # 1) Pre-write ownership guard: only overwrite prometheus.yml / gongchae.yml if current hash is THIS run's
@@ -906,22 +1328,49 @@ restore_and_verify() {
   fi
 
   # 2) Clean up ONLY resources owned by this run (never glob-delete files in RULES_DIR!).
-  if run_bounded "$CMD_TIMEOUT_SEC" docker ps -a --format '{{.Names}}' | grep -Fxq "$EXPORTER_NAME"; then
+  local exp_rc=0
+  exporter_container_exists || exp_rc=$?
+  if [[ "$exp_rc" -eq 0 ]]; then
     run_bounded "$CMD_TIMEOUT_SEC" docker rm -f "$EXPORTER_NAME" >/dev/null || rrc=1
-  fi
-  if run_bounded "$CMD_TIMEOUT_SEC" docker ps -a --format '{{.Names}}' | grep -Fxq "$EXPORTER_NAME"; then
-    printf 'DRILL_RESTORE_FAILED exporter container still exists: %s\n' "$EXPORTER_NAME" >&2
+  elif [[ "$exp_rc" -ne 1 ]]; then
+    printf 'DRILL_RESTORE_FAILED docker ps failed/timed out before exporter cleanup\n' >&2
     rrc=1
   fi
-  if [[ -n "$WORK_DIR" && "$WORK_DIR" != "/" && -d "$WORK_DIR" ]]; then
-    rm -rf "$WORK_DIR" || rrc=1
+  exp_rc=0
+  exporter_container_exists || exp_rc=$?
+  if [[ "$exp_rc" -eq 0 ]]; then
+    printf 'DRILL_RESTORE_FAILED exporter container still exists: %s\n' "$EXPORTER_NAME" >&2
+    rrc=1
+  elif [[ "$exp_rc" -ne 1 ]]; then
+    printf 'DRILL_RESTORE_FAILED docker ps failed/timed out after exporter cleanup\n' >&2
+    rrc=1
+  fi
+  if [[ "$worker_fenced_ok" -eq 1 && -n "$ATTEMPT_DIR" && "$ATTEMPT_DIR" != "/" && -d "$ATTEMPT_DIR" ]]; then
+    rm -rf "$ATTEMPT_DIR" || rrc=1
+    rmdir "${WORK_DIR}/runs" "$WORK_DIR" 2>/dev/null || true
   fi
 
-  # 3) Reload Prometheus and verify drill config/target/alerts cleared and active app target healthy.
+  # 3) Reload Prometheus, wait for a post-SIGHUP rule evaluation, verify no lingering non-zero drill series,
+  #    and verify alerts cleared and active app target healthy.
   if resolve_containers 2>/dev/null; then
+    local prev_eval=""
+    prev_eval="$(prom_rule_group_last_eval 2>/dev/null || true)"
     prom_sighup || rrc=1
     if ! wait_for_drill_config_and_target absent 60; then
       printf 'DRILL_RESTORE_FAILED gongchae-drill still present in Prometheus config/targets after SIGHUP\n' >&2
+      rrc=1
+    fi
+    if ! wait_for_prom_rule_eval_after "$prev_eval" 60; then
+      printf 'DRILL_RESTORE_FAILED Prometheus gongchae rule group did not complete post-SIGHUP evaluation\n' >&2
+      rrc=1
+    fi
+    local post_nz_rc=0
+    prom_has_nonzero_drill_series || post_nz_rc=$?
+    if [[ "$post_nz_rc" -eq 0 ]]; then
+      printf 'DRILL_RESTORE_FAILED LINGERING_DRILL_SERIES_NONZERO job="gongchae-drill" still has >0 samples in Prometheus TSDB\n' >&2
+      rrc=1
+    elif [[ "$post_nz_rc" -ne 1 ]]; then
+      printf 'DRILL_RESTORE_FAILED failed to query Prometheus TSDB for lingering gongchae-drill series\n' >&2
       rrc=1
     fi
     if ! wait_for_alert_state "GongchaeApiBudgetWarning" "absent" "$RESOLVE_WAIT_TIMEOUT_SEC" "false"; then
@@ -1002,6 +1451,7 @@ PY
   fi
 
   if [[ "$rrc" -eq 0 ]]; then
+    rm -f "$WORKER_LOCK_FILE" "$WORKER_REVOKED_FILE" 2>/dev/null || true
     write_meta_files "RESTORED"
     RESTORE_DONE=1
     log "DRILL_RESTORE_VERIFIED_OK (prom_written=${prom_touched} rules_written=${rules_touched})"
@@ -1013,10 +1463,12 @@ PY
 }
 
 run_worker_phase() {
+  verify_worker_attempt_active
   resolve_containers
   wait_for_drill_config_and_target present 90 || fail "gongchae-drill target did not become up in Prometheus"
+  wait_for_drill_zero_baseline 60 || fail "gongchae-drill 0/0 baseline metrics not scraped in Prometheus"
   assert_no_unexpected_alerts "" || fail "False alerts fired at 0/0 drill baseline"
-  log "DRILL_BASELINE_UP (gongchae-drill up, 0 alerts)"
+  log "DRILL_BASELINE_UP (gongchae-drill up, 0/0 scraped, 0 alerts)"
 
   local inject_epoch
   inject_epoch="$(date +%s)"
@@ -1038,6 +1490,7 @@ run_worker_phase() {
   # Wait until >= PENDING_HOLD_CHECK_SEC (5m) and verify for: 10m is still holding pending (not prematurely firing).
   local pending_check_target=$(( inject_epoch + PENDING_HOLD_CHECK_SEC ))
   while [[ $(date +%s) -lt $pending_check_target ]]; do
+    verify_worker_attempt_active
     sleep 5
   done
   wait_for_alert_state "GongchaeRegularCollectionFailing" "pending" 15 "true" || fail "GongchaeRegularCollectionFailing did not stay pending at >=${PENDING_HOLD_CHECK_SEC}s"
@@ -1054,8 +1507,12 @@ run_worker_phase() {
   assert_no_unexpected_alerts "GongchaeApiBudgetWarning,GongchaeRegularCollectionFailing" || fail "Unexpected alert during collection failing firing"
   log "DRILL_COLLECTION_FAILING_FIRING elapsed_sec=${elapsed_to_fire}"
 
-  # Allow Grafana evaluation/group_wait window before clearing (90s)
-  sleep 90
+  # Allow Grafana evaluation/group_wait window before clearing (90s), checking attempt liveness periodically.
+  local hold_until=$(( $(date +%s) + 90 ))
+  while [[ $(date +%s) -lt $hold_until ]]; do
+    verify_worker_attempt_active
+    sleep 5
+  done
 
   write_metrics 0 0
   log "DRILL_RECOVERY_INJECTED budget=0 failing=0"
@@ -1065,34 +1522,13 @@ run_worker_phase() {
 
   if [[ "$POST_RESOLVE_WAIT_SEC" -gt 0 ]]; then
     log "Waiting ${POST_RESOLVE_WAIT_SEC}s for Grafana [RESOLVED] delivery..."
-    sleep "$POST_RESOLVE_WAIT_SEC"
+    local resolve_until=$(( $(date +%s) + POST_RESOLVE_WAIT_SEC ))
+    while [[ $(date +%s) -lt $resolve_until ]]; do
+      verify_worker_attempt_active
+      sleep 5
+    done
   fi
   log "DRILL_WORKER_COMPLETE"
-}
-
-terminate_worker_and_wait() {
-  if [[ -z "$WORKER_PID" ]]; then
-    return 0
-  fi
-  if [[ -d "$WORK_DIR" ]]; then
-    printf '1\n' > "${WORK_DIR}/revoked" 2>/dev/null || true
-  fi
-  if kill -0 "$WORKER_PID" 2>/dev/null; then
-    pkill -TERM -P "$WORKER_PID" 2>/dev/null || true
-    kill -TERM "$WORKER_PID" 2>/dev/null || true
-    local i
-    for i in 1 2 3 4 5; do
-      kill -0 "$WORKER_PID" 2>/dev/null || break
-      sleep 1
-    done
-    if kill -0 "$WORKER_PID" 2>/dev/null; then
-      log "Worker ${WORKER_PID} did not exit after SIGTERM; sending SIGKILL"
-      pkill -KILL -P "$WORKER_PID" 2>/dev/null || true
-      kill -KILL "$WORKER_PID" 2>/dev/null || true
-    fi
-  fi
-  wait "$WORKER_PID" 2>/dev/null || true
-  WORKER_PID=""
 }
 
 supervisor_on_signal() {
@@ -1104,8 +1540,9 @@ supervisor_on_exit() {
   local exit_rc=$?
   set +e
   trap '' INT TERM HUP
-  if [[ "$MUTATIONS_STARTED" -eq 1 && "$RESTORE_DONE" -eq 0 ]]; then
-    terminate_worker_and_wait
+  if [[ "$MUTATIONS_STARTED" -eq 1 && "$RESTORE_DONE" -eq 0 && "$RESTORE_ATTEMPTED" -eq 0 ]]; then
+    RESTORE_ATTEMPTED=1
+    fence_and_terminate_worker || true
     restore_and_verify
     local rrc=$?
     release_root_lock
@@ -1149,6 +1586,11 @@ trap supervisor_on_exit EXIT
 preflight_checks
 
 RUN_ID="$(date -u +'%Y%m%dT%H%M%SZ')-$$-${RANDOM}"
+SUPERVISOR_PID="$$"
+SUPERVISOR_START_TIME="$(read_proc_start_time "$$" || true)"
+ATTEMPT_DIR="${WORK_DIR}/runs/${RUN_ID}"
+WORKER_LOCK_FILE="${STATE_DIR}/worker-${RUN_ID}.lock"
+WORKER_REVOKED_FILE="${STATE_DIR}/worker-${RUN_ID}.revoked"
 mkdir -p "$BACKUP_DIR"
 chmod 0700 "$BACKUP_DIR"
 cp -a "$PROM_CONFIG" "${BACKUP_DIR}/prometheus.yml"
@@ -1171,22 +1613,29 @@ trap supervisor_on_signal INT TERM HUP
 log "Starting temporary exporter (${EXPORTER_NAME}) on ${BACKEND_NET} (no host port, ttl=${EXPORTER_TTL_SEC}s)"
 run_bounded "$CMD_TIMEOUT_SEC" docker run -d --rm --name "$EXPORTER_NAME" \
   --network "$BACKEND_NET" --network-alias drill-exporter \
-  -v "$(docker_host_path "${WORK_DIR}/Caddyfile"):/etc/caddy/Caddyfile:ro" \
-  -v "$(docker_host_path "${WORK_DIR}"):/srv:ro" \
+  -v "$(docker_host_path "${ATTEMPT_DIR}/Caddyfile"):/etc/caddy/Caddyfile:ro" \
+  -v "$(docker_host_path "${ATTEMPT_DIR}"):/srv:ro" \
   "$CADDY_IMAGE" sh -c "timeout ${EXPORTER_TTL_SEC} caddy run --config /etc/caddy/Caddyfile" >/dev/null
 
 log "Applying in-place drill config (job_name: gongchae-drill) and [훈련] label summaries + SIGHUP"
-cat "${WORK_DIR}/prometheus.drill.yml" > "$PROM_CONFIG"
-cat "${WORK_DIR}/rules_stage/gongchae.yml" > "$RULES_FILE"
+cat "${ATTEMPT_DIR}/prometheus.drill.yml" > "$PROM_CONFIG"
+cat "${ATTEMPT_DIR}/rules_stage/gongchae.yml" > "$RULES_FILE"
 prom_sighup
 
-# Spawn worker with lock FD 9 closed so only the supervisor owns the deploy-root lock and config mutations.
+# Spawn worker with deploy-root lock FD 9 closed and dedicated worker lease FD 8 handed off
+# (zero race window on Linux flock; supervisor immediately closes its own FD 8 copy).
 worker_args=(
   _worker
   --root-dir "$ROOT_DIR"
   --env-file "$ENV_FILE"
   --backup-dir "$BACKUP_DIR"
   --work-dir "$WORK_DIR"
+  --attempt-dir "$ATTEMPT_DIR"
+  --run-id "$RUN_ID"
+  --supervisor-pid "$SUPERVISOR_PID"
+  --supervisor-start-time "$SUPERVISOR_START_TIME"
+  --worker-lock-file "$WORKER_LOCK_FILE"
+  --worker-revoked-file "$WORKER_REVOKED_FILE"
   --project "$PROJECT_NAME"
   --prom-container "$PROM_CONTAINER"
   --pg-container "$PG_CONTAINER"
@@ -1196,8 +1645,18 @@ if [[ -n "$APP_CONTAINERS" ]]; then
   worker_args+=(--app-containers "$APP_CONTAINERS")
 fi
 
-bash "$0" "${worker_args[@]}" 9>&- &
-WORKER_PID=$!
+if command -v flock >/dev/null 2>&1; then
+  exec 8>"$WORKER_LOCK_FILE"
+  flock -n 8 || fail "Could not acquire worker lease lock: ${WORKER_LOCK_FILE}"
+  bash "$0" "${worker_args[@]}" 9>&- &
+  WORKER_PID=$!
+  exec 8>&-
+else
+  bash "$0" "${worker_args[@]}" 9>&- &
+  WORKER_PID=$!
+fi
+WORKER_START_TIME="$(read_proc_start_time "$WORKER_PID" || true)"
+write_meta_files "ARMED"
 
 deadline_epoch=$(( $(date +%s) + MAX_DURATION_SEC ))
 worker_rc=0
@@ -1219,10 +1678,10 @@ done
 trap '' INT TERM HUP
 
 if [[ -n "$SUPERVISOR_SIGNAL" ]]; then
-  terminate_worker_and_wait
+  fence_and_terminate_worker || true
   worker_rc=143
 elif [[ "$timed_out" -eq 1 ]]; then
-  terminate_worker_and_wait
+  fence_and_terminate_worker || true
   worker_rc=124
 else
   set +e
@@ -1230,10 +1689,14 @@ else
   worker_rc=$?
   set -e
   WORKER_PID=""
+  WORKER_START_TIME=""
 fi
 
+RESTORE_ATTEMPTED=1
+set +e
 restore_and_verify
 restore_rc=$?
+set -e
 
 if [[ "$restore_rc" -ne 0 ]]; then
   exit "$restore_rc"

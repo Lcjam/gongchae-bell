@@ -77,11 +77,14 @@
   - 본 하네스는 `rules/`에 새 파일을 만들지 않으므로 **`rules/drill*.yml` glob 삭제를 하지 않으며**, `meta.env`에 기록된 소유 `EXPORTER_NAME`과 `WORK_DIR`만 정리한다.
 - **훈련 표식 (1안 채택 + 안전장치)**:
   - `rules/gongchae.yml`의 `GongchaeApiBudgetWarning`과 `GongchaeRegularCollectionFailing` 2개 규칙의 **`summary:` label에만** `"[훈련] "` 접두어를 붙인다(큰따옴표 감싸기 + 정확히 2줄 변경 + 모든 `expr:`/`for: 10m` 바이트 동일 검증 + `promtool check config`).
-- **독립 감독자(`Supervisor`) · 워커 분리 · 신호 마스킹 (R2)**:
+- **독립 감독자(`Supervisor`) · 워커 분리 · 강제 상한(`timeout -k`) · 수동 복구 워커 펜싱 (R2 · R3 2차 보완)**:
   - 실제 실행은 SSH 세션과 분리해 기동한다(`nohup setsid bash ... >~/gongchae-ops/collector-drill.log 2>&1 < /dev/null &`).
-  - **감독자(`run`)**가 배포 루트 잠금과 설정 변경/원복 소유권을 독점하고, 잠금 FD를 닫은 **자식 워커(`_worker`)**만 지표 주입·폴링 대기를 수행한다. 모든 외부 `docker`/`psql`/`wget` 명령에는 짧은 상한(`timeout 20`, `wget -T 10`)을 둔다.
-  - 워커 정체·비정상 종료·25분(`1500s`) 마감 도달·신호(`INT`/`TERM`/`HUP`) 수신 시 감독자는 즉시 **추가 신호를 마스킹(`trap '' INT TERM HUP`)**한 뒤 `revoked` 마커 기록 → 워커와 하위 프로세스를 `TERM`→5초 후 `KILL`+`wait`로 완전 종료시키고(늦게 깨어난 재변경 차단), 그 뒤에 직접 `restore_and_verify`를 실행한다. `RESTORE_DONE=1`은 모든 복구·검증이 끝난 뒤에만 설정한다.
-  - **물리적 한계 구분**: Docker 데몬 불능, 호스트 전원 단절, 감독자 자체에 대한 `SIGKILL` 시에는 완료를 보장하지 않으며, 디스크에 `STATE=ARMED`/`RESTORE_FAILED`가 남아 다음 `preflight`/`run`이 fail-closed로 차단되고 수동 `restore`로 안전 복구한다.
+  - **감독자(`run`)**가 배포 루트 잠금과 설정 변경/원복 소유권을 독점하고, 잠금 FD(`9>&-`)를 닫은 **자식 워커(`_worker`)**만 시도별 격리 디렉터리(`${WORK_DIR}/runs/${RUN_ID}`)에 지표를 주입한다.
+  - 모든 외부 `docker`/`psql`/`wget` 명령 및 opt-in `--allow-recreate-prometheus` 재생성 명령은 `run_bounded`를 거친다. `run_bounded`는 복구 중 신호 마스킹(`trap '' INT TERM HUP`)이 자식에게 상속되지 않도록 서브셸에서 `INT`/`TERM`/`HUP`을 기본값으로 복원한 뒤 GNU `timeout -k <grace> <secs>`로 실행해, `SIGTERM`을 무시하는 자식·후손도 제한 시간 내 `SIGKILL`로 강제 종료한다.
+  - 워커 정체·비정상 종료·25분(`1500s`) 마감 도달·신호(`INT`/`TERM`/`HUP`) 수신 시 감독자는 즉시 추가 신호를 마스킹한 뒤 `RUN_ID`별 취소 마커 기록 → 프로세스 정체성(`/proc/<pid>/cmdline`의 `_worker --run-id <RUN_ID>` + `/proc/<pid>/stat` 시작 시각 `starttime`)이 검증된 워커만 `TERM`→5초 후 `KILL`로 종료하고 전용 워커 lease lock(`worker-${RUN_ID}.lock`, Linux `flock`) 해제를 확인한 뒤 `restore_and_verify`를 수행한다.
+  - **감독자 `SIGKILL` 이후 수동 `restore` 계약**: `meta.env`에 `RUN_ID`·`ATTEMPT_DIR`·`WORKER_PID`·`WORKER_START_TIME`·`WORKER_LOCK_FILE`·`WORKER_REVOKED_FILE`을 기록한다. 수동 `restore`는 동일 정체성 검증으로 살아 있는 이전 워커만 안전 종료하며(PID 재사용으로 무관 프로세스를 절대 종료하지 않음), 워커 lease가 여전히 점유돼 종료를 확인할 수 없으면 `UNVERIFIED_WORKER_ALIVE`로 fail-closed(`STATE=RESTORE_FAILED`)해 새 실행의 자원 재사용을 차단한다. 워커의 `write_metrics` 역시 시도 디렉터리 `run_id`·취소 마커·`OWNER_FILE` 소유 상태·감독자 생존을 검증하므로 이전 워커가 같은 기본 `--work-dir`의 새 실행 지표를 덮어쓸 수 없다.
+  - **TSDB 0/0 flush 및 SIGHUP 이후 재평가 검증**: `restore_and_verify`는 exporter와 `gongchae-drill` job을 제거하기 전에 살아 있는 exporter로 `0/0`을 기록하고 Prometheus가 `0/0`을 스크랩해 TSDB에 반영한 뒤 config/rules를 원복·`SIGHUP`하며, `SIGHUP` 이후 `gongchae` rule group의 실제 새 평가 완료(`lastEvaluation` 갱신)와 `job="gongchae-drill"` 비영(non-zero) 시계열 부재 및 경보 `0`건을 확인한 뒤에만 `RESTORED`/`RESTORE_DONE=1`을 기록한다.
+  - **물리적 한계 구분 (보존)**: Docker 데몬 불능, 호스트 전원 단절, 감독자 자체에 대한 `SIGKILL` 시 자동 복구 완료를 보장하지 않으며, 디스크에 `STATE=ARMED`/`RESTORE_FAILED`가 남아 다음 `preflight`/`run`이 fail-closed로 차단되고 수동 `restore`로 이전 워커를 차단·종료한 뒤 안전 복구한다.
 - **원복 오류 비은폐**:
   - `restore_and_verify`의 검증 항목(호스트/컨테이너/Git SHA-256 일치, exporter 제거, Prometheus config/targets/alerts 정리, 활성 `gongchae-app` `up`, DB·파일+런타임 플래그·컨테이너 일치) 중 하나라도 실패하면 `DRILL_RESTORE_FAILED` + `STATE=RESTORE_FAILED` + 비정상 종료(`exit != 0`)를 반환한다.
 
