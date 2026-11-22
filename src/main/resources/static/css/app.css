@@ -1,17 +1,342 @@
-:root { --bs-primary: #255c50; --bs-link-color: #255c50; }
-body { color: #24352e; background: #fcfdfb; font-family: system-ui, -apple-system, "Malgun Gothic", sans-serif; }
+/* 공채벨 — Apple 디자인 시스템 토큰 위에 Bootstrap 5.3 컴포넌트를 다시 입힌다.
+   템플릿은 Bootstrap 클래스를 그대로 쓰고, 색·글꼴·모서리·간격은 이 파일의 토큰에서만 정한다. */
+
+/* ─── Design tokens (design-systems/apple/tokens.css) ─────────── */
+:root {
+  --bg: #ffffff;
+  --surface: #f5f5f7;
+  --surface-warm: #fbfbfd;
+
+  --fg: #1d1d1f;
+  --fg-2: #424245;
+  --muted: #6e6e73;
+  --meta: #86868b;
+
+  --border: #d2d2d7;
+  --border-soft: #e8e8ed;
+
+  --accent: #0071e3;
+  --accent-on: #ffffff;
+  --accent-hover: #0066cc;
+  --accent-active: #0066cc;
+
+  --success: #15803d;
+  --warn:    #eab308;
+  --danger:  #dc2626;
+
+  --font-display:
+    "SF Pro Display", "SF Pro Icons", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-body:
+    "SF Pro Text", "SF Pro Icons", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-mono:
+    "SF Mono", ui-monospace, "JetBrains Mono", Menlo, Monaco, Consolas, monospace;
+
+  --text-xs:   12px;
+  --text-sm:   14px;
+  --text-base: 17px;
+  --text-lg:   21px;
+  --text-xl:   28px;
+  --text-2xl:  40px;
+  --text-3xl:  56px;
+  --text-4xl:  80px;
+
+  --leading-body:  1.47;
+  --leading-tight: 1.05;
+
+  --tracking-display: -0.015em;
+
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  20px;
+  --space-6:  24px;
+  --space-8:  32px;
+  --space-12: 48px;
+
+  --section-y-desktop: 100px;
+  --section-y-tablet:  64px;
+  --section-y-phone:   40px;
+
+  --radius-sm:   8px;
+  --radius-md:   12px;
+  --radius-lg:   18px;
+  --radius-pill: 980px;
+
+  --elev-flat:   none;
+  --elev-ring:   0 0 0 1px var(--border);
+  --elev-raised: 0 12px 32px rgba(0, 0, 0, 0.08);
+
+  --focus-ring: 0 0 0 4px color-mix(in oklab, var(--accent), transparent 65%);
+
+  --motion-fast:   150ms;
+  --motion-base:   220ms;
+  --ease-standard: cubic-bezier(0.28, 0, 0.22, 1);
+
+  --container-max:            1024px;
+  --container-gutter-desktop: 22px;
+  --container-gutter-tablet:  18px;
+  --container-gutter-phone:   16px;
+}
+
+/* ─── Bootstrap bridge: point Bootstrap's own variables at the tokens ─── */
+:root {
+  --bs-body-font-family: var(--font-body);
+  --bs-body-font-size: var(--text-base);
+  /* Hangul falls back to the system Gothic face; +0.06 leading per DESIGN.md substitute note */
+  --bs-body-line-height: calc(var(--leading-body) + 0.06);
+  --bs-body-color: var(--fg);
+  --bs-body-bg: var(--bg);
+  --bs-emphasis-color: var(--fg);
+  --bs-heading-color: var(--fg);
+  --bs-secondary-color: var(--muted);
+  --bs-tertiary-bg: var(--surface);
+  --bs-border-color: var(--border);
+  --bs-border-color-translucent: var(--border-soft);
+  --bs-secondary-border-subtle: var(--border);
+  --bs-link-color: var(--accent-active);
+  --bs-link-hover-color: var(--accent-active);
+  --bs-primary: var(--accent);
+  --bs-border-radius: var(--radius-sm);
+  --bs-border-radius-sm: 6px;
+  --bs-border-radius-lg: var(--radius-md);
+  --bs-border-radius-xl: var(--radius-lg);
+  --bs-border-radius-xxl: 28px;
+  --bs-border-radius-pill: var(--radius-pill);
+  --bs-focus-ring-color: color-mix(in oklab, var(--accent), transparent 65%);
+  --bs-form-invalid-color: var(--danger);
+  --bs-form-invalid-border-color: var(--danger);
+  /* Bootstrap composes these with rgba(); each triplet equals the token above it */
+  --bs-primary-rgb: 0, 113, 227;          /* --accent */
+  --bs-link-color-rgb: 0, 102, 204;       /* --accent-active */
+  --bs-link-hover-color-rgb: 0, 102, 204; /* --accent-active */
+  --bs-secondary-rgb: 110, 110, 115;      /* --muted */
+  --bs-light-rgb: 245, 245, 247;          /* --surface */
+  --bs-warning-rgb: 234, 179, 8;          /* --warn */
+  --bs-danger-rgb: 220, 38, 38;           /* --danger */
+  --bs-success-rgb: 21, 128, 61;          /* --success */
+}
+
+/* ─── Base ─────────────────────────────────────────────────────── */
+html { scroll-padding-top: 72px; }
+body {
+  letter-spacing: -0.01em;
+  word-break: keep-all;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+h1, h2, h3, h4, h5, h6, .h1, .h2, .h3, .h4, .h5, .h6, .display-5 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: var(--tracking-display);
+}
+h1 { line-height: 1.2; overflow-wrap: anywhere; }
+.display-5 { line-height: 1.1; }
+.lead { line-height: 1.5; }
+
+a { text-decoration: none; }
+@media (hover: hover) {
+  a:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .btn:hover, .page-link:hover, .nav-link:hover, .brand:hover,
+  .site-nav-link:hover, .site-nav-cta:hover, .list-group-item-action:hover { text-decoration: none; }
+}
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn:focus-visible, .page-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; box-shadow: var(--focus-ring); }
+.skip-link:focus {
+  position: absolute; top: var(--space-2); left: var(--space-4); z-index: 1040;
+  padding: 10px var(--space-4); border-radius: var(--radius-sm);
+  background: var(--fg); color: var(--bg);
+}
+
+/* ─── Layout ───────────────────────────────────────────────────── */
+/* frontend-structure.md §6 keeps the 1080px container rather than the token's 1024px */
 .container { max-width: 1080px; }
-.brand { color: #193e32; font-size: 1.5rem; font-weight: 800; letter-spacing: -.06em; }
-.brand-dot { margin-left: .3rem; font-size: .6rem; color: #d69234; vertical-align: super; }
-.hero { background: #edf3ec; }
-.eyebrow { color: #49735c; font-size: .85rem; font-weight: 700; letter-spacing: .05em; }
-h1 { letter-spacing: -.055em; line-height: 1.25; overflow-wrap: anywhere; }
-.btn-primary { --bs-btn-bg: #255c50; --bs-btn-border-color: #255c50; --bs-btn-hover-bg: #183e36; --bs-btn-hover-border-color: #183e36; }
-.btn-outline-primary { --bs-btn-color: #255c50; --bs-btn-border-color: #255c50; --bs-btn-hover-bg: #255c50; --bs-btn-hover-border-color: #255c50; }
-.empty-state { border: 1px dashed #cedad0; border-radius: 12px; background: white; padding: 2.5rem 1.5rem; text-align: center; color: #637168; }
+
+/* ─── Header, delay banner, footer ─────────────────────────────── */
+.site-header {
+  position: sticky; top: 0; z-index: 1020;
+  background: color-mix(in oklab, var(--bg), transparent 12%);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
+  border-bottom: 1px solid var(--border-soft);
+}
+.site-nav { min-height: 56px; }
+.brand {
+  display: inline-flex; align-items: center; gap: var(--space-2); min-height: 44px;
+  font-family: var(--font-display); font-size: var(--text-lg); font-weight: 700; letter-spacing: -0.03em;
+  color: var(--fg);
+}
+.brand-mark { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); flex: none; }
+.site-nav-link, .site-nav-cta {
+  display: inline-flex; align-items: center; min-height: 44px;
+  border-radius: var(--radius-pill); font-size: var(--text-sm);
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+.site-nav-link { padding: 0 14px; color: var(--fg); font-weight: 500; }
+.site-nav-cta { padding: 0 18px; background: var(--accent); color: var(--accent-on); font-weight: 600; }
+.site-nav-cta:active { background: var(--accent-active); }
+@media (hover: hover) {
+  .site-nav-link:hover { background: var(--surface); color: var(--fg); }
+  .site-nav-cta:hover { background: var(--accent-hover); color: var(--accent-on); }
+}
+@media (max-width: 575.98px) {
+  .site-nav-link { padding: 0 10px; }
+  .site-nav-cta { padding: 0 14px; }
+}
+
+.delay-banner { background: var(--surface); border-bottom: 1px solid var(--border-soft); color: var(--fg-2); font-size: var(--text-sm); }
+.delay-banner .container { display: flex; align-items: flex-start; gap: 10px; padding-block: 10px; }
+.delay-banner .dot { margin-top: 7px; }
+
+.site-footer {
+  margin-top: var(--space-12); padding-block: var(--space-12);
+  background: var(--surface); border-top: 1px solid var(--border-soft);
+  color: var(--muted); font-size: var(--text-sm);
+}
+.site-footer strong { color: var(--fg-2); font-weight: 600; }
+
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--meta); flex: none; }
+.dot-warn { background: var(--warn); }
+.badge.status-badge { display: inline-flex; align-items: center; gap: 6px; background: transparent; color: var(--fg-2); box-shadow: inset 0 0 0 1px var(--border); }
+
+/* ─── Page pieces already used by templates ────────────────────── */
+.hero { background: var(--surface); }
+.eyebrow { color: var(--muted); font-size: var(--text-sm); font-weight: 600; letter-spacing: 0; }
+.empty-state { border-radius: var(--radius-lg); background: var(--surface); padding: var(--space-12) var(--space-6); text-align: center; color: var(--muted); }
 .pre-line-text { white-space: pre-line; overflow-wrap: anywhere; }
 .job-card-inst { min-width: 0; overflow-wrap: anywhere; }
 .job-card-title { overflow-wrap: anywhere; }
 .job-card-badges .badge { line-height: 1.3; }
 .job-card-badges .job-meta-badge { white-space: normal; text-align: left; overflow-wrap: anywhere; max-width: 100%; }
-a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid #bc7b20; outline-offset: 2px; }
+
+/* ─── Buttons: capsule CTAs, single blue accent ────────────────── */
+.btn {
+  --bs-btn-padding-x: 1.25rem;
+  --bs-btn-padding-y: 0.5rem;
+  --bs-btn-font-weight: 500;
+  --bs-btn-border-radius: var(--radius-pill);
+  --bs-btn-focus-box-shadow: var(--focus-ring);
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2);
+  min-height: 44px; letter-spacing: -0.01em;
+  transition: background-color var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard),
+              color var(--motion-fast) var(--ease-standard), transform var(--motion-fast) var(--ease-standard);
+}
+.btn:active { transform: scale(0.98); }
+.btn-sm { --bs-btn-padding-x: 0.875rem; --bs-btn-padding-y: 0.25rem; --bs-btn-border-radius: var(--radius-pill); min-height: 36px; }
+.btn-primary {
+  --bs-btn-color: var(--accent-on); --bs-btn-bg: var(--accent); --bs-btn-border-color: var(--accent);
+  --bs-btn-hover-color: var(--accent-on); --bs-btn-hover-bg: var(--accent-hover); --bs-btn-hover-border-color: var(--accent-hover);
+  --bs-btn-active-color: var(--accent-on); --bs-btn-active-bg: var(--accent-active); --bs-btn-active-border-color: var(--accent-active);
+  --bs-btn-disabled-color: var(--muted); --bs-btn-disabled-bg: var(--border-soft); --bs-btn-disabled-border-color: var(--border-soft);
+}
+.btn-outline-primary {
+  --bs-btn-color: var(--accent-active); --bs-btn-border-color: var(--border);
+  --bs-btn-hover-color: var(--accent-active); --bs-btn-hover-bg: var(--surface); --bs-btn-hover-border-color: var(--meta);
+  --bs-btn-active-color: var(--accent-active); --bs-btn-active-bg: var(--border-soft); --bs-btn-active-border-color: var(--meta);
+  --bs-btn-disabled-color: var(--muted); --bs-btn-disabled-border-color: var(--border-soft);
+}
+.btn-outline-secondary {
+  --bs-btn-color: var(--fg); --bs-btn-border-color: var(--border);
+  --bs-btn-hover-color: var(--fg); --bs-btn-hover-bg: var(--surface); --bs-btn-hover-border-color: var(--meta);
+  --bs-btn-active-color: var(--fg); --bs-btn-active-bg: var(--border-soft); --bs-btn-active-border-color: var(--meta);
+  --bs-btn-disabled-color: var(--muted); --bs-btn-disabled-border-color: var(--border-soft);
+}
+.btn-outline-danger {
+  --bs-btn-color: var(--danger); --bs-btn-border-color: var(--danger);
+  --bs-btn-hover-color: var(--accent-on); --bs-btn-hover-bg: var(--danger); --bs-btn-hover-border-color: var(--danger);
+  --bs-btn-active-color: var(--accent-on); --bs-btn-active-bg: var(--danger); --bs-btn-active-border-color: var(--danger);
+}
+
+/* ─── Badges ───────────────────────────────────────────────────── */
+.badge {
+  --bs-badge-padding-x: 0.75em;
+  --bs-badge-padding-y: 0.4em;
+  --bs-badge-font-weight: 600;
+  --bs-badge-border-radius: var(--radius-pill);
+  letter-spacing: 0;
+}
+
+/* ─── Forms: border-led, quiet fields ──────────────────────────── */
+.form-label { margin-bottom: 6px; color: var(--fg); font-size: var(--text-sm); font-weight: 600; }
+.form-control, .form-select {
+  min-height: 44px; border-color: var(--border); border-radius: var(--radius-sm); color: var(--fg);
+  transition: border-color var(--motion-fast) var(--ease-standard), box-shadow var(--motion-fast) var(--ease-standard);
+}
+.form-control-sm, .form-select-sm { min-height: 36px; border-radius: var(--radius-sm); }
+.form-control::placeholder { color: var(--muted); }
+@media (hover: hover) { .form-control:hover, .form-select:hover { border-color: var(--meta); } }
+.form-control:focus, .form-select:focus { border-color: var(--accent); box-shadow: var(--focus-ring); }
+.form-check-input { border-color: var(--meta); }
+.form-check-input:checked { background-color: var(--accent); border-color: var(--accent); }
+.form-check-input:focus { border-color: var(--accent); box-shadow: var(--focus-ring); }
+.form-text { color: var(--muted); }
+
+/* ─── Cards, panels, lists ─────────────────────────────────────── */
+.card {
+  overflow-wrap: anywhere;
+  --bs-card-border-color: var(--border-soft);
+  --bs-card-border-radius: var(--radius-lg);
+  --bs-card-inner-border-radius: calc(var(--radius-lg) - 1px);
+  transition: box-shadow var(--motion-base) var(--ease-standard), transform var(--motion-base) var(--ease-standard);
+}
+@media (hover: hover) {
+  .card:has(.stretched-link):hover { box-shadow: var(--elev-raised); transform: translateY(-2px); }
+}
+.list-group {
+  --bs-list-group-border-color: var(--border-soft);
+  --bs-list-group-border-radius: var(--radius-lg);
+  --bs-list-group-action-hover-bg: var(--surface);
+  --bs-list-group-action-hover-color: var(--fg);
+}
+
+/* ─── Tables: dense retail lists ───────────────────────────────── */
+.table {
+  word-break: normal;
+  --bs-table-color: var(--fg-2);
+  --bs-table-border-color: var(--border-soft);
+  --bs-table-hover-bg: var(--surface);
+  --bs-table-hover-color: var(--fg);
+}
+.table > :not(caption) > * > * { padding: 0.875rem 0.75rem; }
+.table thead th { color: var(--muted); font-size: var(--text-sm); font-weight: 600; white-space: nowrap; border-bottom-color: var(--border); }
+.table-light {
+  --bs-table-bg: var(--surface);
+  --bs-table-color: var(--muted);
+  --bs-table-border-color: var(--border);
+}
+
+/* ─── Pagination: round number chips ───────────────────────────── */
+.pagination {
+  --bs-pagination-color: var(--fg);
+  --bs-pagination-bg: transparent;
+  --bs-pagination-border-color: transparent;
+  --bs-pagination-border-radius: var(--radius-pill);
+  --bs-pagination-hover-color: var(--fg);
+  --bs-pagination-hover-bg: var(--surface);
+  --bs-pagination-hover-border-color: transparent;
+  --bs-pagination-focus-color: var(--fg);
+  --bs-pagination-focus-bg: var(--surface);
+  --bs-pagination-focus-box-shadow: var(--focus-ring);
+  --bs-pagination-active-color: var(--bg);
+  --bs-pagination-active-bg: var(--fg);
+  --bs-pagination-active-border-color: var(--fg);
+  --bs-pagination-disabled-color: var(--meta);
+  --bs-pagination-disabled-bg: transparent;
+  --bs-pagination-disabled-border-color: transparent;
+  gap: var(--space-1);
+}
+.pagination .page-link { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; border-radius: var(--radius-pill); }
+.pagination-sm .page-link { min-width: 36px; min-height: 36px; }
+.pagination .page-item .page-link { margin-left: 0; }
+
+/* ─── Alerts: tinted fields, no colored side bars ──────────────── */
+.alert { --bs-alert-border-radius: var(--radius-md); --bs-alert-padding-x: var(--space-5); --bs-alert-padding-y: var(--space-4); }
+.alert-warning { --bs-alert-color: var(--fg); --bs-alert-bg: color-mix(in oklab, var(--warn), var(--bg) 86%); --bs-alert-border-color: transparent; --bs-alert-link-color: var(--fg); }
+.alert-danger { --bs-alert-color: var(--fg); --bs-alert-bg: color-mix(in oklab, var(--danger), var(--bg) 94%); --bs-alert-border-color: color-mix(in oklab, var(--danger), var(--bg) 60%); --bs-alert-link-color: var(--danger); }
+.alert-secondary { --bs-alert-color: var(--fg-2); --bs-alert-bg: var(--surface); --bs-alert-border-color: transparent; --bs-alert-link-color: var(--accent-active); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
+}
