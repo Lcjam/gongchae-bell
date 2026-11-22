@@ -12,7 +12,7 @@
 | 외부 G4 | **30회, 실패 0**, 5xx·연결/TLS·시간 초과·기타 0, p95 1,020ms, max 1,102ms(GitHub 러너 Azure eastus2) |
 | 모니터링 업그레이드 | Prometheus 재생성(`up -d prometheus`). mount가 단일 파일에서 **디렉터리 `/etc/prometheus`**로 바뀜. `prometheus_data` 유지, 이전 sample 이어짐. Grafana `restart`로 새 프로비저닝 반영 |
 | 검증 | 규칙 9개 health ok, 대시보드 쿼리 35/35 성공, 경보 0. DB·플래그 불변, pending 없음, 공개 HTTPS 정상, 외부 비공개 포트 차단 |
-| DatasourceError | Prometheus 재생성 순간 Grafana 평가 1회가 실패했지만 재시도(3회 중 1회째)에서 성공했다. 실패 상태나 전송 로그는 없다. Discord 화면은 확인하지 못했다 |
+| DatasourceError | Prometheus 재생성 순간 Grafana 평가의 첫 시도(`attempt=1`, 최대 3회)가 실패했고 약 1초 뒤 다음 시도가 예정됐다. 그 뒤 로그 구간에 후속 실패·상태 전이·전송 기록이 없어 재시도가 성공한 것으로 **추정**한다. 재시도 성공과 Discord 무발송은 직접 확인하지 못했다(`lastNotifyAttempt`는 Grafana 재시작으로 초기화됐고 Discord 화면은 확인하지 않았다) |
 | 바꾸지 않은 것 | `AUTO_DEPLOY_ENABLED`(미설정 유지), 권한 규칙·모드, collector·alerts=false, 실제 수집·구독·발송, PR33 훈련, 백업 init·타이머·버킷·IAM, PC 설치, postgres·caddy 컨테이너 |
 
 ## 1. target 확인 (10:25~10:31Z)
