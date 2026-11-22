@@ -83,10 +83,14 @@ jobs:
           Expand-Archive -Path $zip -DestinationPath $dir -Force
           $exe = Join-Path $dir "restic_0.19.1_windows_amd64.exe"
           "RESTIC_BIN=$exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - name: Native Windows PowerShell PC pull & wall-clock retention tests
+      - name: Native Windows PowerShell 5.1 PC pull & wall-clock retention tests
         shell: powershell
         run: |
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File deploy/tests/pc-pull-test.ps1 -ResticBin "$env:RESTIC_BIN" -PythonBin python
+      - name: Native PowerShell 7 (pwsh) PC pull & default ACL verification
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -ExecutionPolicy Bypass -File deploy/tests/pc-pull-test.ps1 -ResticBin "$env:RESTIC_BIN" -PythonBin python
   secrets:
     runs-on: ubuntu-latest
     timeout-minutes: 10

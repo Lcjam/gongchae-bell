@@ -57,6 +57,7 @@ $TMP_ROOT = Join-Path ([System.IO.Path]::GetTempPath()) ("gongchae-pc-pull-test-
 New-Item -ItemType Directory -Path $TMP_ROOT -Force | Out-Null
 
 $script:ReadOnlyDirsToRestore = @()
+$script:JunctionsToRemove = @()
 
 function Format-UtcIso {
   param([long]$Epoch)
@@ -117,28 +118,9 @@ function Set-ReadOnlyTreeAcl {
     return
   }
   $script:ReadOnlyDirsToRestore += $DirPath
-  $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-  $acl = [System.IO.Directory]::GetAccessControl($DirPath)
-  $acl.SetAccessRuleProtection($true, $false)
-  $inherit = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
-  $prop = [System.Security.AccessControl.PropagationFlags]::None
-  $allowMe = New-Object System.Security.AccessControl.FileSystemAccessRule(
-    $me,
-    ([System.Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [System.Security.AccessControl.FileSystemRights]::ChangePermissions),
-    $inherit, $prop, "Allow"
-  )
-  $allowSys = New-Object System.Security.AccessControl.FileSystemAccessRule("NT AUTHORITY\SYSTEM", "FullControl", $inherit, $prop, "Allow")
-  $allowAdm = New-Object System.Security.AccessControl.FileSystemAccessRule("BUILTIN\Administrators", "FullControl", $inherit, $prop, "Allow")
-  $denyWrite = New-Object System.Security.AccessControl.FileSystemAccessRule(
-    $me,
-    ([System.Security.AccessControl.FileSystemRights]::WriteData -bor [System.Security.AccessControl.FileSystemRights]::AppendData -bor [System.Security.AccessControl.FileSystemRights]::Delete -bor [System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles),
-    $inherit, $prop, "Deny"
-  )
-  $acl.AddAccessRule($allowMe)
-  $acl.AddAccessRule($allowSys)
-  $acl.AddAccessRule($allowAdm)
-  $acl.AddAccessRule($denyWrite)
-  [System.IO.Directory]::SetAccessControl($DirPath, $acl)
+  $meSid = "*" + [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  $out = & icacls.exe $DirPath /deny "${meSid}:(OI)(CI)(WD,AD,DE,DC)" 2>&1
+  if ($LASTEXITCODE -ne 0) { throw "icacls deny write failed on $DirPath : $out" }
 }
 
 function Restore-WritableTreeAcl {
@@ -148,18 +130,8 @@ function Restore-WritableTreeAcl {
     & chmod -R u+w $DirPath
     return
   }
-  $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-  $acl = [System.IO.Directory]::GetAccessControl($DirPath)
-  $inherit = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
-  $prop = [System.Security.AccessControl.PropagationFlags]::None
-  $denyWrite = New-Object System.Security.AccessControl.FileSystemAccessRule(
-    $me,
-    ([System.Security.AccessControl.FileSystemRights]::WriteData -bor [System.Security.AccessControl.FileSystemRights]::AppendData -bor [System.Security.AccessControl.FileSystemRights]::Delete -bor [System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles),
-    $inherit, $prop, "Deny"
-  )
-  $null = $acl.RemoveAccessRule($denyWrite)
-  $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($me, "FullControl", $inherit, $prop, "Allow")))
-  [System.IO.Directory]::SetAccessControl($DirPath, $acl)
+  $meSid = "*" + [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  $null = & icacls.exe $DirPath /remove:d $meSid 2>&1
 }
 
 function Invoke-ResticDirect {
@@ -202,7 +174,8 @@ function Invoke-PcPull {
   param(
     [string]$Subcommand,
     [string]$EnvPath,
-    [switch]$StandaloneInit
+    [switch]$StandaloneInit,
+    [hashtable]$ExtraEnv = @{}
   )
   $psExe = (Get-Process -Id $PID).Path
   $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PC_PULL, "-Command", $Subcommand, "-EnvFile", $EnvPath)
@@ -220,6 +193,9 @@ function Invoke-PcPull {
   $psi.RedirectStandardError = $true
   $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
   $psi.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
+  foreach ($k in $ExtraEnv.Keys) {
+    $psi.EnvironmentVariables[$k] = [string]$ExtraEnv[$k]
+  }
   $proc = [System.Diagnostics.Process]::Start($psi)
   $outTask = $proc.StandardOutput.ReadToEndAsync()
   $errTask = $proc.StandardError.ReadToEndAsync()
@@ -305,7 +281,8 @@ srv.serve_forever()
 
 $hbServer = $null
 try {
-  # Verify restic & python availability
+  # Verify restic, python, and PowerShell host
+  Write-Host ("Using PowerShell: " + $PSVersionTable.PSVersion.ToString() + " (" + $PSVersionTable.PSEdition + ")")
   $ver = Invoke-ResticDirect -Repo "" -Password "" -CacheDir $TMP_ROOT -ArgsList @("version")
   Assert-Eq 0 $ver.ExitCode "restic binary must be runnable"
   Write-Host ("Using restic: " + $ver.StdOut.Trim())
@@ -314,7 +291,7 @@ try {
   $hbServer = Start-MockHeartbeatServer -LogFile $hbLog
 
   # ---------------------------------------------------------------------------
-  Write-Host "=== [1/10] Guard rails: remote dest, Git checkout, BACKUP_KEEP_DAILY, Windows ACL ==="
+  Write-Host "=== [1/10] Guard rails: remote/UNC, ancestor junction, non-existent leaf/drive, auxiliary sync/Git/overlap, ACL ==="
   $c1 = Join-Path $TMP_ROOT "case1"
   New-Item -ItemType Directory -Path $c1 -Force | Out-Null
   $pwFile1 = Join-Path $c1 "pc.pass"
@@ -326,7 +303,6 @@ try {
   Write-CaseEnv $env1a @{
     PC_RESTIC_REPOSITORY     = "s3:https://ns.compat.objectstorage.ap-tokyo-1.oraclecloud.com/wrong-bucket"
     PC_RESTIC_PASSWORD_FILE  = $pwFile1
-    PC_ALLOW_CUSTOM_PATHS    = "true"
     RESTIC_BIN               = $ResticBin
     PYTHON_BIN               = $PythonBin
     EXPIRE_SELECT_PATH       = $EXPIRE_SELECT
@@ -340,7 +316,6 @@ try {
   Write-CaseEnv $env1aUnc @{
     PC_RESTIC_REPOSITORY     = "\\fileserver.local\share\backup"
     PC_RESTIC_PASSWORD_FILE  = $pwFile1
-    PC_ALLOW_CUSTOM_PATHS    = "true"
     RESTIC_BIN               = $ResticBin
     PYTHON_BIN               = $PythonBin
     EXPIRE_SELECT_PATH       = $EXPIRE_SELECT
@@ -349,7 +324,7 @@ try {
   Assert-True ($r1aUnc.ExitCode -ne 0) "UNC destination must fail"
   Assert-Contains ($r1aUnc.StdOut + $r1aUnc.StdErr) "DEST_MUST_BE_LOCAL" "UNC dest reason"
 
-  # 1b: Git checkout destination must be rejected when PC_ALLOW_CUSTOM_PATHS is not set
+  # 1b: Git checkout destination must be rejected
   $env1b = Join-Path $c1 "env1b.env"
   Write-CaseEnv $env1b @{
     PC_RESTIC_REPOSITORY     = (Join-Path $REPO_ROOT "tmp-forbidden-backup")
@@ -362,13 +337,12 @@ try {
   Assert-True ($r1b.ExitCode -ne 0) "git checkout dest must fail"
   Assert-Contains ($r1b.StdOut + $r1b.StdErr) "DEST_GIT_REPO_FORBIDDEN" "git dest reason"
 
-  # 1c: BACKUP_KEEP_DAILY rejected
+  # 1c: BACKUP_KEEP_DAILY and removed PC_ALLOW_CUSTOM_PATHS bypass rejected
   $env1c = Join-Path $c1 "env1c.env"
   Write-CaseEnv $env1c @{
     PC_RESTIC_REPOSITORY     = (Join-Path $c1 "dst")
     PC_RESTIC_PASSWORD_FILE  = $pwFile1
     BACKUP_KEEP_DAILY        = "14"
-    PC_ALLOW_CUSTOM_PATHS    = "true"
     RESTIC_BIN               = $ResticBin
     PYTHON_BIN               = $PythonBin
     EXPIRE_SELECT_PATH       = $EXPIRE_SELECT
@@ -377,13 +351,25 @@ try {
   Assert-True ($r1c.ExitCode -ne 0) "BACKUP_KEEP_DAILY must fail"
   Assert-Contains ($r1c.StdOut + $r1c.StdErr) "BACKUP_KEEP_DAILY is no longer supported" "removed knob rejected"
 
-  # 1d: Unrestricted ACL (granting BUILTIN\Users) rejected on Windows
+  $env1cBypass = Join-Path $c1 "env1c-bypass.env"
+  Write-CaseEnv $env1cBypass @{
+    PC_RESTIC_REPOSITORY     = (Join-Path $c1 "dst")
+    PC_RESTIC_PASSWORD_FILE  = $pwFile1
+    PC_ALLOW_CUSTOM_PATHS    = "true"
+    RESTIC_BIN               = $ResticBin
+    PYTHON_BIN               = $PythonBin
+    EXPIRE_SELECT_PATH       = $EXPIRE_SELECT
+  }
+  $r1cBypass = Invoke-PcPull -Subcommand "run" -EnvPath $env1cBypass
+  Assert-True ($r1cBypass.ExitCode -ne 0) "PC_ALLOW_CUSTOM_PATHS must fail"
+  Assert-Contains ($r1cBypass.StdOut + $r1cBypass.StdErr) "PC_ALLOW_CUSTOM_PATHS is not supported" "bypass knob rejected"
+
+  # 1d: Unrestricted ACL (granting BUILTIN\Users) rejected on Windows with default PC_CHECK_ACL=true (PS 5.1 & PS 7)
   if ($env:OS -eq "Windows_NT") {
     $env1d = Join-Path $c1 "env1d.env"
     Write-CaseEnv $env1d @{
       PC_RESTIC_REPOSITORY    = (Join-Path $c1 "dst")
       PC_RESTIC_PASSWORD_FILE = $pwFile1
-      PC_ALLOW_CUSTOM_PATHS   = "true"
       RESTIC_BIN              = $ResticBin
       PYTHON_BIN              = $PythonBin
       EXPIRE_SELECT_PATH      = $EXPIRE_SELECT
@@ -392,6 +378,178 @@ try {
     $r1d = Invoke-PcPull -Subcommand "run" -EnvPath $env1d
     Assert-True ($r1d.ExitCode -ne 0) "broad ACL env file must fail"
     Assert-Contains ($r1d.StdOut + $r1d.StdErr) "ENV_ACL_FAIL" "broad ACL error code"
+  }
+
+  # 1e: Ancestor NTFS junction -> synthetic OneDrive rejected for BOTH existing leaf and non-existent deep leaf (zero mutation)
+  $synthOd = Join-Path $c1 "SyntheticOneDrive"
+  $synthOdExisting = Join-Path $synthOd "existing-replica"
+  New-Item -ItemType Directory -Path $synthOdExisting -Force | Out-Null
+  $odEnv = @{ OneDrive = $synthOd; OneDriveConsumer = ""; OneDriveCommercial = "" }
+  if ($env:OS -eq "Windows_NT") {
+    $junctionAlias = Join-Path $c1 "alias-od"
+    $null = New-Item -ItemType Junction -Path $junctionAlias -Target $synthOd
+    $script:JunctionsToRemove += $junctionAlias
+
+    $env1eExist = Join-Path $c1 "env1e-exist.env"
+    Write-CaseEnv $env1eExist @{
+      PC_RESTIC_REPOSITORY    = (Join-Path $junctionAlias "existing-replica")
+      PC_RESTIC_PASSWORD_FILE = $pwFile1
+      PC_LOCK_FILE            = (Join-Path $c1 "l1e.lock")
+      PC_CACHE_DIR            = (Join-Path $c1 "cache1e")
+      PC_LOG_DIR              = (Join-Path $c1 "logs1e")
+      RESTIC_BIN              = $ResticBin
+      PYTHON_BIN              = $PythonBin
+      EXPIRE_SELECT_PATH      = $EXPIRE_SELECT
+    }
+    $r1eExist = Invoke-PcPull -Subcommand "init" -EnvPath $env1eExist -StandaloneInit -ExtraEnv $odEnv
+    Assert-True ($r1eExist.ExitCode -ne 0) "ancestor junction with existing leaf must fail"
+    Assert-Contains ($r1eExist.StdOut + $r1eExist.StdErr) "DEST_REPARSE_POINT_FORBIDDEN" "ancestor junction existing leaf reason"
+
+    $missingDeepLeaf = Join-Path $junctionAlias "not-created\deep-replica"
+    $env1eMissing = Join-Path $c1 "env1e-missing.env"
+    Write-CaseEnv $env1eMissing @{
+      PC_RESTIC_REPOSITORY    = $missingDeepLeaf
+      PC_RESTIC_PASSWORD_FILE = $pwFile1
+      PC_LOCK_FILE            = (Join-Path $c1 "l1e2.lock")
+      PC_CACHE_DIR            = (Join-Path $c1 "cache1e2")
+      PC_LOG_DIR              = (Join-Path $c1 "logs1e2")
+      RESTIC_BIN              = $ResticBin
+      PYTHON_BIN              = $PythonBin
+      EXPIRE_SELECT_PATH      = $EXPIRE_SELECT
+    }
+    $r1eMissing = Invoke-PcPull -Subcommand "init" -EnvPath $env1eMissing -StandaloneInit -ExtraEnv $odEnv
+    Assert-True ($r1eMissing.ExitCode -ne 0) "ancestor junction with non-existent deep leaf must fail"
+    Assert-Contains ($r1eMissing.StdOut + $r1eMissing.StdErr) "DEST_REPARSE_POINT_FORBIDDEN" "ancestor junction non-existent leaf reason"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $synthOd "not-created"))) "no directory created under junction target"
+  }
+
+  # 1f: Auxiliary paths (env, password, cache, log, lock) protected against UNC, sync dir, Git, overlap, and unmounted drive BEFORE mutation
+  # 1f-1: UNC PC_CACHE_DIR rejected before any cat config / Ensure-Directory
+  $env1fUncCache = Join-Path $c1 "env1f-unc-cache.env"
+  Write-CaseEnv $env1fUncCache @{
+    PC_RESTIC_REPOSITORY    = (Join-Path $c1 "dst1f")
+    PC_RESTIC_PASSWORD_FILE = $pwFile1
+    PC_LOCK_FILE            = (Join-Path $c1 "l1f.lock")
+    PC_CACHE_DIR            = "\\fileserver.local\share\cache"
+    PC_LOG_DIR              = (Join-Path $c1 "logs1f")
+    RESTIC_BIN              = $ResticBin
+    PYTHON_BIN              = $PythonBin
+    EXPIRE_SELECT_PATH      = $EXPIRE_SELECT
+  }
+  $r1fUncCache = Invoke-PcPull -Subcommand "run" -EnvPath $env1fUncCache
+  Assert-True ($r1fUncCache.ExitCode -ne 0) "UNC PC_CACHE_DIR must fail"
+  Assert-Contains ($r1fUncCache.StdOut + $r1fUncCache.StdErr) "PATH_MUST_BE_LOCAL" "UNC cache rejected"
+  Assert-True (-not (Test-Path -LiteralPath (Join-Path $c1 "l1f.lock"))) "no lock created before config path validation"
+
+  # 1f-2: PC_LOG_DIR inside synthetic OneDrive rejected with zero log file written there
+  $odLogDir = Join-Path $synthOd "forbidden-logs"
+  $env1fOdLog = Join-Path $c1 "env1f-od-log.env"
+  Write-CaseEnv $env1fOdLog @{
+    PC_RESTIC_REPOSITORY    = (Join-Path $c1 "dst1f")
+    PC_RESTIC_PASSWORD_FILE = $pwFile1
+    PC_LOCK_FILE            = (Join-Path $c1 "l1f2.lock")
+    PC_CACHE_DIR            = (Join-Path $c1 "cache1f2")
+    PC_LOG_DIR              = $odLogDir
+    RESTIC_BIN              = $ResticBin
+    PYTHON_BIN              = $PythonBin
+    EXPIRE_SELECT_PATH      = $EXPIRE_SELECT
+  }
+  $r1fOdLog = Invoke-PcPull -Subcommand "run" -EnvPath $env1fOdLog -ExtraEnv $odEnv
+  Assert-True ($r1fOdLog.ExitCode -ne 0) "OneDrive PC_LOG_DIR must fail"
+  Assert-Contains ($r1fOdLog.StdOut + $r1fOdLog.StdErr) "PATH_SYNC_DIR_FORBIDDEN" "OneDrive log dir rejected"
+  Assert-True (-not (Test-Path -LiteralPath $odLogDir)) "no log dir created inside OneDrive"
+
+  # 1f-3: PC_LOCK_FILE inside Git checkout rejected with zero lock file created
+  $gitLock = Join-Path $REPO_ROOT "tmp-forbidden-pc-pull.lock"
+  $env1fGitLock = Join-Path $c1 "env1f-git-lock.env"
+  Write-CaseEnv $env1fGitLock @{
+    PC_RESTIC_REPOSITORY    = (Join-Path $c1 "dst1f")
+    PC_RESTIC_PASSWORD_FILE = $pwFile1
+    PC_LOCK_FILE            = $gitLock
+    PC_CACHE_DIR            = (Join-Path $c1 "cache1f3")
+    PC_LOG_DIR              = (Join-Path $c1 "logs1f3")
+    RESTIC_BIN              = $ResticBin
+    PYTHON_BIN              = $PythonBin
+    EXPIRE_SELECT_PATH      = $EXPIRE_SELECT
+  }
+  $r1fGitLock = Invoke-PcPull -Subcommand "run" -EnvPath $env1fGitLock
+  Assert-True ($r1fGitLock.ExitCode -ne 0) "Git checkout PC_LOCK_FILE must fail"
+  Assert-Contains ($r1fGitLock.StdOut + $r1fGitLock.StdErr) "PATH_GIT_REPO_FORBIDDEN" "Git lock file rejected"
+  Assert-True (-not (Test-Path -LiteralPath $gitLock)) "no lock file created inside Git checkout"
+
+  # 1f-4: Env file inside synthetic OneDrive (even with restricted ACL and default PC_CHECK_ACL) rejected before reading
+  $odEnvFile = Join-Path $synthOd "sync-env.env"
+  Write-CaseEnv $odEnvFile @{
+    PC_RESTIC_REPOSITORY    = (Join-Path $c1 "dst1f")
+    PC_RESTIC_PASSWORD_FILE = $pwFile1
+    RESTIC_BIN              = $ResticBin
+    PYTHON_BIN              = $PythonBin
+    EXPIRE_SELECT_PATH      = $EXPIRE_SELECT
+  }
+  $r1fOdEnv = Invoke-PcPull -Subcommand "run" -EnvPath $odEnvFile -ExtraEnv $odEnv
+  Assert-True ($r1fOdEnv.ExitCode -ne 0) "OneDrive env file must fail"
+  Assert-Contains ($r1fOdEnv.StdOut + $r1fOdEnv.StdErr) "PATH_SYNC_DIR_FORBIDDEN" "OneDrive env file rejected"
+
+  # 1f-5: Password file inside synthetic OneDrive rejected
+  $odPwFile = Join-Path $synthOd "sync-pc.pass"
+  [System.IO.File]::WriteAllText($odPwFile, "sync-pw-1`n", [System.Text.UTF8Encoding]::new($false))
+  Set-RestrictedAcl $odPwFile
+  $env1fOdPw = Join-Path $c1 "env1f-od-pw.env"
+  Write-CaseEnv $env1fOdPw @{
+    PC_RESTIC_REPOSITORY    = (Join-Path $c1 "dst1f")
+    PC_RESTIC_PASSWORD_FILE = $odPwFile
+    PC_LOCK_FILE            = (Join-Path $c1 "l1f5.lock")
+    PC_CACHE_DIR            = (Join-Path $c1 "cache1f5")
+    PC_LOG_DIR              = (Join-Path $c1 "logs1f5")
+    RESTIC_BIN              = $ResticBin
+    PYTHON_BIN              = $PythonBin
+    EXPIRE_SELECT_PATH      = $EXPIRE_SELECT
+  }
+  $r1fOdPw = Invoke-PcPull -Subcommand "run" -EnvPath $env1fOdPw -ExtraEnv $odEnv
+  Assert-True ($r1fOdPw.ExitCode -ne 0) "OneDrive password file must fail"
+  Assert-Contains ($r1fOdPw.StdOut + $r1fOdPw.StdErr) "PATH_SYNC_DIR_FORBIDDEN" "OneDrive password file rejected"
+
+  # 1f-6: Overlapping repo and cache dir rejected
+  $overlapRepo = Join-Path $c1 "overlap-repo"
+  $env1fOverlap = Join-Path $c1 "env1f-overlap.env"
+  Write-CaseEnv $env1fOverlap @{
+    PC_RESTIC_REPOSITORY    = $overlapRepo
+    PC_RESTIC_PASSWORD_FILE = $pwFile1
+    PC_LOCK_FILE            = (Join-Path $c1 "l1f6.lock")
+    PC_CACHE_DIR            = (Join-Path $overlapRepo "nested-cache")
+    PC_LOG_DIR              = (Join-Path $c1 "logs1f6")
+    RESTIC_BIN              = $ResticBin
+    PYTHON_BIN              = $PythonBin
+    EXPIRE_SELECT_PATH      = $EXPIRE_SELECT
+  }
+  $r1fOverlap = Invoke-PcPull -Subcommand "run" -EnvPath $env1fOverlap
+  Assert-True ($r1fOverlap.ExitCode -ne 0) "overlapping repo/cache must fail"
+  Assert-Contains ($r1fOverlap.StdOut + $r1fOverlap.StdErr) "PATH_OVERLAP_FORBIDDEN" "overlap guard rejected nested cache"
+
+  # 1f-7: Unmounted/non-existent drive fails closed (never treated as safe when DriveInfo/parent missing)
+  if ($env:OS -eq "Windows_NT") {
+    $unusedDrive = $null
+    foreach ($letter in @("Z","Y","X","W","V","U","T","S","R","Q")) {
+      if (-not (Test-Path -LiteralPath "${letter}:\")) {
+        $unusedDrive = "${letter}:"
+        break
+      }
+    }
+    Assert-True ($null -ne $unusedDrive) "unused drive letter available for fail-closed check"
+    $env1fDrive = Join-Path $c1 "env1f-drive.env"
+    Write-CaseEnv $env1fDrive @{
+      PC_RESTIC_REPOSITORY    = "${unusedDrive}\nonexistent-gongchae\replica"
+      PC_RESTIC_PASSWORD_FILE = $pwFile1
+      PC_LOCK_FILE            = (Join-Path $c1 "l1f7.lock")
+      PC_CACHE_DIR            = (Join-Path $c1 "cache1f7")
+      PC_LOG_DIR              = (Join-Path $c1 "logs1f7")
+      RESTIC_BIN              = $ResticBin
+      PYTHON_BIN              = $PythonBin
+      EXPIRE_SELECT_PATH      = $EXPIRE_SELECT
+    }
+    $r1fDrive = Invoke-PcPull -Subcommand "run" -EnvPath $env1fDrive
+    Assert-True ($r1fDrive.ExitCode -ne 0) "unmounted drive must fail closed"
+    Assert-Contains ($r1fDrive.StdOut + $r1fDrive.StdErr) "DEST_DRIVE_UNAVAILABLE" "unmounted drive rejected fail-closed"
   }
 
   # ---------------------------------------------------------------------------
@@ -453,7 +611,6 @@ try {
     RESTIC_BIN               = $ResticBin
     PYTHON_BIN               = $PythonBin
     EXPIRE_SELECT_PATH       = $EXPIRE_SELECT
-    PC_ALLOW_CUSTOM_PATHS    = "true"
     PC_ALLOW_LOCAL_SOURCE    = "true"
     PC_NOW_EPOCH_OVERRIDE    = "$BASE_NOW"
     COPY_MAX_RETRIES         = "0"
@@ -528,7 +685,6 @@ try {
     RESTIC_BIN               = $ResticBin
     PYTHON_BIN               = $PythonBin
     EXPIRE_SELECT_PATH       = $EXPIRE_SELECT
-    PC_ALLOW_CUSTOM_PATHS    = "true"
     PC_ALLOW_LOCAL_SOURCE    = "true"
     PC_NOW_EPOCH_OVERRIDE    = "$allExpiredNow"
     COPY_MAX_RETRIES         = "0"
@@ -565,7 +721,6 @@ try {
     RESTIC_BIN               = $ResticBin
     PYTHON_BIN               = $PythonBin
     EXPIRE_SELECT_PATH       = $EXPIRE_SELECT
-    PC_ALLOW_CUSTOM_PATHS    = "true"
     PC_ALLOW_LOCAL_SOURCE    = "true"
     PC_NOW_EPOCH_OVERRIDE    = "$BASE_NOW"
     COPY_MAX_RETRIES         = "0"
@@ -592,7 +747,6 @@ try {
     RESTIC_BIN               = $ResticBin
     PYTHON_BIN               = $PythonBin
     EXPIRE_SELECT_PATH       = $EXPIRE_SELECT
-    PC_ALLOW_CUSTOM_PATHS    = "true"
     PC_ALLOW_LOCAL_SOURCE    = "true"
     PC_NOW_EPOCH_OVERRIDE    = "$BASE_NOW"
     COPY_MAX_RETRIES         = "1"
@@ -618,7 +772,6 @@ try {
     RESTIC_BIN               = $ResticBin
     PYTHON_BIN               = $PythonBin
     EXPIRE_SELECT_PATH       = $EXPIRE_SELECT
-    PC_ALLOW_CUSTOM_PATHS    = "true"
     PC_ALLOW_LOCAL_SOURCE    = "true"
     PC_NOW_EPOCH_OVERRIDE    = "$BASE_NOW"
     COPY_MAX_RETRIES         = "0"
@@ -628,6 +781,35 @@ try {
   Assert-Contains $r5PwMiss.StdOut "PRE_RETENTION_SUMMARY policy=wall-clock-14d forgotten=1 total=0 expire=0 keep=0" "local pre-expiry ran even with missing OCI password file"
   Assert-Contains ($r5PwMiss.StdOut + $r5PwMiss.StdErr) "LOCAL_RETENTION_OK_BUT_SOURCE_FAILED" "distinguished local retention ok vs missing OCI password file"
   Assert-Eq 0 @(Get-RepoSnapshots -Repo $dst5 -Password $dstPass -CacheDir $cache5 -Tag "gongchae-bell").Count "local expired snapshot deleted despite missing OCI password file"
+
+  # 5a-od-pwfile: OCI_RESTIC_PASSWORD_FILE inside synthetic OneDrive must STILL allow local pre-expiry first, then fail with PATH_SYNC_DIR_FORBIDDEN
+  [System.IO.File]::WriteAllText((Join-Path $data5 "a3.txt"), "expired-despite-od-oci-pwfile")
+  Assert-Eq 0 (Invoke-ResticDirect -Repo $dst5 -Password $dstPass -CacheDir $cache5 -ArgsList @("backup", "--tag", "gongchae-bell", "--time", (Format-ResticTime ($BASE_NOW - 22 * $DAY)), $data5)).ExitCode "c5 old snap 3"
+  $odOciPw = Join-Path $synthOd "oci-sync.pass"
+  [System.IO.File]::WriteAllText($odOciPw, $srcPass, [System.Text.UTF8Encoding]::new($false))
+  Set-RestrictedAcl $odOciPw
+  $env5OdPw = Join-Path $c5 "src-pwfile-od.env"
+  Write-CaseEnv $env5OdPw @{
+    PC_RESTIC_REPOSITORY     = $dst5
+    PC_RESTIC_PASSWORD_FILE  = $dstPwFile
+    OCI_RESTIC_REPOSITORY    = $src2
+    OCI_RESTIC_PASSWORD_FILE = $odOciPw
+    PC_LOCK_FILE             = (Join-Path $c5 "pc-pull.lock")
+    PC_CACHE_DIR             = $cache5
+    PC_LOG_DIR               = (Join-Path $c5 "logs")
+    RESTIC_BIN               = $ResticBin
+    PYTHON_BIN               = $PythonBin
+    EXPIRE_SELECT_PATH       = $EXPIRE_SELECT
+    PC_ALLOW_LOCAL_SOURCE    = "true"
+    PC_NOW_EPOCH_OVERRIDE    = "$BASE_NOW"
+    COPY_MAX_RETRIES         = "0"
+  }
+  $r5OdPw = Invoke-PcPull -Subcommand "run" -EnvPath $env5OdPw -ExtraEnv $odEnv
+  Assert-True ($r5OdPw.ExitCode -ne 0) "OneDrive OCI password file must fail"
+  Assert-Contains $r5OdPw.StdOut "PRE_RETENTION_SUMMARY policy=wall-clock-14d forgotten=1 total=0 expire=0 keep=0" "local pre-expiry ran before rejecting OneDrive OCI password file"
+  Assert-Contains ($r5OdPw.StdOut + $r5OdPw.StdErr) "PATH_SYNC_DIR_FORBIDDEN" "OneDrive OCI password file rejected by path guard"
+  Assert-Contains ($r5OdPw.StdOut + $r5OdPw.StdErr) "LOCAL_RETENTION_OK_BUT_SOURCE_FAILED" "local retention ok separated from source pwfile rejection"
+  Assert-Eq 0 @(Get-RepoSnapshots -Repo $dst5 -Password $dstPass -CacheDir $cache5 -Tag "gongchae-bell").Count "local expired snapshot deleted despite OneDrive OCI password file"
 
   # 5a-samepw: identical PC and OCI passwords must be rejected
   $env5SamePw = Join-Path $c5 "same-pw.env"
@@ -642,7 +824,6 @@ try {
     RESTIC_BIN               = $ResticBin
     PYTHON_BIN               = $PythonBin
     EXPIRE_SELECT_PATH       = $EXPIRE_SELECT
-    PC_ALLOW_CUSTOM_PATHS    = "true"
     PC_ALLOW_LOCAL_SOURCE    = "true"
     PC_NOW_EPOCH_OVERRIDE    = "$BASE_NOW"
     COPY_MAX_RETRIES         = "0"
@@ -664,7 +845,6 @@ try {
     RESTIC_BIN               = $ResticBin
     PYTHON_BIN               = $PythonBin
     EXPIRE_SELECT_PATH       = $EXPIRE_SELECT
-    PC_ALLOW_CUSTOM_PATHS    = "true"
     PC_ALLOW_LOCAL_SOURCE    = "true"
   }
   $r5b = Invoke-PcPull -Subcommand "run" -EnvPath $env5b
@@ -672,13 +852,13 @@ try {
   Assert-Contains ($r5b.StdOut + $r5b.StdErr) "LOCAL_REPO_AUTH_FAIL" "explicit local auth failure code"
 
   # ---------------------------------------------------------------------------
-  Write-Host "=== [6/10] Destination lock preserved even with --no-lock ==="
+  Write-Host "=== [6/10] Destination lock preserved: 6a pre-retention lock + 6b actual copy-stage append lock ==="
   $c6 = Join-Path $TMP_ROOT "case6"
   $dst6 = Join-Path $c6 "dst-pc"
   $cache6 = Join-Path $c6 "cache"
   New-Item -ItemType Directory -Path $dst6, $cache6 -Force | Out-Null
   Assert-Eq 0 (Invoke-ResticDirect -Repo $dst6 -Password $dstPass -CacheDir $cache6 -ArgsList @("init")).ExitCode "c6 init"
-  # Make dst6/locks read-only so any lock write attempt on destination fails!
+  # 6a: Pre-retention destination lock regression (read-only dst6/locks fails during PRE_RETENTION before copy)
   $dst6Locks = Join-Path $dst6 "locks"
   Set-ReadOnlyTreeAcl $dst6Locks
   $env6 = Join-Path $c6 "dst-lock.env"
@@ -687,20 +867,97 @@ try {
     PC_RESTIC_PASSWORD_FILE  = $dstPwFile
     OCI_RESTIC_REPOSITORY    = $src2
     OCI_RESTIC_PASSWORD_FILE = $srcPwFile
+    HEALTHCHECKS_PC_PULL_URL = $hbServer.Url
     PC_LOCK_FILE             = (Join-Path $c6 "pc-pull.lock")
     PC_CACHE_DIR             = $cache6
     PC_LOG_DIR               = (Join-Path $c6 "logs")
     RESTIC_BIN               = $ResticBin
     PYTHON_BIN               = $PythonBin
     EXPIRE_SELECT_PATH       = $EXPIRE_SELECT
-    PC_ALLOW_CUSTOM_PATHS    = "true"
     PC_ALLOW_LOCAL_SOURCE    = "true"
     PC_NOW_EPOCH_OVERRIDE    = "$BASE_NOW"
     COPY_MAX_RETRIES         = "0"
   }
+  if (Test-Path $hbLog) { Remove-Item $hbLog -Force }
   $r6 = Invoke-PcPull -Subcommand "run" -EnvPath $env6
-  Assert-True ($r6.ExitCode -ne 0) "read-only destination locks must fail (destination lock is enforced)"
+  $r6Combined = $r6.StdOut + "`n" + $r6.StdErr
+  Assert-True ($r6.ExitCode -ne 0) "6a read-only destination locks must fail during pre-copy local check"
+  Assert-Contains $r6Combined "unable to create lock in backend" "6a failed trying to create local destination lock"
+  Assert-Contains $r6Combined "LOCAL_REPO_UNAVAILABLE" "6a failed at pre-copy local repo readiness check"
+  Assert-NotContains $r6Combined "SOURCE_COPY_START" "6a stopped before copy stage"
+  $hb6a = if (Test-Path $hbLog) { [System.IO.File]::ReadAllText($hbLog) } else { "" }
+  Assert-Contains $hb6a "/deadbeef-pc-token-9999/fail|" "6a sent /fail heartbeat"
+  Assert-NotContains $hb6a "PC_PULL_OK" "6a did not send success heartbeat"
   Restore-WritableTreeAcl $dst6Locks
+
+  # 6b: ACTUAL copy-stage destination append-lock enforcement:
+  # PRE_RETENTION succeeds cleanly against writable dst6b, then right as pc-pull.ps1 enters SOURCE_COPY_START
+  # and invokes real restic --no-lock -r <dst6b> copy --from-repo <src2> <ids...>, a transparent forwarding shim
+  # denies write on dst6b/locks before delegating to the real restic 0.19.1 binary and restores ACL afterward
+  # so POST_RETENTION runs cleanly. Proves restic copy enforces destination append-lock even with --no-lock.
+  $dst6b = Join-Path $c6 "dst-copy-lock"
+  $cache6b = Join-Path $c6 "cache-copy-lock"
+  New-Item -ItemType Directory -Path $dst6b, $cache6b -Force | Out-Null
+  Assert-Eq 0 (Invoke-ResticDirect -Repo $dst6b -Password $dstPass -CacheDir $cache6b -ArgsList @("init")).ExitCode "c6b init"
+  $dst6bLocks = Join-Path $dst6b "locks"
+  $meSid6b = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  $shimPy = Join-Path $c6 "copy_lock_shim.py"
+  $shimCmd = Join-Path $c6 "copy_lock_shim.cmd"
+  $pyShimCode = @"
+import os, subprocess, sys
+REAL_RESTIC = r'''$ResticBin'''
+DST_LOCKS = r'''$dst6bLocks'''
+ME_SID = r'''*$meSid6b'''
+args = sys.argv[1:]
+is_copy = ('copy' in args)
+if is_copy:
+    assert '--no-lock' in args and '--from-repo' in args, f'unexpected copy args: {args}'
+    r_deny = subprocess.run(['icacls.exe', DST_LOCKS, '/deny', f'{ME_SID}:(OI)(CI)(WD,AD,DE,DC)'], capture_output=True, text=True)
+    if r_deny.returncode != 0:
+        sys.stderr.write(f'SHIM_ICACLS_DENY_FAIL: {r_deny.stdout} {r_deny.stderr}\n')
+        sys.exit(99)
+try:
+    proc = subprocess.run([REAL_RESTIC] + args)
+    rc = proc.returncode
+finally:
+    if is_copy:
+        subprocess.run(['icacls.exe', DST_LOCKS, '/remove:d', ME_SID], capture_output=True, text=True)
+sys.exit(rc)
+"@
+  [System.IO.File]::WriteAllText($shimPy, $pyShimCode, [System.Text.UTF8Encoding]::new($false))
+  $cmdShimCode = "@echo off`r`n`"$PythonBin`" -I `"$shimPy`" %*`r`n"
+  [System.IO.File]::WriteAllText($shimCmd, $cmdShimCode, [System.Text.UTF8Encoding]::new($false))
+
+  $env6b = Join-Path $c6 "dst-copy-lock.env"
+  Write-CaseEnv $env6b @{
+    PC_RESTIC_REPOSITORY     = $dst6b
+    PC_RESTIC_PASSWORD_FILE  = $dstPwFile
+    OCI_RESTIC_REPOSITORY    = $src2
+    OCI_RESTIC_PASSWORD_FILE = $srcPwFile
+    HEALTHCHECKS_PC_PULL_URL = $hbServer.Url
+    PC_LOCK_FILE             = (Join-Path $c6 "pc-pull-6b.lock")
+    PC_CACHE_DIR             = $cache6b
+    PC_LOG_DIR               = (Join-Path $c6 "logs-6b")
+    RESTIC_BIN               = $shimCmd
+    PYTHON_BIN               = $PythonBin
+    EXPIRE_SELECT_PATH       = $EXPIRE_SELECT
+    PC_ALLOW_LOCAL_SOURCE    = "true"
+    PC_NOW_EPOCH_OVERRIDE    = "$BASE_NOW"
+    COPY_MAX_RETRIES         = "0"
+  }
+  if (Test-Path $hbLog) { Remove-Item $hbLog -Force }
+  $r6b = Invoke-PcPull -Subcommand "run" -EnvPath $env6b
+  $r6bCombined = $r6b.StdOut + "`n" + $r6b.StdErr
+  Assert-True ($r6b.ExitCode -ne 0) "6b copy-stage destination append-lock refusal must fail"
+  Assert-Contains $r6bCombined "PRE_RETENTION_SUMMARY policy=wall-clock-14d forgotten=0 total=0 expire=0 keep=0" "6b pre-retention passed cleanly before copy"
+  Assert-Contains $r6bCombined "SOURCE_COPY_START" "6b reached actual restic copy stage"
+  Assert-Contains $r6bCombined "unable to create lock in backend" "6b real restic copy failed trying to acquire destination lock"
+  Assert-True (($r6bCombined.IndexOf("SOURCE_COPY_FAIL", [System.StringComparison]::Ordinal) -ge 0) -or ($r6bCombined.IndexOf("LOCAL_DEST_LOCKED", [System.StringComparison]::Ordinal) -ge 0)) "6b recorded copy/lock failure code"
+  Assert-Contains $r6bCombined "POST_RETENTION_SUMMARY policy=wall-clock-14d forgotten=0 total=0 expire=0 keep=0" "6b post-copy retention ran after copy lock failure"
+  Assert-Eq 0 @(Get-RepoSnapshots -Repo $dst6b -Password $dstPass -CacheDir $cache6b -Tag "gongchae-bell").Count "6b copied 0 snapshots when destination lock rejected"
+  $hb6b = if (Test-Path $hbLog) { [System.IO.File]::ReadAllText($hbLog) } else { "" }
+  Assert-Contains $hb6b "/deadbeef-pc-token-9999/fail|" "6b sent /fail heartbeat"
+  Assert-NotContains $hb6b "PC_PULL_OK" "6b did not send success heartbeat"
 
   # ---------------------------------------------------------------------------
   Write-Host "=== [7/10] Copy partial failure / source prune race -> post-copy prune runs & fails closed ==="
@@ -737,7 +994,6 @@ try {
     RESTIC_BIN               = $ResticBin
     PYTHON_BIN               = $PythonBin
     EXPIRE_SELECT_PATH       = $EXPIRE_SELECT
-    PC_ALLOW_CUSTOM_PATHS    = "true"
     PC_ALLOW_LOCAL_SOURCE    = "true"
     PC_NOW_EPOCH_OVERRIDE    = "$BASE_NOW"
     COPY_MAX_RETRIES         = "1"
@@ -778,7 +1034,6 @@ try {
     RESTIC_BIN                 = $ResticBin
     PYTHON_BIN                 = $PythonBin
     EXPIRE_SELECT_PATH         = $EXPIRE_SELECT
-    PC_ALLOW_CUSTOM_PATHS      = "true"
     PC_ALLOW_LOCAL_SOURCE      = "true"
     PC_NOW_EPOCH_OVERRIDE      = "$BASE_NOW"
     PC_POST_NOW_EPOCH_OVERRIDE = "$($BASE_NOW + 2)"
@@ -827,7 +1082,6 @@ try {
     RESTIC_BIN                = $ResticBin
     PYTHON_BIN                = $PythonBin
     EXPIRE_SELECT_PATH        = $EXPIRE_SELECT
-    PC_ALLOW_CUSTOM_PATHS     = "true"
   }
   if (Test-Path $hbLog) { Remove-Item $hbLog -Force }
   $r10 = Invoke-PcPull -Subcommand "run" -EnvPath $env10
@@ -864,7 +1118,6 @@ try {
     RESTIC_BIN                = $ResticBin
     PYTHON_BIN                = $PythonBin
     EXPIRE_SELECT_PATH        = $EXPIRE_SELECT
-    PC_ALLOW_CUSTOM_PATHS     = "true"
     PC_ALLOW_LOCAL_SOURCE     = "true"
     COPY_MAX_RETRIES          = "0"
   }
@@ -891,8 +1144,13 @@ try {
     try { $hbServer.Process.Kill() } catch {}
     try { $hbServer.Process.Dispose() } catch {}
   }
+  foreach ($j in $script:JunctionsToRemove) {
+    if (Test-Path -LiteralPath $j) {
+      try { [System.IO.Directory]::Delete($j, $false) } catch {}
+    }
+  }
   foreach ($roDir in $script:ReadOnlyDirsToRestore) {
-    Restore-WritableTreeAcl $roDir
+    try { Restore-WritableTreeAcl $roDir } catch {}
   }
   if (Test-Path -LiteralPath $TMP_ROOT) {
     Remove-Item -LiteralPath $TMP_ROOT -Recurse -Force -ErrorAction SilentlyContinue

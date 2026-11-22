@@ -316,7 +316,8 @@ function Assert-RestrictedWindowsAcl {
     (New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::CreatorOwnerSid, $null)).Value
   )
 
-  $acl = [System.IO.File]::GetAccessControl($Path)
+  # Get-Acl works identically on Windows PowerShell 5.1 (.NET Framework) and PowerShell 7+ (.NET).
+  $acl = Get-Acl -LiteralPath $Path
   $rules = $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])
   $badPrincipals = @()
   foreach ($rule in $rules) {
@@ -349,78 +350,191 @@ function Normalize-LocalPath {
 function Test-HasRemoteBackendScheme {
   param([string]$Repo)
   if ([string]::IsNullOrWhiteSpace($Repo)) { return $false }
-  # UNC network shares (\\server\share or //server/share) are remote.
+  # UNC network shares and Windows device/extended paths (\\server\share, //server/share, \\?\..., \\.\...) are rejected.
   if ($Repo -match '^(\\\\|//)') { return $true }
   # Windows drive letters (C:\ or C:/) are local paths; 2+ letter schemes (s3:, rest:, sftp:, rclone:, etc.) are remote.
   if ($Repo -match '^[a-zA-Z]:[\\/]') { return $false }
   return ($Repo -match '^[a-zA-Z][a-zA-Z0-9+.-]+:')
 }
 
-function Assert-SafeLocalDestination {
-  param([string]$RepoPath, [bool]$AllowCustomPaths)
-  if ([string]::IsNullOrWhiteSpace($RepoPath)) {
-    Fail-Run "CONFIG_INVALID PC_RESTIC_REPOSITORY is empty"
+function Test-PathsOverlap {
+  param([string]$PathA, [string]$PathB)
+  if ([string]::IsNullOrWhiteSpace($PathA) -or [string]::IsNullOrWhiteSpace($PathB)) { return $false }
+  $a = $PathA.TrimEnd('\', '/')
+  $b = $PathB.TrimEnd('\', '/')
+  if ($a.Equals($b, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+  if ($a.StartsWith($b + "\", [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+  if ($b.StartsWith($a + "\", [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+  return $false
+}
+
+function Assert-NoPathOverlap {
+  param([string]$PathA, [string]$LabelA, [string]$PathB, [string]$LabelB)
+  if (Test-PathsOverlap $PathA $PathB) {
+    Fail-Run "PATH_OVERLAP_FORBIDDEN $LabelA ($PathA) must not overlap with $LabelB ($PathB)"
   }
-  if (Test-HasRemoteBackendScheme $RepoPath) {
-    Fail-Run "DEST_MUST_BE_LOCAL PC_RESTIC_REPOSITORY must be a local filesystem path, refusing remote target: $RepoPath"
+}
+
+function Assert-SafeLocalPath {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$Role,
+    [ValidateSet("DEST", "PATH")][string]$ErrorPrefix = "PATH",
+    [switch]$AllowGitCheckout
+  )
+  if ([string]::IsNullOrWhiteSpace($Path)) {
+    Fail-Run "CONFIG_INVALID $Role is empty"
   }
-  $norm = Normalize-LocalPath $RepoPath
-  if (Test-IsReparsePoint $norm) {
-    Fail-Run "DEST_REPARSE_POINT_FORBIDDEN refusing symlink/junction destination: $norm"
+  $expanded = [Environment]::ExpandEnvironmentVariables($Path.Trim())
+  if (Test-HasRemoteBackendScheme $expanded) {
+    Fail-Run "${ErrorPrefix}_MUST_BE_LOCAL $Role must be a local filesystem path, refusing remote/UNC target: $expanded"
   }
-  if ($AllowCustomPaths) { return $norm }
+  $norm = ""
+  try {
+    $norm = Normalize-LocalPath $expanded
+  } catch {
+    Fail-Run "CONFIG_INVALID $Role has invalid local path syntax: $($_.Exception.Message)"
+  }
+  if ([string]::IsNullOrWhiteSpace($norm)) {
+    Fail-Run "CONFIG_INVALID $Role resolved to an empty path"
+  }
+
+  if ($env:OS -eq "Windows_NT") {
+    $rootDrive = [System.IO.Path]::GetPathRoot($norm)
+    if ([string]::IsNullOrWhiteSpace($rootDrive) -or $rootDrive -notmatch '^[a-zA-Z]:\\$') {
+      Fail-Run "${ErrorPrefix}_MUST_BE_LOCAL $Role must reside on a local drive letter path: $norm"
+    }
+    $rootTrimmed = $rootDrive.TrimEnd('\')
+    if ($norm.Equals($rootTrimmed, [System.StringComparison]::OrdinalIgnoreCase)) {
+      Fail-Run "CONFIG_INVALID $Role must not be a bare drive root: $norm"
+    }
+
+    # Walk every component from leaf (even if non-existent) up to drive root:
+    # reject any ancestor symlink/junction/reparse point and fail closed on inspection errors.
+    $nearestExisting = ""
+    $probe = $norm
+    while (-not [string]::IsNullOrWhiteSpace($probe)) {
+      if ($probe.Equals($rootTrimmed, [System.StringComparison]::OrdinalIgnoreCase)) {
+        if ([string]::IsNullOrEmpty($nearestExisting)) {
+          try {
+            if (Test-Path -LiteralPath $rootDrive) { $nearestExisting = $rootDrive }
+          } catch {
+            Fail-Run "${ErrorPrefix}_ACCESS_UNVERIFIED unable to inspect drive root $rootDrive for $Role : $($_.Exception.Message)"
+          }
+        }
+        break
+      }
+      $exists = $false
+      try {
+        $exists = Test-Path -LiteralPath $probe
+      } catch {
+        Fail-Run "${ErrorPrefix}_ACCESS_UNVERIFIED unable to inspect path component $probe for $Role : $($_.Exception.Message)"
+      }
+      if ($exists) {
+        if ([string]::IsNullOrEmpty($nearestExisting)) {
+          $nearestExisting = $probe
+        }
+        try {
+          $item = Get-Item -LiteralPath $probe -Force
+        } catch {
+          Fail-Run "${ErrorPrefix}_ACCESS_UNVERIFIED unable to read attributes of $probe for $Role : $($_.Exception.Message)"
+        }
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+          Fail-Run "${ErrorPrefix}_REPARSE_POINT_FORBIDDEN refusing symlink/junction/reparse point at $probe for $Role ($norm)"
+        }
+      }
+      $parent = Split-Path -Parent $probe
+      if ([string]::IsNullOrEmpty($parent) -or $parent -eq $probe) { break }
+      $probe = $parent.TrimEnd('\')
+    }
+
+    if ([string]::IsNullOrEmpty($nearestExisting)) {
+      Fail-Run "${ErrorPrefix}_DRIVE_UNAVAILABLE no accessible local parent volume for $Role ($norm)"
+    }
+
+    # Fail-closed volume inspection (never swallow DriveInfo errors as safe).
+    $di = $null
+    try {
+      $di = New-Object System.IO.DriveInfo($rootDrive)
+    } catch {
+      Fail-Run "${ErrorPrefix}_DRIVE_UNAVAILABLE unable to inspect volume $rootDrive for $Role : $($_.Exception.Message)"
+    }
+    if ($di.DriveType -eq [System.IO.DriveType]::Network) {
+      Fail-Run "${ErrorPrefix}_NETWORK_DRIVE_FORBIDDEN refusing network drive ($rootDrive) for $Role : $norm"
+    }
+    if ($di.DriveType -ne [System.IO.DriveType]::Fixed -and $di.DriveType -ne [System.IO.DriveType]::Removable) {
+      Fail-Run "${ErrorPrefix}_DRIVE_UNAVAILABLE unsupported drive type ($($di.DriveType)) on $rootDrive for $Role : $norm"
+    }
+    if (-not $di.IsReady) {
+      Fail-Run "${ErrorPrefix}_DRIVE_UNAVAILABLE volume $rootDrive is not ready for $Role : $norm"
+    }
+    $volLabel = ""
+    $driveFmt = ""
+    try {
+      $volLabel = $di.VolumeLabel
+      $driveFmt = $di.DriveFormat
+    } catch {
+      Fail-Run "${ErrorPrefix}_DRIVE_UNAVAILABLE unable to query volume metadata on $rootDrive for $Role : $($_.Exception.Message)"
+    }
+    if ($volLabel -match '(?i)google\s*drive') {
+      Fail-Run "${ErrorPrefix}_SYNC_DIR_FORBIDDEN refusing Google Drive volume ($rootDrive) for $Role : $norm"
+    }
+    if (-not $driveFmt.Equals("NTFS", [System.StringComparison]::OrdinalIgnoreCase)) {
+      Fail-Run "${ErrorPrefix}_NON_NTFS_FORBIDDEN refusing non-NTFS volume ($rootDrive format=$driveFmt) for $Role : $norm"
+    }
+  } else {
+    $nearestExisting = $norm
+  }
 
   # Block OneDrive sync directories
   foreach ($odVar in @($env:OneDrive, $env:OneDriveConsumer, $env:OneDriveCommercial)) {
     if (-not [string]::IsNullOrWhiteSpace($odVar)) {
-      $odNorm = Normalize-LocalPath $odVar
-      if ($norm.Equals($odNorm, [System.StringComparison]::OrdinalIgnoreCase) -or
-          $norm.StartsWith($odNorm + "\", [System.StringComparison]::OrdinalIgnoreCase)) {
-        Fail-Run "DEST_SYNC_DIR_FORBIDDEN refusing destination inside OneDrive: $norm"
+      $odNorm = ""
+      try { $odNorm = Normalize-LocalPath $odVar } catch { continue }
+      if (-not [string]::IsNullOrEmpty($odNorm)) {
+        if ($norm.Equals($odNorm, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $norm.StartsWith($odNorm + "\", [System.StringComparison]::OrdinalIgnoreCase)) {
+          Fail-Run "${ErrorPrefix}_SYNC_DIR_FORBIDDEN refusing $Role inside OneDrive: $norm"
+        }
       }
     }
   }
 
-  # Block Google Drive path, network drives, and non-NTFS volumes (NTFS required for Windows ACL enforcement)
+  # Block Google Drive path segments
   if ($norm -match '(?i)(^|[\\/])google\s*drive([\\/]|$)') {
-    Fail-Run "DEST_SYNC_DIR_FORBIDDEN refusing destination inside Google Drive: $norm"
-  }
-  if ($env:OS -eq "Windows_NT") {
-    $rootDrive = [System.IO.Path]::GetPathRoot($norm)
-    if (-not [string]::IsNullOrWhiteSpace($rootDrive)) {
-      try {
-        $di = New-Object System.IO.DriveInfo($rootDrive)
-        if ($di.DriveType -eq [System.IO.DriveType]::Network) {
-          Fail-Run "DEST_NETWORK_DRIVE_FORBIDDEN refusing destination on network drive ($rootDrive): $norm"
-        }
-        if ($di.IsReady) {
-          if ($di.VolumeLabel -match '(?i)google\s*drive') {
-            Fail-Run "DEST_SYNC_DIR_FORBIDDEN refusing destination on Google Drive volume ($rootDrive): $norm"
-          }
-          if (-not $di.DriveFormat.Equals("NTFS", [System.StringComparison]::OrdinalIgnoreCase)) {
-            Fail-Run "DEST_NON_NTFS_FORBIDDEN refusing destination on non-NTFS volume ($rootDrive format=$($di.DriveFormat)): $norm"
-          }
-        }
-      } catch {
-        if ($_.Exception.Message -match '^DEST_') { throw }
-        # Ignore unmounted or non-drive-letter edge cases.
-      }
-    }
+    Fail-Run "${ErrorPrefix}_SYNC_DIR_FORBIDDEN refusing $Role inside Google Drive: $norm"
   }
 
-  # Block Git checkout / Orca worktree directories
-  $probe = $norm
-  while (-not [string]::IsNullOrWhiteSpace($probe)) {
-    $gitMarker = Join-Path $probe ".git"
-    if (Test-Path -LiteralPath $gitMarker) {
-      Fail-Run "DEST_GIT_REPO_FORBIDDEN refusing destination inside a Git checkout/worktree ($probe): $norm"
+  # Block Git checkout / Orca worktree directories (except runtime selector script in dev/CI checkout)
+  if (-not $AllowGitCheckout) {
+    $gitProbe = $nearestExisting
+    if (-not [string]::IsNullOrEmpty($gitProbe) -and (Test-Path -LiteralPath $gitProbe -PathType Leaf)) {
+      $gitProbe = Split-Path -Parent $gitProbe
     }
-    $parent = Split-Path -Parent $probe
-    if ($parent -eq $probe) { break }
-    $probe = $parent
+    while (-not [string]::IsNullOrWhiteSpace($gitProbe)) {
+      $gitMarker = Join-Path $gitProbe ".git"
+      if (Test-Path -LiteralPath $gitMarker) {
+        Fail-Run "${ErrorPrefix}_GIT_REPO_FORBIDDEN refusing $Role inside a Git checkout/worktree ($gitProbe): $norm"
+      }
+      $parent = Split-Path -Parent $gitProbe
+      if ([string]::IsNullOrEmpty($parent) -or $parent -eq $gitProbe) { break }
+      $gitProbe = $parent
+    }
   }
 
   return $norm
+}
+
+function Assert-SafeBinarySpec {
+  param([string]$Spec, [string]$Role)
+  if ([string]::IsNullOrWhiteSpace($Spec)) {
+    Fail-Run "CONFIG_INVALID $Role is empty"
+  }
+  $expanded = [Environment]::ExpandEnvironmentVariables($Spec.Trim())
+  if (Test-HasRemoteBackendScheme $expanded) {
+    Fail-Run "PATH_MUST_BE_LOCAL $Role must not reference a remote/UNC executable: $expanded"
+  }
+  return $expanded
 }
 
 function Read-PasswordFile {
@@ -449,7 +563,8 @@ function Load-Config {
       $resolvedEnv = Join-Path $localApp "gongchae-bell\backup-env\pc-pull.env"
     }
   }
-  $resolvedEnv = [Environment]::ExpandEnvironmentVariables($resolvedEnv)
+  # Validate env file location (local NTFS, no UNC/reparse/sync/Git) BEFORE reading any bytes from it.
+  $resolvedEnv = Assert-SafeLocalPath -Path $resolvedEnv -Role "PC_PULL_ENV_FILE" -ErrorPrefix "PATH"
   Assert-RegularFileNoSymlink $resolvedEnv "PC pull env file"
 
   $kv = @{}
@@ -485,6 +600,11 @@ function Load-Config {
     Fail-Run "CONFIG_INVALID BACKUP_KEEP_DAILY is no longer supported; retention is fixed at 14 days from run UTC time (ADR-0017)"
   }
 
+  # Reject removed path-guard bypass knob so optional overrides are always validated.
+  if ($kv.ContainsKey("PC_ALLOW_CUSTOM_PATHS") -and -not [string]::IsNullOrWhiteSpace($kv["PC_ALLOW_CUSTOM_PATHS"])) {
+    Fail-Run "CONFIG_INVALID PC_ALLOW_CUSTOM_PATHS is not supported; all local paths are always validated against UNC, reparse points, non-NTFS, sync dirs, and Git checkouts"
+  }
+
   $checkAcl = $true
   if ($kv.ContainsKey("PC_CHECK_ACL") -and -not [string]::IsNullOrWhiteSpace($kv["PC_CHECK_ACL"])) {
     $checkAcl = ($kv["PC_CHECK_ACL"].Trim().ToLowerInvariant() -ne "false")
@@ -493,7 +613,6 @@ function Load-Config {
     Assert-RestrictedWindowsAcl $resolvedEnv "PC pull env file"
   }
 
-  $allowCustomPaths = ($kv.ContainsKey("PC_ALLOW_CUSTOM_PATHS") -and $kv["PC_ALLOW_CUSTOM_PATHS"].Trim().ToLowerInvariant() -eq "true")
   $allowLocalSource = ($kv.ContainsKey("PC_ALLOW_LOCAL_SOURCE") -and $kv["PC_ALLOW_LOCAL_SOURCE"].Trim().ToLowerInvariant() -eq "true")
 
   $localApp = if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { $env:LOCALAPPDATA } else { $env:HOME }
@@ -504,15 +623,17 @@ function Load-Config {
   } else {
     Join-Path $baseDir "backup-replica"
   }
-  $pcRepo = Assert-SafeLocalDestination $pcRepoRaw $allowCustomPaths
+  $pcRepo = Assert-SafeLocalPath -Path $pcRepoRaw -Role "PC_RESTIC_REPOSITORY" -ErrorPrefix "DEST"
 
   # Resolve local PC password (file or inline, never both)
-  $pcPwFile = if ($kv.ContainsKey("PC_RESTIC_PASSWORD_FILE")) { $kv["PC_RESTIC_PASSWORD_FILE"].Trim() } else { "" }
+  $pcPwFileRaw = if ($kv.ContainsKey("PC_RESTIC_PASSWORD_FILE")) { $kv["PC_RESTIC_PASSWORD_FILE"].Trim() } else { "" }
   $pcPwInline = if ($kv.ContainsKey("PC_RESTIC_PASSWORD")) { $kv["PC_RESTIC_PASSWORD"] } else { "" }
-  if (-not [string]::IsNullOrEmpty($pcPwFile) -and -not [string]::IsNullOrEmpty($pcPwInline)) {
+  if (-not [string]::IsNullOrEmpty($pcPwFileRaw) -and -not [string]::IsNullOrEmpty($pcPwInline)) {
     Fail-Run "CONFIG_INVALID set either PC_RESTIC_PASSWORD_FILE or PC_RESTIC_PASSWORD, not both"
   }
-  $pcPassword = if (-not [string]::IsNullOrEmpty($pcPwFile)) {
+  $pcPwFile = ""
+  $pcPassword = if (-not [string]::IsNullOrEmpty($pcPwFileRaw)) {
+    $pcPwFile = Assert-SafeLocalPath -Path $pcPwFileRaw -Role "PC_RESTIC_PASSWORD_FILE" -ErrorPrefix "PATH"
     Read-PasswordFile $pcPwFile "PC_RESTIC_PASSWORD_FILE" $checkAcl
   } else {
     $pcPwInline
@@ -522,7 +643,7 @@ function Load-Config {
   }
   Register-Secret $pcPassword
 
-  # Defer OCI source password file read/ACL check until Assert-ValidSourceConfig (AFTER local pre-expiry)
+  # Defer OCI source password file path/read/ACL check until Assert-ValidSourceConfig (AFTER local pre-expiry)
   # so missing/invalid source credentials never block local 14-day retention or pollute pre-stage logs.
   $ociRepo = if ($kv.ContainsKey("OCI_RESTIC_REPOSITORY")) { $kv["OCI_RESTIC_REPOSITORY"].Trim() } else { "" }
   $ociPwFile = if ($kv.ContainsKey("OCI_RESTIC_PASSWORD_FILE")) { $kv["OCI_RESTIC_PASSWORD_FILE"].Trim() } else { "" }
@@ -533,49 +654,79 @@ function Load-Config {
     Register-Secret $ociPassword
   }
 
-  $lockFile = if ($kv.ContainsKey("PC_LOCK_FILE") -and -not [string]::IsNullOrWhiteSpace($kv["PC_LOCK_FILE"])) {
-    Normalize-LocalPath $kv["PC_LOCK_FILE"]
+  $lockFileRaw = if ($kv.ContainsKey("PC_LOCK_FILE") -and -not [string]::IsNullOrWhiteSpace($kv["PC_LOCK_FILE"])) {
+    $kv["PC_LOCK_FILE"]
   } else {
     Join-Path $baseDir "runtime\pc-pull.lock"
   }
-  $cacheDir = if ($kv.ContainsKey("PC_CACHE_DIR") -and -not [string]::IsNullOrWhiteSpace($kv["PC_CACHE_DIR"])) {
-    Normalize-LocalPath $kv["PC_CACHE_DIR"]
+  $lockFile = Assert-SafeLocalPath -Path $lockFileRaw -Role "PC_LOCK_FILE" -ErrorPrefix "PATH"
+
+  $cacheDirRaw = if ($kv.ContainsKey("PC_CACHE_DIR") -and -not [string]::IsNullOrWhiteSpace($kv["PC_CACHE_DIR"])) {
+    $kv["PC_CACHE_DIR"]
   } else {
     Join-Path $baseDir "cache"
   }
-  $logDir = if ($kv.ContainsKey("PC_LOG_DIR") -and -not [string]::IsNullOrWhiteSpace($kv["PC_LOG_DIR"])) {
-    Normalize-LocalPath $kv["PC_LOG_DIR"]
+  $cacheDir = Assert-SafeLocalPath -Path $cacheDirRaw -Role "PC_CACHE_DIR" -ErrorPrefix "PATH"
+
+  $logDirRaw = if ($kv.ContainsKey("PC_LOG_DIR") -and -not [string]::IsNullOrWhiteSpace($kv["PC_LOG_DIR"])) {
+    $kv["PC_LOG_DIR"]
   } else {
     Join-Path $baseDir "logs"
   }
-  $script:LogFilePath = Join-Path $logDir "pc-pull.log"
+  $logDir = Assert-SafeLocalPath -Path $logDirRaw -Role "PC_LOG_DIR" -ErrorPrefix "PATH"
 
-  $resticBin = if ($kv.ContainsKey("RESTIC_BIN") -and -not [string]::IsNullOrWhiteSpace($kv["RESTIC_BIN"])) {
-    [Environment]::ExpandEnvironmentVariables($kv["RESTIC_BIN"].Trim())
+  $resticBinRaw = if ($kv.ContainsKey("RESTIC_BIN") -and -not [string]::IsNullOrWhiteSpace($kv["RESTIC_BIN"])) {
+    $kv["RESTIC_BIN"]
   } else {
     "restic"
   }
-  $pythonBin = if ($kv.ContainsKey("PYTHON_BIN") -and -not [string]::IsNullOrWhiteSpace($kv["PYTHON_BIN"])) {
-    [Environment]::ExpandEnvironmentVariables($kv["PYTHON_BIN"].Trim())
+  $resticBin = Assert-SafeBinarySpec $resticBinRaw "RESTIC_BIN"
+
+  $pythonBinRaw = if ($kv.ContainsKey("PYTHON_BIN") -and -not [string]::IsNullOrWhiteSpace($kv["PYTHON_BIN"])) {
+    $kv["PYTHON_BIN"]
   } else {
     "python"
   }
+  $pythonBin = Assert-SafeBinarySpec $pythonBinRaw "PYTHON_BIN"
 
-  $expireSelect = ""
+  $expireSelectRaw = ""
   if ($kv.ContainsKey("EXPIRE_SELECT_PATH") -and -not [string]::IsNullOrWhiteSpace($kv["EXPIRE_SELECT_PATH"])) {
-    $expireSelect = Normalize-LocalPath $kv["EXPIRE_SELECT_PATH"]
+    $expireSelectRaw = $kv["EXPIRE_SELECT_PATH"]
   } else {
     $sameDirCandidate = Join-Path $SCRIPT_DIR "expire-select.py"
     $parentDirCandidate = Join-Path (Split-Path -Parent $SCRIPT_DIR) "expire-select.py"
     if (Test-Path -LiteralPath $sameDirCandidate) {
-      $expireSelect = $sameDirCandidate
+      $expireSelectRaw = $sameDirCandidate
     } elseif (Test-Path -LiteralPath $parentDirCandidate) {
-      $expireSelect = $parentDirCandidate
+      $expireSelectRaw = $parentDirCandidate
     } else {
       Fail-Run "CONFIG_INVALID expire-select.py not found beside pc-pull.ps1 or in parent directory"
     }
   }
+  # AllowGitCheckout permits dev/CI execution from a Git checkout while still blocking UNC, reparse points,
+  # non-NTFS, OneDrive/Google Drive, and overlap with PC_RESTIC_REPOSITORY.
+  $expireSelect = Assert-SafeLocalPath -Path $expireSelectRaw -Role "EXPIRE_SELECT_PATH" -ErrorPrefix "PATH" -AllowGitCheckout
   Assert-RegularFileNoSymlink $expireSelect "expire-select.py"
+
+  # Enforce strict separation between repository and auxiliary/config/secret/runtime files BEFORE any mutation or logging.
+  Assert-NoPathOverlap $pcRepo "PC_RESTIC_REPOSITORY" $resolvedEnv "PC_PULL_ENV_FILE"
+  if (-not [string]::IsNullOrEmpty($pcPwFile)) {
+    Assert-NoPathOverlap $pcRepo "PC_RESTIC_REPOSITORY" $pcPwFile "PC_RESTIC_PASSWORD_FILE"
+    Assert-NoPathOverlap $cacheDir "PC_CACHE_DIR" $pcPwFile "PC_RESTIC_PASSWORD_FILE"
+    Assert-NoPathOverlap $logDir "PC_LOG_DIR" $pcPwFile "PC_RESTIC_PASSWORD_FILE"
+  }
+  Assert-NoPathOverlap $pcRepo "PC_RESTIC_REPOSITORY" $lockFile "PC_LOCK_FILE"
+  Assert-NoPathOverlap $pcRepo "PC_RESTIC_REPOSITORY" $cacheDir "PC_CACHE_DIR"
+  Assert-NoPathOverlap $pcRepo "PC_RESTIC_REPOSITORY" $logDir "PC_LOG_DIR"
+  Assert-NoPathOverlap $pcRepo "PC_RESTIC_REPOSITORY" $expireSelect "EXPIRE_SELECT_PATH"
+  Assert-NoPathOverlap $cacheDir "PC_CACHE_DIR" $logDir "PC_LOG_DIR"
+  Assert-NoPathOverlap $cacheDir "PC_CACHE_DIR" $lockFile "PC_LOCK_FILE"
+  Assert-NoPathOverlap $cacheDir "PC_CACHE_DIR" $resolvedEnv "PC_PULL_ENV_FILE"
+  Assert-NoPathOverlap $logDir "PC_LOG_DIR" $lockFile "PC_LOCK_FILE"
+  Assert-NoPathOverlap $logDir "PC_LOG_DIR" $resolvedEnv "PC_PULL_ENV_FILE"
+
+  # Enable log file writes ONLY after PC_LOG_DIR passes all path and overlap checks.
+  $script:LogFilePath = Join-Path $logDir "pc-pull.log"
 
   $copyMaxRetries = 1
   if ($kv.ContainsKey("COPY_MAX_RETRIES") -and -not [string]::IsNullOrWhiteSpace($kv["COPY_MAX_RETRIES"])) {
@@ -627,7 +778,6 @@ function Load-Config {
     ExpireSelectPath      = $expireSelect
     CopyMaxRetries        = $copyMaxRetries
     CopyRetryDelaySeconds = $copyRetryDelay
-    AllowCustomPaths      = $allowCustomPaths
     AllowLocalSource      = $allowLocalSource
     NowOverride           = $nowOverride
     PostNowOverride       = $postNowOverride
@@ -811,7 +961,11 @@ function Assert-ValidSourceConfig {
     Fail-Run "SOURCE_CONFIG_INVALID set either OCI_RESTIC_PASSWORD_FILE or OCI_RESTIC_PASSWORD, not both"
   }
   if ([string]::IsNullOrEmpty($Cfg.OciPassword) -and -not [string]::IsNullOrEmpty($Cfg.OciPasswordFile)) {
-    $Cfg.OciPassword = Read-PasswordFile $Cfg.OciPasswordFile "OCI_RESTIC_PASSWORD_FILE" $Cfg.CheckAcl
+    $ociPwNorm = Assert-SafeLocalPath -Path $Cfg.OciPasswordFile -Role "OCI_RESTIC_PASSWORD_FILE" -ErrorPrefix "PATH"
+    Assert-NoPathOverlap $Cfg.PcRepo "PC_RESTIC_REPOSITORY" $ociPwNorm "OCI_RESTIC_PASSWORD_FILE"
+    Assert-NoPathOverlap $Cfg.CacheDir "PC_CACHE_DIR" $ociPwNorm "OCI_RESTIC_PASSWORD_FILE"
+    Assert-NoPathOverlap $Cfg.LogDir "PC_LOG_DIR" $ociPwNorm "OCI_RESTIC_PASSWORD_FILE"
+    $Cfg.OciPassword = Read-PasswordFile $ociPwNorm "OCI_RESTIC_PASSWORD_FILE" $Cfg.CheckAcl
     Register-Secret $Cfg.OciPassword
   }
   if ([string]::IsNullOrEmpty($Cfg.OciPassword)) {
@@ -830,8 +984,8 @@ function Assert-ValidSourceConfig {
   } else {
     if (-not (Test-HasRemoteBackendScheme $Cfg.OciRepo)) {
       $normSrc = Normalize-LocalPath $Cfg.OciRepo
-      if ($normSrc.Equals($Cfg.PcRepo, [System.StringComparison]::OrdinalIgnoreCase)) {
-        Fail-Run "SOURCE_EQUALS_DEST source and local destination must be distinct repositories"
+      if (Test-PathsOverlap $normSrc $Cfg.PcRepo) {
+        Fail-Run "SOURCE_EQUALS_DEST source and local destination must be distinct non-overlapping repositories"
       }
     }
   }

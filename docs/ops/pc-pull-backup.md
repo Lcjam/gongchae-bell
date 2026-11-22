@@ -7,10 +7,15 @@
 
 ## 1. 구성 원칙 및 경로 배치 (체크아웃 · 동기화 폴더 분리)
 
-- **Docker Desktop 비의존**: 네이티브 Windows `restic`(`0.19.1` 기준)과 `Python 3`만 사용한다.
+- **Docker Desktop 비의존 · PowerShell 5.1 / 7 지원**: 네이티브 Windows `restic`(`0.19.1` 기준), `Python 3`, Windows PowerShell 5.1 또는 PowerShell 7(`pwsh`, 표준 `Get-Acl` 기반)만 사용한다.
 - **공통 만료 판정기 재사용**: 서버 `deploy/backup/backup.sh`와 동일한 `deploy/backup/expire-select.py`를 그대로 사용한다(로컬 만료는 기본 `expired` 모드, 읽기 전용 원본 필터링은 `--mode kept` 모드). 별도 파서를 두지 않아 서버·PC 간 14일 경계 판정 드리프트를 막는다.
-- **체크아웃 · Orca 세션 수명과 분리**: 작업 스케줄러가 Git 저장소나 Orca worktree 안의 스크립트를 직접 가리키지 않도록, 실제 운영 시 `deploy/backup/pc/pc-pull.ps1`과 `deploy/backup/expire-select.py`를 `%LOCALAPPDATA%\gongchae-bell\runtime\`으로 복사해 실행한다.
-- **클라우드 동기화·저장소 경로 금지**: `pc-pull.ps1`은 대상 저장소(`PC_RESTIC_REPOSITORY`)가 OneDrive, Google Drive(`G:` 등), Git 저장소(`.git` 상위 탐색), 또는 원격 백엔드(`s3:` 등)를 가리키면 즉시 실패 종료한다.
+- **개발 검증 배치와 실운영 배치의 구분 (체크아웃 · Orca 세션 수명 분리)**:
+  - 개발·CI 격리 검증에서는 저장소 체크아웃의 `deploy/backup/pc/pc-pull.ps1`과 `deploy/backup/expire-select.py`를 직접 실행할 수 있다(`EXPIRE_SELECT_PATH`만 체크아웃 위치를 허용하며, 이 경우에도 원격/UNC·조상 junction·동기화 폴더·저장소 내부 중첩은 차단한다).
+  - 실제 운영에서는 작업 스케줄러가 Git 저장소나 Orca worktree 안의 스크립트를 직접 가리키지 않도록 `pc-pull.ps1`과 `expire-select.py`를 `%LOCALAPPDATA%\gongchae-bell\runtime\`으로 복사해 실행한다.
+- **전 역할 경로 보호 및 중첩 금지 (변경·네트워크 접근 전 차단)**:
+  - `pc-pull.ps1`은 `PC_RESTIC_REPOSITORY`뿐 아니라 `PC_PULL_ENV_FILE`, 비밀번호 파일(`PC_RESTIC_PASSWORD_FILE`·`OCI_RESTIC_PASSWORD_FILE`), `PC_CACHE_DIR`, `PC_LOG_DIR`, `PC_LOCK_FILE` 전체에 공통 로컬 NTFS 경로 검증을 적용한다(경로 우회 옵션 없음).
+  - 원격 백엔드(`s3:` 등), UNC 경로(`\\server\share`), 네트워크 드라이브, 비-NTFS 볼륨, 준비되지 않은 드라이브(조회 실패 포함 fail-closed), 대상 자체 및 **모든 기존 조상 경로의 junction/symlink/reparse point**(아직 생성되지 않은 하위 leaf 포함), OneDrive, Google Drive(`G:` 등), Git 체크아웃(`.git` 상위 탐색)을 파일·디렉터리 생성이나 네트워크 접근 **전에** 즉시 거부한다.
+  - 로컬 저장소(`PC_RESTIC_REPOSITORY`)와 env·비밀번호·잠금·캐시·로그·selector 경로는 서로 중첩(동일/상하위 포함)될 수 없다(`PATH_OVERLAP_FORBIDDEN`). `PC_CHECK_ACL=false`는 운영 우회 수단으로 사용하지 않는다.
 
 | 역할 | 권장 로컬 NTFS 경로 (기본값) | 비고 |
 |---|---|---|
@@ -161,6 +166,7 @@ Register-ScheduledTask `
   - OCI 서버 백업 실행 중(`03:00 KST` 전후 또는 `Persistent=true` 지연 실행)과 겹쳤다면 몇 분 뒤 `pc-pull.ps1 -Command run`을 수동 재실행해 `PC_PULL_OK`를 확인한다.
 - **`LOCAL_REPO_AUTH_FAIL` / `ENV_ACL_FAIL`**: 로컬 `pc-repo.pass` 또는 NTFS ACL을 복구하기 전까지 로컬 정리가 수행되지 않으므로 즉시 수정 후 수동 실행한다.
 - **OCI 소실 시 PC 로컬 사본으로 복원**:
-  1. `pc-pull.ps1 -Command snapshots`로 사용 가능한 최신 `gongchae-bell` snapshot ID를 확인한다(14일 초과 미정리 사본이 남아 있다면 먼저 만료 정리 또는 복원 허용 여부 확인).
-  2. `PC_RESTIC_REPOSITORY`와 `pc-repo.pass`로 임시 접근제한 폴더에 `restic restore <SNAPSHOT_ID> --target <WORK_DIR>`로 `gongchae-bell.dump`, `backup-meta.txt`, (M2 이후) `erasure.log`를 추출한다.
-  3. 이후 DB 복원·SHA-256 검증·격리 PostgreSQL 17 검증·해지 대장 재적용 및 발송 재개 게이트는 [서버 백업·복구 절차](backup-restore.md) §7을 그대로 따른다. 작업 완료 후 임시 복원 폴더를 삭제한다.
+  1. 먼저 `pc-pull.ps1 -Command run`을 실행해 로컬 선만료(`expire-select.py` → 명시 ID `forget` → `prune --max-unused 0` → 재조회)를 수행한다. OCI 소실로 원본 단계는 실패(`LOCAL_RETENTION_OK_BUT_SOURCE_FAILED`, 0이 아닌 종료 코드)하지만, `%LOCALAPPDATA%\gongchae-bell\logs\pc-pull.log`에서 `PRE_RETENTION_SUMMARY ... expire=0`과 `POST_RETENTION_SUMMARY ... expire=0`이 모두 기록됐는지 확인해 14일 초과 사본이 물리 정리됐음을 검증한다(로컬 정리 자체가 실패하면 복원으로 진행하지 않는다).
+  2. 로컬 만료 검증이 끝난 뒤 `pc-pull.ps1 -Command snapshots`로 남아 있는 유효(`14일 이내`) 최신 `gongchae-bell` snapshot ID를 확인한다. 남은 `gongchae-bell` 스냅샷이 `0`개이면 사용자 결정(`collab/2026-11-19-recovery/04-user-retention-decision.md`, 14일 보유기간 우선·0개 허용)에 따라 복원 가능한 유효 사본이 없는 상태로 처리하며 만료된 사본을 예외 복원하지 않는다.
+  3. 유효한 `gongchae-bell` 스냅샷이 있으면 `PC_RESTIC_REPOSITORY`와 `pc-repo.pass`로 임시 접근제한 폴더에 `restic restore <SNAPSHOT_ID> --target <WORK_DIR>`로 `gongchae-bell.dump`, `backup-meta.txt`, (M2 이후) `erasure.log`를 추출한다.
+  4. 이후 DB 복원·SHA-256 검증·격리 PostgreSQL 17 검증·해지 대장 재적용 및 발송 재개 게이트는 [서버 백업·복구 절차](backup-restore.md) §7을 그대로 따른다. 작업 완료 후 임시 복원 폴더를 삭제한다.
