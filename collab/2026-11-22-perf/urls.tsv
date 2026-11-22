@@ -1,0 +1,19 @@
+# 2026-11-22 운영 제한 실측 고정 manifest (main e0208ff, 공개 HTML·읽기 전용 GET으로 실존 확인)
+group	case_id	path
+home	home_root	/
+list	jobs_default	/jobs
+filter	career_newcomer	/jobs?career=newcomer
+filter	region_ncs_combo	/jobs?region=R3018&ncs=R600014&status=open
+filter	keyword_all	/jobs?q=채용&status=all
+filter	deep_page_all	/jobs?status=all&page=10
+filter	sort_begin	/jobs?sort=begin
+detail	detail_1	/jobs/306769
+detail	detail_2	/jobs/306805
+detail	detail_3	/jobs/306740
+detail	detail_4	/jobs/306783
+detail	detail_5	/jobs/306791
+institution	inst_1	/institutions/C0066
+institution	inst_2	/institutions/C0059
+institution	inst_3	/institutions/C1055
+institution	inst_4	/institutions/C0210
+institution	inst_5	/institutions/C0306

@@ -1,0 +1,14 @@
+started_utc=2026-11-22T08:11:14Z
+interval_sec=5
+duration_sec=900
+max_samples=0
+host_vcpu=2
+disk_path=/
+warn_mem_mib=1536
+warn_disk_pct=80
+cpu_note=docker CPUPerc is per-core 100% scale; cpu_host_pct_normalized divides by host_vcpu
+mem_note=mem_usage_cgroup_raw is Docker cgroup display usage (NOT process RSS); use host mem_available_mib for headroom
+restart_note=tracks (name, container_id); post-baseline new containers save initial count and detect 0->1 (or >0 on first poll); recreated same-name containers reset baseline on new container_id
+finished_utc=2026-11-22T08:14:42Z
+samples_collected=42
+total_skipped_ticks=0

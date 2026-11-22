@@ -1,0 +1,652 @@
+{
+  "run_status": "COMPLETED",
+  "abort_reason": null,
+  "started_utc": "2026-11-22T08:16:55.457Z",
+  "finished_utc": "2026-11-22T08:17:10.938Z",
+  "load_elapsed_sec": 15.49,
+  "warmup_elapsed_sec": 1.97,
+  "measure_elapsed_sec": 13.52,
+  "reconnect_count": 0,
+  "warmup_requests": 25,
+  "warmup_errors": {
+    "http_5xx": 0,
+    "non_200": 0,
+    "timeout": 0,
+    "connect_tls": 0
+  },
+  "config": {
+    "base_url": "https://gongchae.enjoylcjworld.com",
+    "profile": "S1",
+    "concurrency": 1,
+    "duration_sec": 180.0,
+    "max_requests": null,
+    "per_group_requests": 40,
+    "warmup_rounds": 1,
+    "timeout_sec": 10.0
+  },
+  "preflight": {
+    "checked_count": 17,
+    "min_rtt_ms": 47.0,
+    "median_rtt_ms": 63.0,
+    "max_rtt_ms": 235.0,
+    "cases": [
+      {
+        "group": "home",
+        "case_id": "home_root",
+        "path": "/",
+        "status": 200,
+        "elapsed_ms": 235.0,
+        "bytes_read": 15938,
+        "reused_conn": 0
+      },
+      {
+        "group": "list",
+        "case_id": "jobs_default",
+        "path": "/jobs",
+        "status": 200,
+        "elapsed_ms": 109.0,
+        "bytes_read": 53629,
+        "reused_conn": 1
+      },
+      {
+        "group": "filter",
+        "case_id": "career_newcomer",
+        "path": "/jobs?career=newcomer",
+        "status": 200,
+        "elapsed_ms": 109.0,
+        "bytes_read": 53902,
+        "reused_conn": 1
+      },
+      {
+        "group": "filter",
+        "case_id": "region_ncs_combo",
+        "path": "/jobs?region=R3018&ncs=R600014&status=open",
+        "status": 200,
+        "elapsed_ms": 63.0,
+        "bytes_read": 21192,
+        "reused_conn": 1
+      },
+      {
+        "group": "filter",
+        "case_id": "keyword_all",
+        "path": "/jobs?q=채용&status=all",
+        "status": 200,
+        "elapsed_ms": 219.0,
+        "bytes_read": 53764,
+        "reused_conn": 1
+      },
+      {
+        "group": "filter",
+        "case_id": "deep_page_all",
+        "path": "/jobs?status=all&page=10",
+        "status": 200,
+        "elapsed_ms": 93.0,
+        "bytes_read": 53015,
+        "reused_conn": 1
+      },
+      {
+        "group": "filter",
+        "case_id": "sort_begin",
+        "path": "/jobs?sort=begin",
+        "status": 200,
+        "elapsed_ms": 78.0,
+        "bytes_read": 53431,
+        "reused_conn": 1
+      },
+      {
+        "group": "detail",
+        "case_id": "detail_1",
+        "path": "/jobs/306769",
+        "status": 200,
+        "elapsed_ms": 63.0,
+        "bytes_read": 5878,
+        "reused_conn": 1
+      },
+      {
+        "group": "detail",
+        "case_id": "detail_2",
+        "path": "/jobs/306805",
+        "status": 200,
+        "elapsed_ms": 47.0,
+        "bytes_read": 6354,
+        "reused_conn": 1
+      },
+      {
+        "group": "detail",
+        "case_id": "detail_3",
+        "path": "/jobs/306740",
+        "status": 200,
+        "elapsed_ms": 47.0,
+        "bytes_read": 7656,
+        "reused_conn": 1
+      },
+      {
+        "group": "detail",
+        "case_id": "detail_4",
+        "path": "/jobs/306783",
+        "status": 200,
+        "elapsed_ms": 47.0,
+        "bytes_read": 8431,
+        "reused_conn": 1
+      },
+      {
+        "group": "detail",
+        "case_id": "detail_5",
+        "path": "/jobs/306791",
+        "status": 200,
+        "elapsed_ms": 47.0,
+        "bytes_read": 7328,
+        "reused_conn": 1
+      },
+      {
+        "group": "institution",
+        "case_id": "inst_1",
+        "path": "/institutions/C0066",
+        "status": 200,
+        "elapsed_ms": 63.0,
+        "bytes_read": 37069,
+        "reused_conn": 1
+      },
+      {
+        "group": "institution",
+        "case_id": "inst_2",
+        "path": "/institutions/C0059",
+        "status": 200,
+        "elapsed_ms": 94.0,
+        "bytes_read": 38747,
+        "reused_conn": 1
+      },
+      {
+        "group": "institution",
+        "case_id": "inst_3",
+        "path": "/institutions/C1055",
+        "status": 200,
+        "elapsed_ms": 62.0,
+        "bytes_read": 38366,
+        "reused_conn": 1
+      },
+      {
+        "group": "institution",
+        "case_id": "inst_4",
+        "path": "/institutions/C0210",
+        "status": 200,
+        "elapsed_ms": 63.0,
+        "bytes_read": 35568,
+        "reused_conn": 1
+      },
+      {
+        "group": "institution",
+        "case_id": "inst_5",
+        "path": "/institutions/C0306",
+        "status": 200,
+        "elapsed_ms": 63.0,
+        "bytes_read": 38073,
+        "reused_conn": 1
+      }
+    ]
+  },
+  "overall": {
+    "n_total": 200,
+    "n_ok": 200,
+    "n_err": 0,
+    "error_rate": 0.0,
+    "errors": {
+      "http_5xx": 0,
+      "non_200": 0,
+      "timeout": 0,
+      "connect_tls": 0
+    },
+    "min_sample_20_met": true,
+    "reused_conn_count": 200,
+    "new_conn_count": 0,
+    "p50_ok_ms": 62.0,
+    "p95_ok_ms": 94.0,
+    "p99_ok_ms": 281.0,
+    "max_ok_ms": 296.0,
+    "max_all_ms": 296.0
+  },
+  "by_group": {
+    "home": {
+      "n_total": 40,
+      "n_ok": 40,
+      "n_err": 0,
+      "error_rate": 0.0,
+      "errors": {
+        "http_5xx": 0,
+        "non_200": 0,
+        "timeout": 0,
+        "connect_tls": 0
+      },
+      "min_sample_20_met": true,
+      "reused_conn_count": 40,
+      "new_conn_count": 0,
+      "p50_ok_ms": 47.0,
+      "p95_ok_ms": 63.0,
+      "p99_ok_ms": 63.0,
+      "max_ok_ms": 63.0,
+      "max_all_ms": 63.0
+    },
+    "list": {
+      "n_total": 40,
+      "n_ok": 40,
+      "n_err": 0,
+      "error_rate": 0.0,
+      "errors": {
+        "http_5xx": 0,
+        "non_200": 0,
+        "timeout": 0,
+        "connect_tls": 0
+      },
+      "min_sample_20_met": true,
+      "reused_conn_count": 40,
+      "new_conn_count": 0,
+      "p50_ok_ms": 62.0,
+      "p95_ok_ms": 63.0,
+      "p99_ok_ms": 63.0,
+      "max_ok_ms": 63.0,
+      "max_all_ms": 63.0
+    },
+    "filter": {
+      "n_total": 40,
+      "n_ok": 40,
+      "n_err": 0,
+      "error_rate": 0.0,
+      "errors": {
+        "http_5xx": 0,
+        "non_200": 0,
+        "timeout": 0,
+        "connect_tls": 0
+      },
+      "min_sample_20_met": true,
+      "reused_conn_count": 40,
+      "new_conn_count": 0,
+      "p50_ok_ms": 63.0,
+      "p95_ok_ms": 281.0,
+      "p99_ok_ms": 296.0,
+      "max_ok_ms": 296.0,
+      "max_all_ms": 296.0
+    },
+    "detail": {
+      "n_total": 40,
+      "n_ok": 40,
+      "n_err": 0,
+      "error_rate": 0.0,
+      "errors": {
+        "http_5xx": 0,
+        "non_200": 0,
+        "timeout": 0,
+        "connect_tls": 0
+      },
+      "min_sample_20_met": true,
+      "reused_conn_count": 40,
+      "new_conn_count": 0,
+      "p50_ok_ms": 47.0,
+      "p95_ok_ms": 63.0,
+      "p99_ok_ms": 63.0,
+      "max_ok_ms": 63.0,
+      "max_all_ms": 63.0
+    },
+    "institution": {
+      "n_total": 40,
+      "n_ok": 40,
+      "n_err": 0,
+      "error_rate": 0.0,
+      "errors": {
+        "http_5xx": 0,
+        "non_200": 0,
+        "timeout": 0,
+        "connect_tls": 0
+      },
+      "min_sample_20_met": true,
+      "reused_conn_count": 40,
+      "new_conn_count": 0,
+      "p50_ok_ms": 63.0,
+      "p95_ok_ms": 79.0,
+      "p99_ok_ms": 79.0,
+      "max_ok_ms": 79.0,
+      "max_all_ms": 79.0
+    }
+  },
+  "by_case": {
+    "home/home_root": {
+      "n_total": 40,
+      "n_ok": 40,
+      "n_err": 0,
+      "error_rate": 0.0,
+      "errors": {
+        "http_5xx": 0,
+        "non_200": 0,
+        "timeout": 0,
+        "connect_tls": 0
+      },
+      "min_sample_20_met": true,
+      "reused_conn_count": 40,
+      "new_conn_count": 0,
+      "p50_ok_ms": 47.0,
+      "p95_ok_ms": 63.0,
+      "p99_ok_ms": 63.0,
+      "max_ok_ms": 63.0,
+      "max_all_ms": 63.0
+    },
+    "list/jobs_default": {
+      "n_total": 40,
+      "n_ok": 40,
+      "n_err": 0,
+      "error_rate": 0.0,
+      "errors": {
+        "http_5xx": 0,
+        "non_200": 0,
+        "timeout": 0,
+        "connect_tls": 0
+      },
+      "min_sample_20_met": true,
+      "reused_conn_count": 40,
+      "new_conn_count": 0,
+      "p50_ok_ms": 62.0,
+      "p95_ok_ms": 63.0,
+      "p99_ok_ms": 63.0,
+      "max_ok_ms": 63.0,
+      "max_all_ms": 63.0
+    },
+    "filter/career_newcomer": {
+      "n_total": 8,
+      "n_ok": 8,
+      "n_err": 0,
+      "error_rate": 0.0,
+      "errors": {
+        "http_5xx": 0,
+        "non_200": 0,
+        "timeout": 0,
+        "connect_tls": 0
+      },
+      "min_sample_20_met": false,
+      "reused_conn_count": 8,
+      "new_conn_count": 0,
+      "p50_ok_ms": null,
+      "p95_ok_ms": null,
+      "p99_ok_ms": null,
+      "max_ok_ms": 94.0,
+      "max_all_ms": 94.0
+    },
+    "filter/region_ncs_combo": {
+      "n_total": 8,
+      "n_ok": 8,
+      "n_err": 0,
+      "error_rate": 0.0,
+      "errors": {
+        "http_5xx": 0,
+        "non_200": 0,
+        "timeout": 0,
+        "connect_tls": 0
+      },
+      "min_sample_20_met": false,
+      "reused_conn_count": 8,
+      "new_conn_count": 0,
+      "p50_ok_ms": null,
+      "p95_ok_ms": null,
+      "p99_ok_ms": null,
+      "max_ok_ms": 78.0,
+      "max_all_ms": 78.0
+    },
+    "filter/keyword_all": {
+      "n_total": 8,
+      "n_ok": 8,
+      "n_err": 0,
+      "error_rate": 0.0,
+      "errors": {
+        "http_5xx": 0,
+        "non_200": 0,
+        "timeout": 0,
+        "connect_tls": 0
+      },
+      "min_sample_20_met": false,
+      "reused_conn_count": 8,
+      "new_conn_count": 0,
+      "p50_ok_ms": null,
+      "p95_ok_ms": null,
+      "p99_ok_ms": null,
+      "max_ok_ms": 296.0,
+      "max_all_ms": 296.0
+    },
+    "filter/deep_page_all": {
+      "n_total": 8,
+      "n_ok": 8,
+      "n_err": 0,
+      "error_rate": 0.0,
+      "errors": {
+        "http_5xx": 0,
+        "non_200": 0,
+        "timeout": 0,
+        "connect_tls": 0
+      },
+      "min_sample_20_met": false,
+      "reused_conn_count": 8,
+      "new_conn_count": 0,
+      "p50_ok_ms": null,
+      "p95_ok_ms": null,
+      "p99_ok_ms": null,
+      "max_ok_ms": 109.0,
+      "max_all_ms": 109.0
+    },
+    "filter/sort_begin": {
+      "n_total": 8,
+      "n_ok": 8,
+      "n_err": 0,
+      "error_rate": 0.0,
+      "errors": {
+        "http_5xx": 0,
+        "non_200": 0,
+        "timeout": 0,
+        "connect_tls": 0
+      },
+      "min_sample_20_met": false,
+      "reused_conn_count": 8,
+      "new_conn_count": 0,
+      "p50_ok_ms": null,
+      "p95_ok_ms": null,
+      "p99_ok_ms": null,
+      "max_ok_ms": 63.0,
+      "max_all_ms": 63.0
+    },
+    "detail/detail_1": {
+      "n_total": 8,
+      "n_ok": 8,
+      "n_err": 0,
+      "error_rate": 0.0,
+      "errors": {
+        "http_5xx": 0,
+        "non_200": 0,
+        "timeout": 0,
+        "connect_tls": 0
+      },
+      "min_sample_20_met": false,
+      "reused_conn_count": 8,
+      "new_conn_count": 0,
+      "p50_ok_ms": null,
+      "p95_ok_ms": null,
+      "p99_ok_ms": null,
+      "max_ok_ms": 62.0,
+      "max_all_ms": 62.0
+    },
+    "detail/detail_2": {
+      "n_total": 8,
+      "n_ok": 8,
+      "n_err": 0,
+      "error_rate": 0.0,
+      "errors": {
+        "http_5xx": 0,
+        "non_200": 0,
+        "timeout": 0,
+        "connect_tls": 0
+      },
+      "min_sample_20_met": false,
+      "reused_conn_count": 8,
+      "new_conn_count": 0,
+      "p50_ok_ms": null,
+      "p95_ok_ms": null,
+      "p99_ok_ms": null,
+      "max_ok_ms": 63.0,
+      "max_all_ms": 63.0
+    },
+    "detail/detail_3": {
+      "n_total": 8,
+      "n_ok": 8,
+      "n_err": 0,
+      "error_rate": 0.0,
+      "errors": {
+        "http_5xx": 0,
+        "non_200": 0,
+        "timeout": 0,
+        "connect_tls": 0
+      },
+      "min_sample_20_met": false,
+      "reused_conn_count": 8,
+      "new_conn_count": 0,
+      "p50_ok_ms": null,
+      "p95_ok_ms": null,
+      "p99_ok_ms": null,
+      "max_ok_ms": 63.0,
+      "max_all_ms": 63.0
+    },
+    "detail/detail_4": {
+      "n_total": 8,
+      "n_ok": 8,
+      "n_err": 0,
+      "error_rate": 0.0,
+      "errors": {
+        "http_5xx": 0,
+        "non_200": 0,
+        "timeout": 0,
+        "connect_tls": 0
+      },
+      "min_sample_20_met": false,
+      "reused_conn_count": 8,
+      "new_conn_count": 0,
+      "p50_ok_ms": null,
+      "p95_ok_ms": null,
+      "p99_ok_ms": null,
+      "max_ok_ms": 63.0,
+      "max_all_ms": 63.0
+    },
+    "detail/detail_5": {
+      "n_total": 8,
+      "n_ok": 8,
+      "n_err": 0,
+      "error_rate": 0.0,
+      "errors": {
+        "http_5xx": 0,
+        "non_200": 0,
+        "timeout": 0,
+        "connect_tls": 0
+      },
+      "min_sample_20_met": false,
+      "reused_conn_count": 8,
+      "new_conn_count": 0,
+      "p50_ok_ms": null,
+      "p95_ok_ms": null,
+      "p99_ok_ms": null,
+      "max_ok_ms": 63.0,
+      "max_all_ms": 63.0
+    },
+    "institution/inst_1": {
+      "n_total": 8,
+      "n_ok": 8,
+      "n_err": 0,
+      "error_rate": 0.0,
+      "errors": {
+        "http_5xx": 0,
+        "non_200": 0,
+        "timeout": 0,
+        "connect_tls": 0
+      },
+      "min_sample_20_met": false,
+      "reused_conn_count": 8,
+      "new_conn_count": 0,
+      "p50_ok_ms": null,
+      "p95_ok_ms": null,
+      "p99_ok_ms": null,
+      "max_ok_ms": 63.0,
+      "max_all_ms": 63.0
+    },
+    "institution/inst_2": {
+      "n_total": 8,
+      "n_ok": 8,
+      "n_err": 0,
+      "error_rate": 0.0,
+      "errors": {
+        "http_5xx": 0,
+        "non_200": 0,
+        "timeout": 0,
+        "connect_tls": 0
+      },
+      "min_sample_20_met": false,
+      "reused_conn_count": 8,
+      "new_conn_count": 0,
+      "p50_ok_ms": null,
+      "p95_ok_ms": null,
+      "p99_ok_ms": null,
+      "max_ok_ms": 79.0,
+      "max_all_ms": 79.0
+    },
+    "institution/inst_3": {
+      "n_total": 8,
+      "n_ok": 8,
+      "n_err": 0,
+      "error_rate": 0.0,
+      "errors": {
+        "http_5xx": 0,
+        "non_200": 0,
+        "timeout": 0,
+        "connect_tls": 0
+      },
+      "min_sample_20_met": false,
+      "reused_conn_count": 8,
+      "new_conn_count": 0,
+      "p50_ok_ms": null,
+      "p95_ok_ms": null,
+      "p99_ok_ms": null,
+      "max_ok_ms": 63.0,
+      "max_all_ms": 63.0
+    },
+    "institution/inst_4": {
+      "n_total": 8,
+      "n_ok": 8,
+      "n_err": 0,
+      "error_rate": 0.0,
+      "errors": {
+        "http_5xx": 0,
+        "non_200": 0,
+        "timeout": 0,
+        "connect_tls": 0
+      },
+      "min_sample_20_met": false,
+      "reused_conn_count": 8,
+      "new_conn_count": 0,
+      "p50_ok_ms": null,
+      "p95_ok_ms": null,
+      "p99_ok_ms": null,
+      "max_ok_ms": 63.0,
+      "max_all_ms": 63.0
+    },
+    "institution/inst_5": {
+      "n_total": 8,
+      "n_ok": 8,
+      "n_err": 0,
+      "error_rate": 0.0,
+      "errors": {
+        "http_5xx": 0,
+        "non_200": 0,
+        "timeout": 0,
+        "connect_tls": 0
+      },
+      "min_sample_20_met": false,
+      "reused_conn_count": 8,
+      "new_conn_count": 0,
+      "p50_ok_ms": null,
+      "p95_ok_ms": null,
+      "p99_ok_ms": null,
+      "max_ok_ms": 79.0,
+      "max_all_ms": 79.0
+    }
+  }
+}
