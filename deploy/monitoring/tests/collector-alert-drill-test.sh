@@ -37,7 +37,11 @@ docker_host_path() {
   fi
 }
 
+UNRELATED_PID=""
+LEASE_HOLDER_PID=""
 cleanup() {
+  [[ -n "${UNRELATED_PID:-}" ]] && kill -9 "$UNRELATED_PID" >/dev/null 2>&1 || true
+  [[ -n "${LEASE_HOLDER_PID:-}" ]] && kill -9 "$LEASE_HOLDER_PID" >/dev/null 2>&1 || true
   docker rm -f "$EXPORTER_NAME" "$PROM_NAME" "$PROM_DIR_NAME" "$PROM_STALE_NAME" "$APP_NAME" "$APP_BAD_NAME" "$PG_NAME" >/dev/null 2>&1 || true
   docker network rm "$NET_NAME" >/dev/null 2>&1 || true
   rm -rf "$WORK"
@@ -485,7 +489,7 @@ set -e
 grep -q "DRILL_RESTORE_VERIFIED_OK" "$WORK/new_run_after_kill9.log" || fail "new run did not restore cleanly after SIGTERM"
 
 # 6c) PID-reuse safety (NEVER kill unrelated process!) + unverified lease fail-closed (Linux flock)
-sleep 60 &
+sleep 300 &
 UNRELATED_PID=$!
 sed -i.bak \
   -e 's/^STATE=.*/STATE=ARMED/' \
@@ -501,7 +505,7 @@ if command -v flock >/dev/null 2>&1; then
   (
     exec 7>"$CUR_LOCK_FILE"
     flock -n 7
-    exec sleep 60
+    exec sleep 300
   ) &
   LEASE_HOLDER_PID=$!
   sleep 1
