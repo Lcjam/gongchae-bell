@@ -30,12 +30,13 @@ import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /**
  * File tool for the ADR-0013 erasure journal, run from the boot JAR before Spring starts (no context, no DB):
  * {@code java -jar gongchae-bell.jar erasure-journal version | check <file> | init <file> | mark <file> | verify <file>}.
- * Contract: collab/2026-11-22-recovery-barrier/final.md.
+ * Operator contract: docs/ops/alerts.md (해지 대장과 복원) and ADR-0013.
  *
  * <ul>
  * <li>{@code check}: strict read-only parse, no lock (a read-only copy or mount works). Says nothing about durability.
@@ -49,7 +50,8 @@ import java.util.stream.Collectors;
  * <p>Writes go to a temporary file in the same directory: every byte written, read back and strictly parsed, mode set,
  * owner and group checked, forced, then published atomically ({@code link(2)} for init, never over an existing file;
  * {@code rename(2)} for mark), the directory forced and the result read again. NOOP, ALREADY and verify still force the
- * file and directory, so a rerun finishes an earlier publish whose directory sync failed.
+ * file and directory, so a rerun finishes an earlier publish whose directory sync failed. Every lock the tool takes,
+ * also for the read after publishing, is tried once and never waited for.
  *
  * <p>Not covered here: that the apps and every other writer are stopped, the DB state, and which backups exist. A lock
  * held on the old file does not keep a waiting writer off the replaced one. The supervising command that owns those
@@ -65,14 +67,16 @@ public final class ErasureJournalTool {
 
     private final Function<Path, ErasureJournal> journals;
     private final PrintStream out;
+    private final Supplier<String> tempSuffix;
 
-    ErasureJournalTool(Function<Path, ErasureJournal> journals, PrintStream out) {
+    ErasureJournalTool(Function<Path, ErasureJournal> journals, PrintStream out, Supplier<String> tempSuffix) {
         this.journals = journals;
         this.out = out;
+        this.tempSuffix = tempSuffix;
     }
 
     public static int run(String[] args, PrintStream out) {
-        return new ErasureJournalTool(ErasureJournal::new, out).run(args);
+        return new ErasureJournalTool(ErasureJournal::new, out, () -> Long.toUnsignedString(RANDOM.nextLong(), 36)).run(args);
     }
 
     /** A refusal or failure with a fixed code. */
@@ -155,7 +159,7 @@ public final class ErasureJournalTool {
         afterPublish("ERASURE_INIT_UNCONFIRMED", () -> {
             Files.delete(temp);
             journal.syncDirectory(dir);
-            reread(file, journal, bytes, new Attrs(expected.uid(), expected.gid(), 0640));
+            reread(file, bytes, new Attrs(expected.uid(), expected.gid(), 0640));
         });
         return "ERASURE_INIT_DONE";
     }
@@ -187,7 +191,7 @@ public final class ErasureJournalTool {
             }
             afterPublish("ERASURE_MARK_UNCONFIRMED", () -> {
                 journal.syncDirectory(dir);
-                reread(file, journal, next, before);
+                reread(file, next, before);
             });
             return "ERASURE_MARK_DONE " + summary(ErasureJournal.parse(next, "ERASURE_LOG"));
         });
@@ -221,11 +225,17 @@ public final class ErasureJournalTool {
     }
 
     /** Temporary copy next to L: all bytes written, read back, strictly parsed, mode set, owner and group checked, forced. */
-    private static Path writeTemp(Path file, byte[] bytes, int perm, Attrs expected) throws IOException, Stop {
-        Path temp = file.resolveSibling("." + file.getFileName() + ".tool-" + Long.toUnsignedString(RANDOM.nextLong(), 36));
+    private Path writeTemp(Path file, byte[] bytes, int perm, Attrs expected) throws IOException, Stop {
+        Path temp = file.resolveSibling("." + file.getFileName() + ".tool-" + tempSuffix.get());
+        FileChannel created;
+        try {
+            created = FileChannel.open(temp, Set.of(CREATE_NEW, READ, WRITE),
+                    PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+        } catch (FileAlreadyExistsException someoneElses) {
+            throw new Stop(4, "ERASURE_TOOL_TEMP_EXISTS");  // not ours: left exactly as it is
+        }
         boolean kept = false;
-        try (FileChannel channel = FileChannel.open(temp, Set.of(CREATE_NEW, READ, WRITE),
-                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")))) {
+        try (FileChannel channel = created) {  // from here on the file is ours, so ours to remove on failure
             ByteBuffer buffer = ByteBuffer.wrap(bytes);
             while (buffer.hasRemaining()) channel.write(buffer);
             byte[] back = ErasureJournal.readAll(channel);
@@ -233,7 +243,7 @@ public final class ErasureJournalTool {
             if (!Arrays.equals(back, bytes)) throw new Stop(4, "ERASURE_TOOL_TEMP_MISMATCH");
             Files.setAttribute(temp, "unix:mode", perm, NOFOLLOW_LINKS);
             Attrs written = attrs(temp);
-            if (written.uid() != expected.uid()) throw new Stop(3, "ERASURE_TOOL_OWNER_MISMATCH");  // e.g. run as root
+            if (written.uid() != expected.uid()) throw new Stop(3, "ERASURE_TOOL_OWNER_MISMATCH");  // e.g. root publishing
             if (written.gid() != expected.gid()) throw new Stop(3, "ERASURE_TOOL_GROUP_MISMATCH");
             if (written.perm() != perm) throw new Stop(3, "ERASURE_TOOL_MODE_UNSUPPORTED");
             channel.force(true);
@@ -255,9 +265,12 @@ public final class ErasureJournalTool {
         }
     }
 
-    /** Opened again by path, under the lock: exactly the bytes written, and the same owner, group and mode. */
-    private static void reread(Path file, ErasureJournal journal, byte[] bytes, Attrs expected) throws IOException, Stop {
-        if (!Arrays.equals(journal.readLatest().bytes(), bytes) || !attrs(file).equals(expected)) throw new IOException("reread");
+    /** Opened again by path under the same never-waiting lock: exactly the bytes written, the same owner, group and mode. */
+    private static void reread(Path file, byte[] bytes, Attrs expected) throws IOException, Stop {
+        underLock(file, (channel, current) -> {
+            if (!Arrays.equals(current.bytes(), bytes) || !attrs(file).equals(expected)) throw new Stop(4, "ERASURE_TOOL_REREAD_MISMATCH");
+            return "";
+        });
     }
 
     private static byte[] line(UUID marker) { return (marker + "\t" + Instant.now() + "\n").getBytes(UTF_8); }

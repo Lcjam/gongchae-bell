@@ -3,10 +3,13 @@ package kr.gongchae.bell.alerts;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.nio.file.LinkOption.NOFOLLOW_LINKS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
@@ -14,6 +17,7 @@ import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -24,8 +28,11 @@ import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -38,16 +45,44 @@ class ErasureJournalToolTest {
 
     record Result(int exit, String out) {}
 
-    static Result run(Function<Path, ErasureJournal> journals, String... args) {
+    static Result run(Function<Path, ErasureJournal> journals, Supplier<String> tempSuffix, String... args) {
         var buffer = new ByteArrayOutputStream();
-        int exit = new ErasureJournalTool(journals, new PrintStream(buffer, true, UTF_8)).run(args);
+        int exit = new ErasureJournalTool(journals, new PrintStream(buffer, true, UTF_8), tempSuffix).run(args);
         String out = buffer.toString(UTF_8).strip();
         assertThat(out).as("one line of codes and counts, never an id or a path").doesNotContain("\n").doesNotContainPattern(ANY_UUID)
                 .doesNotContain("/").doesNotContain("\\");
         return new Result(exit, out);
     }
 
+    static Result run(Function<Path, ErasureJournal> journals, String... args) {
+        return run(journals, () -> UUID.randomUUID().toString().substring(0, 8), args);
+    }
+
     static Result run(String... args) { return run(ErasureJournal::new, args); }
+
+    /** A separate process holding the writers' OS lock on a path until its stdin closes. */
+    public static final class LockHolder {
+        public static void main(String[] args) throws IOException {
+            try (FileChannel channel = FileChannel.open(Path.of(args[0]), StandardOpenOption.READ, StandardOpenOption.WRITE);
+                    FileLock lock = channel.lock()) {
+                System.out.println("LOCKED");
+                System.out.flush();
+                while (System.in.read() >= 0) { }
+            }
+        }
+    }
+
+    static Process holdLock(Path file) throws IOException {
+        Process holder = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(), "-cp",
+                System.getProperty("java.class.path"), LockHolder.class.getName(), file.toString()).redirectErrorStream(true).start();
+        assertThat(new BufferedReader(new InputStreamReader(holder.getInputStream(), UTF_8)).readLine()).isEqualTo("LOCKED");
+        return holder;
+    }
+
+    static void release(Process holder) throws Exception {
+        holder.getOutputStream().close();
+        assertThat(holder.waitFor(30, TimeUnit.SECONDS)).isTrue();
+    }
 
     /** A journal whose directory sync fails, or counts its calls. */
     static Function<Path, ErasureJournal> sync(AtomicInteger calls, boolean fail) {
@@ -258,6 +293,67 @@ class ErasureJournalToolTest {
     }
 
     @Test
+    void aTemporaryNameThatIsAlreadyTakenIsLeftExactlyAsItIs() throws Exception {
+        assumePosix();
+        Path file = journal(line(UUID.randomUUID()), 0640);
+        byte[] before = Files.readAllBytes(file);
+        Path foreign = dir.resolve(".erasure.log.tool-taken");  // e.g. left by a helper that may still be running
+        Files.writeString(foreign, "someone else's\n", UTF_8);
+        long inode = unix(foreign, "ino");
+        assertThat(run(ErasureJournal::new, () -> "taken", "mark", file.toString())).isEqualTo(new Result(4, "ERASURE_TOOL_TEMP_EXISTS"));
+        assertThat(Files.readAllBytes(file)).isEqualTo(before);
+        assertThat(Files.readString(foreign, UTF_8)).isEqualTo("someone else's\n");
+        assertThat(unix(foreign, "ino")).isEqualTo(inode);
+
+        Path fresh = Files.createDirectory(dir.resolve("fresh")).resolve("erasure.log");
+        Path foreignToo = Files.writeString(fresh.resolveSibling(".erasure.log.tool-taken"), "someone else's\n", UTF_8);
+        assertThat(run(ErasureJournal::new, () -> "taken", "init", fresh.toString())).isEqualTo(new Result(4, "ERASURE_TOOL_TEMP_EXISTS"));
+        assertThat(fresh).doesNotExist();
+        assertThat(Files.readString(foreignToo, UTF_8)).isEqualTo("someone else's\n");
+
+        assertThat(run("mark", file.toString()).out()).as("another name works and still leaves it alone").startsWith("ERASURE_MARK_DONE ");
+        assertThat(unix(foreign, "ino")).isEqualTo(inode);
+        assertThat(run("verify", file.toString()).out()).endsWith(" temps=1");
+    }
+
+    @Test
+    void anotherProcessHoldingTheLockIsRefusedWithoutWaiting() throws Exception {
+        assumePosix();
+        Path file = journal(line(UUID.randomUUID()), 0640);
+        byte[] before = Files.readAllBytes(file);
+        Process holder = holdLock(file);
+        try {
+            for (String command : new String[] {"mark", "verify", "init"})
+                assertThat(assertTimeoutPreemptively(Duration.ofSeconds(20), () -> run(command, file.toString())))
+                        .as(command).isEqualTo(new Result(3, "ERASURE_TOOL_LOCK_BUSY"));
+        } finally {
+            release(holder);
+        }
+        assertThat(Files.readAllBytes(file)).isEqualTo(before);
+        assertThat(run("mark", file.toString()).out()).startsWith("ERASURE_MARK_DONE ");
+    }
+
+    @Test
+    void theReadAfterPublishingDoesNotWaitForAnotherProcessEither() throws Exception {
+        assumePosix();
+        Path file = journal(line(UUID.randomUUID()), 0640);
+        AtomicReference<Process> holder = new AtomicReference<>();
+        Function<Path, ErasureJournal> lockedAfterRename = path -> new ErasureJournal(path) {
+            @Override void syncDirectory(Path directory) throws IOException {
+                holder.set(holdLock(file));  // the new file is in place: another process locks it before the reread
+            }
+        };
+        try {
+            assertThat(assertTimeoutPreemptively(Duration.ofSeconds(20), () -> run(lockedAfterRename, "mark", file.toString())))
+                    .isEqualTo(new Result(4, "ERASURE_MARK_UNCONFIRMED"));
+        } finally {
+            if (holder.get() != null) release(holder.get());
+        }
+        assertThat(ErasureJournal.parse(Files.readAllBytes(file), "ERASURE_LOG").lines().getLast().marker()).as("published").isTrue();
+        assertThat(run("mark", file.toString()).out()).as("the rerun confirms it").startsWith("ERASURE_MARK_NOOP ");
+    }
+
+    @Test
     void aHeldLockIsRefusedWithoutWaiting() throws Exception {
         assumePosix();
         Path file = journal(line(UUID.randomUUID()), 0640);
@@ -318,7 +414,8 @@ class ErasureJournalToolTest {
         byte[] before = Files.readAllBytes(file);
         Files.writeString(file, line(UUID.randomUUID()), UTF_8, StandardOpenOption.APPEND);
         byte[] appended = Files.readAllBytes(file);
-        assertThat(run("mark", file.toString())).isEqualTo(new Result(3, "ERASURE_TOOL_GROUP_MISMATCH"));
+        assertThat(run(ErasureJournal::new, () -> "mine", "mark", file.toString())).isEqualTo(new Result(3, "ERASURE_TOOL_GROUP_MISMATCH"));
+        assertThat(dir.resolve(".erasure.log.tool-mine")).as("the temporary file it made is removed").doesNotExist();
         assertThat(Files.readAllBytes(file)).isEqualTo(appended).startsWith(before);
         assertThat(others(file)).isEmpty();
 

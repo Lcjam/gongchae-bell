@@ -63,14 +63,14 @@
 ## 해지 대장과 복원 (ADR-0013)
 
 - 해지하면 구독 행 잠금 아래에서 `<구독 UUID>\t<UTC 시각>` 한 줄을 쓰고, 파일과 디렉터리를 fsync한다. 디렉터리 fsync는 POSIX에서만 하며, 매번 파일 잠금을 쥔 채로 한다. 그 뒤에 행을 지운다. 대장 쓰기가 실패하면(파일이 없거나 fsync 실패) 해지 요청이 실패하고 아무것도 지우지 않는다.
-- **파일 도구** `java -jar gongchae-bell.jar erasure-journal <명령> <파일>` (#17, [합의](../../collab/2026-11-22-recovery-barrier/final.md)). `main`의 첫 인자로 갈라져 Spring·DB 없이 돈다. 파서와 표지 규칙은 앱과 같은 코드다.
+- **파일 도구** `java -jar gongchae-bell.jar erasure-journal <명령> <파일>` (#17, [ADR-0013](../adr/0013-erasure-journal-host-file.md)). `main`의 첫 인자로 갈라져 Spring·DB 없이 돈다. 파서와 표지 규칙은 앱과 같은 코드다.
   - `version`은 `ERASURE_TOOL v1`을 출력한다. `check`는 잠금 없이 읽기만 하는 strict 검사다(읽기 전용 사본도 된다). 문법만 보며 디스크 반영은 보장하지 않는다.
   - `verify`는 대장 L을 앱과 같은 OS 잠금 아래 strict 검사하고, 소유자·그룹·권한 계약을 확인하고, 파일과 디렉터리를 fsync한다.
   - `init`은 파일이 없을 때만 새 표지 한 줄짜리 파일을 만든다(`0640`, 디렉터리와 같은 소유자·그룹). 이미 표지 한 줄이면 `ERASURE_INIT_ALREADY`다. 빈 파일, 다른 내용, 손상된 파일은 거부한다.
   - `mark`는 마지막 줄이 해지 줄일 때 새 표지 한 줄을 붙인다. 기존 바이트·소유자·그룹·권한은 그대로다. 마지막 줄이 표지면 `ERASURE_MARK_NOOP`이다. 없거나 빈 대장은 거부한다(첫 표지는 `init`의 일이다).
-  - 쓰기 순서: 같은 디렉터리의 임시 파일에 전부 쓰기 → 다시 읽어 strict 검사 → 권한·소유자·그룹 확인 → 파일 fsync → 게시(`init`은 기존 파일을 덮지 않는 `link`, `mark`는 `rename`) → 디렉터리 fsync → 다시 열어 바이트 확인. NOOP·ALREADY·`verify`도 파일·디렉터리 fsync와 권한 확인을 한다. 디렉터리 fsync가 실패한 게시는 같은 명령을 다시 실행하면 마저 끝난다.
-  - 출력은 고정 코드와 숫자 한 줄뿐이다. UUID, 대장 내용, 경로, 환경값, 예외 원문은 출력하지 않는다. 종료 코드는 `0` 완료(NOOP·ALREADY 포함), `2` 사용법, `3` 거부(도구가 파일을 바꾸지 않음), `4` I/O 실패다. `…_UNCONFIRMED`는 새 파일은 게시됐지만 디스크 반영을 확인하지 못했다는 뜻이며, 같은 명령을 다시 실행한다. 다른 프로세스가 잠금을 쥐고 있으면 기다리지 않고 `ERASURE_TOOL_LOCK_BUSY`로 거부한다.
-  - Linux POSIX 전용이다. 파일의 소유자·그룹은 디렉터리와 같아야 하고 모드는 `0600`이나 `0640`이어야 한다. root로 실행하면 `ERASURE_TOOL_OWNER_MISMATCH`로 거부한다.
+  - 쓰기 순서: 같은 디렉터리의 임시 파일에 전부 쓰기 → 다시 읽어 strict 검사 → 권한·소유자·그룹 확인 → 파일 fsync → 게시(`init`은 기존 파일을 덮지 않는 `link`, `mark`는 `rename`) → 디렉터리 fsync → 다시 열어 바이트 확인. NOOP·ALREADY·`verify`도 파일·디렉터리 fsync와 권한 확인을 한다. 디렉터리 fsync가 실패한 게시는 같은 명령을 다시 실행하면 마저 끝난다. 고른 임시 파일 이름이 이미 있으면 그 파일은 건드리지 않고 `ERASURE_TOOL_TEMP_EXISTS`로 멈춘다. 도구가 지우는 임시 파일은 그 실행이 직접 만든 것뿐이다. 남은 임시 파일은 `verify`의 `temps=`로 보고만 한다.
+  - 출력은 고정 코드와 숫자 한 줄뿐이다. UUID, 대장 내용, 경로, 환경값, 예외 원문은 출력하지 않는다. 종료 코드는 `0` 완료(NOOP·ALREADY 포함), `2` 사용법, `3` 거부(도구가 파일을 바꾸지 않음), `4` I/O 실패다. `…_UNCONFIRMED`는 새 파일은 게시됐지만 디스크 반영을 확인하지 못했다는 뜻이며, 같은 명령을 다시 실행한다. 도구가 잡는 잠금은 게시 뒤 다시 읽을 때까지 모두 한 번만 시도하고 기다리지 않는다. 처음 잠금이 잡혀 있으면 `ERASURE_TOOL_LOCK_BUSY`(파일 불변), 게시 뒤 다시 읽을 때 잡혀 있으면 `…_UNCONFIRMED`다.
+  - Linux POSIX 전용이다. 파일의 소유자·그룹은 디렉터리와 같아야 하고 모드는 `0600`이나 `0640`이어야 한다. 새 파일을 게시할 때(`init`의 새 파일, `mark`의 표지 추가) 만든 임시 파일의 소유자·그룹이 맞지 않으면 게시 전에 `ERASURE_TOOL_OWNER_MISMATCH`·`ERASURE_TOOL_GROUP_MISMATCH`로 거부한다. 예를 들어 앱 소유 대장에 root가 `mark`하면 거부된다. 실행한 사용자 자체를 거부하는 검사는 아니므로 root의 `verify`·NOOP·ALREADY는 이 검사에 걸리지 않는다. UID 1000으로 실행하는 일은 감독 작업의 게이트다.
   - **하지 않는 일**: 앱과 수동 writer의 정지, DB 연결 0, 보존 백업 사본 확인. 옛 파일에 쥔 잠금으로 교체 뒤의 writer를 막지도 못한다. 이 조건은 다음 감독 작업이 맡는다. **감독 작업이 병합·검수되기 전에는 운영에서 `init`·`mark`를 실행하지 않는다.**
 - 복원 (전체 단계와 복사·정리 명령은 [백업과 복구 §7](backup-restore.md#7-격리-복원-리허설-및-장애-복구-절차-adr-0012--adr-0013--fail-closed)):
   1. **운영 DB에 직접 덮어쓰지 않고** 전용 일회용 `postgres:17` 격리 DB에 `ALERTS_ENABLED=false`, `COLLECTOR_ENABLED=false`, 외부 연결 차단(`--internal`) 상태로 덤프를 복원한다. (운영 `/opt/gongchae-bell/.env`를 통째로 `source`하지 않고, 이미지·태그는 `APP_IMAGE` 1줄 추출 + 배포 상태 파일에서 읽는다.)

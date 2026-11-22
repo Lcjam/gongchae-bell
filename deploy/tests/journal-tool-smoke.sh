@@ -77,11 +77,12 @@ expect 0 'ERASURE_MARK_NOOP lines=3 markers=2 head=marker tail=marker' 1000:1000
 expect 0 'ERASURE_CHECK_OK lines=3 markers=2 head=marker tail=marker' 1000:1000 check "$L"
 expect 0 'ERASURE_VERIFY_OK lines=3 markers=2 head=marker tail=marker temps=0' 1000:1000 verify "$L"
 
-# Roles. root would leave a root-owned file: refused before publishing. A group reader (the backup role) can only
-# check; other users cannot even look. Nothing changes.
+# Roles. root publishing would leave a root-owned file: refused before publishing (the uid check is on the new file,
+# not on the caller). A group reader (the backup role) can only check; other users cannot even look. Nothing changes.
 root "printf '%s\t2026-11-22T00:00:01Z\n' $SUB >> $L"
 before=$(state "$L")
 expect 3 'ERASURE_TOOL_OWNER_MISMATCH' 0:0 mark "$L"
+expect 0 'ERASURE_VERIFY_OK lines=4 markers=2 head=marker tail=line temps=0' 0:0 verify "$L"  # the caller is not refused as such
 expect 0 'ERASURE_CHECK_OK lines=4 markers=2 head=marker tail=line' 1001:1000 check "$L"
 expect 4 'ERASURE_TOOL_ACCESS_DENIED' 1001:1000 mark "$L"
 expect 4 'ERASURE_TOOL_ACCESS_DENIED' 1001:1000 verify "$L"
