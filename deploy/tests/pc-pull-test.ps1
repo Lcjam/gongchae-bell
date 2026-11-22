@@ -707,17 +707,21 @@ try {
   $c7 = Join-Path $TMP_ROOT "case7"
   $src7 = Join-Path $c7 "src-race"
   $dst7 = Join-Path $c7 "dst-pc"
-  $cache7 = Join-Path $c7 "cache"
+  $srcCache7 = Join-Path $c7 "src-cache"
+  $pcCache7 = Join-Path $c7 "pc-cache"
   $data7 = Join-Path $c7 "data"
-  New-Item -ItemType Directory -Path $src7, $dst7, $cache7, $data7 -Force | Out-Null
-  Assert-Eq 0 (Invoke-ResticDirect -Repo $src7 -Password $srcPass -CacheDir $cache7 -ArgsList @("init")).ExitCode "c7 src init"
-  Assert-Eq 0 (Invoke-ResticDirect -Repo $dst7 -Password $dstPass -CacheDir $cache7 -ArgsList @("init")).ExitCode "c7 dst init"
+  New-Item -ItemType Directory -Path $src7, $dst7, $srcCache7, $pcCache7, $data7 -Force | Out-Null
+  Assert-Eq 0 (Invoke-ResticDirect -Repo $src7 -Password $srcPass -CacheDir $srcCache7 -ArgsList @("init")).ExitCode "c7 src init"
+  Assert-Eq 0 (Invoke-ResticDirect -Repo $dst7 -Password $dstPass -CacheDir $pcCache7 -ArgsList @("init")).ExitCode "c7 dst init"
   [System.IO.File]::WriteAllText((Join-Path $data7 "p.txt"), "race-payload-unique-content-999999")
-  Assert-Eq 0 (Invoke-ResticDirect -Repo $src7 -Password $srcPass -CacheDir $cache7 -ArgsList @("backup", "--tag", "gongchae-bell", "--time", (Format-ResticTime ($BASE_NOW - 2 * $DAY)), $data7)).ExitCode "c7 src backup"
-  # Simulate OCI prune removing a source data pack mid-copy
+  Assert-Eq 0 (Invoke-ResticDirect -Repo $src7 -Password $srcPass -CacheDir $srcCache7 -ArgsList @("backup", "--tag", "gongchae-bell", "--time", (Format-ResticTime ($BASE_NOW - 2 * $DAY)), $data7)).ExitCode "c7 src backup"
+  # Simulate OCI prune removing source data packs mid-copy (remove all data packs and use a separate PC cache
+  # so result never depends on filesystem pack hash ordering or cached tree blobs).
   $packFiles = @(Get-ChildItem -Path (Join-Path $src7 "data") -Recurse -File)
   Assert-True ($packFiles.Count -gt 0) "src7 must have data pack"
-  Remove-Item -LiteralPath $packFiles[0].FullName -Force
+  foreach ($pf in $packFiles) {
+    Remove-Item -LiteralPath $pf.FullName -Force
+  }
   Set-ReadOnlyTreeAcl $src7
 
   $env7 = Join-Path $c7 "race.env"
@@ -728,7 +732,7 @@ try {
     OCI_RESTIC_PASSWORD_FILE = $srcPwFile
     HEALTHCHECKS_PC_PULL_URL = $hbServer.Url
     PC_LOCK_FILE             = (Join-Path $c7 "pc-pull.lock")
-    PC_CACHE_DIR             = $cache7
+    PC_CACHE_DIR             = $pcCache7
     PC_LOG_DIR               = (Join-Path $c7 "logs")
     RESTIC_BIN               = $ResticBin
     PYTHON_BIN               = $PythonBin
@@ -744,7 +748,7 @@ try {
   Assert-True ($r7.ExitCode -ne 0) "source prune race must fail (never hide as success)"
   Assert-Contains ($r7.StdOut + $r7.StdErr) "SOURCE_COPY_FAIL" "copy failure recorded"
   Assert-Contains $r7.StdOut "POST_RETENTION_SUMMARY policy=wall-clock-14d forgotten=0 total=0 expire=0 keep=0" "post-copy prune ran after copy failure"
-  Assert-Eq 0 @(Get-RepoSnapshots -Repo $dst7 -Password $dstPass -CacheDir $cache7 -Tag "gongchae-bell").Count "no partial snapshot saved in dst"
+  Assert-Eq 0 @(Get-RepoSnapshots -Repo $dst7 -Password $dstPass -CacheDir $pcCache7 -Tag "gongchae-bell").Count "no partial snapshot saved in dst"
   Assert-Contains ([System.IO.File]::ReadAllText($hbLog)) "/deadbeef-pc-token-9999/fail|" "/fail ping sent on copy race"
 
   # ---------------------------------------------------------------------------
