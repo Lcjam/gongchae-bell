@@ -484,7 +484,7 @@ PY
 
 capture_runtime_flags_snapshot() {
   local app_ids cid env_json parsed
-  app_ids="$(resolve_app_containers)"
+  app_ids="$(resolve_app_containers)" || return 1
   while IFS= read -r cid; do
     [[ -n "$cid" ]] || continue
     env_json="$(run_bounded "$CMD_TIMEOUT_SEC" docker inspect --format '{{json .Config.Env}}' "$cid")" \
@@ -660,23 +660,54 @@ verify_expected_hashes() {
   return 0
 }
 
-# Returns: 0 if any gongchae-drill series has value > 0, 1 if clean (all 0 or absent), 2 on query error.
+# Returns: 0 if any gongchae-drill series has value > 0, 1 if clean (valid empty or all <= 0 vector), 2 on query/parse/schema error.
 prom_has_nonzero_drill_series() {
-  local q1 q2
+  local q1 q2 py_rc=0
   q1="$(prom_api_get "/api/v1/query?query=collector_api_attempts_today%7Bjob%3D%22gongchae-drill%22%7D" 2>/dev/null)" || return 2
   q2="$(prom_api_get "/api/v1/query?query=collector_regular_incomplete_consecutive%7Bjob%3D%22gongchae-drill%22%7D" 2>/dev/null)" || return 2
-  "$PYTHON_BIN" - "$q1" "$q2" <<'PY'
-import json, sys
-for raw in sys.argv[1:]:
-    data = json.loads(raw)
-    if data.get("status") != "success":
-        raise SystemExit(2)
-    for item in data.get("data", {}).get("result", []):
-        val = float(item["value"][1])
-        if val > 0.0:
-            raise SystemExit(0)
-raise SystemExit(1)
+  "$PYTHON_BIN" - "$q1" "$q2" <<'PY' || py_rc=$?
+import json, math, sys
+
+try:
+    has_positive = False
+    for raw in sys.argv[1:]:
+        data = json.loads(raw)
+        if not isinstance(data, dict) or data.get("status") != "success":
+            raise SystemExit(2)
+        payload = data.get("data")
+        if not isinstance(payload, dict):
+            raise SystemExit(2)
+        if payload.get("resultType") != "vector" or "result" not in payload:
+            raise SystemExit(2)
+        results = payload["result"]
+        if not isinstance(results, list):
+            raise SystemExit(2)
+        for item in results:
+            if not isinstance(item, dict) or "value" not in item:
+                raise SystemExit(2)
+            pair = item["value"]
+            if not isinstance(pair, list) or len(pair) != 2:
+                raise SystemExit(2)
+            ts, raw_val = pair[0], pair[1]
+            if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not math.isfinite(float(ts)):
+                raise SystemExit(2)
+            if isinstance(raw_val, bool) or not isinstance(raw_val, (str, int, float)):
+                raise SystemExit(2)
+            val = float(raw_val)
+            if not math.isfinite(val):
+                raise SystemExit(2)
+            if val > 0.0:
+                has_positive = True
+    raise SystemExit(0 if has_positive else 1)
+except SystemExit:
+    raise
+except Exception:
+    raise SystemExit(2)
 PY
+  if [[ "$py_rc" -eq 0 || "$py_rc" -eq 1 ]]; then
+    return "$py_rc"
+  fi
+  return 2
 }
 
 wait_for_drill_zero_baseline() {
@@ -742,20 +773,40 @@ check_prom_clean_baseline() {
   targets_json="$(prom_api_get "/api/v1/targets?state=active")" || return 1
   config_json="$(prom_api_get "/api/v1/status/config")" || return 1
 
-  "$PYTHON_BIN" - "$prom_alerts_json" "$targets_json" "$config_json" <<'PY'
+  "$PYTHON_BIN" - "$prom_alerts_json" "$targets_json" "$config_json" <<'PY' || return 1
 import json, sys
-items = json.loads(sys.argv[1])["data"]["alerts"]
-targets = json.loads(sys.argv[2])["data"]["activeTargets"]
-cfg = json.loads(sys.argv[3])["data"]["yaml"]
+
+try:
+    alerts_doc = json.loads(sys.argv[1])
+    targets_doc = json.loads(sys.argv[2])
+    cfg_doc = json.loads(sys.argv[3])
+    if (
+        not isinstance(alerts_doc, dict) or alerts_doc.get("status") != "success"
+        or not isinstance(targets_doc, dict) or targets_doc.get("status") != "success"
+        or not isinstance(cfg_doc, dict) or cfg_doc.get("status") != "success"
+    ):
+        raise SystemExit("PROM_BASELINE_API_STATUS_NOT_SUCCESS")
+    items = alerts_doc["data"]["alerts"]
+    targets = targets_doc["data"]["activeTargets"]
+    cfg = cfg_doc["data"]["yaml"]
+    if not isinstance(items, list) or not isinstance(targets, list) or not isinstance(cfg, str):
+        raise SystemExit("PROM_BASELINE_API_MALFORMED_SCHEMA")
+except SystemExit:
+    raise
+except Exception as exc:
+    raise SystemExit(f"PROM_BASELINE_API_PARSE_ERROR: {exc}")
 
 if items:
-    names = [(a["labels"].get("alertname"), a.get("state")) for a in items]
+    names = [(a.get("labels", {}).get("alertname"), a.get("state")) for a in items]
     raise SystemExit(f"EXISTING_ALERTS_NONEMPTY: {names}")
 
 if "gongchae-drill" in cfg:
     raise SystemExit("DRILL_JOB_ALREADY_IN_PROM_CONFIG")
 
-drill_targets = [t for t in targets if t.get("labels", {}).get("job") == "gongchae-drill" or "drill-exporter" in t.get("scrapeUrl", "")]
+drill_targets = [
+    t for t in targets
+    if t.get("labels", {}).get("job") == "gongchae-drill" or "drill-exporter" in t.get("scrapeUrl", "")
+]
 if drill_targets:
     raise SystemExit("DRILL_TARGET_ALREADY_ACTIVE")
 
@@ -763,7 +814,7 @@ app_up = [t for t in targets if t.get("labels", {}).get("job") == "gongchae-app"
 if not app_up:
     raise SystemExit("NO_ACTIVE_HEALTHY_GONGCHAE_APP_TARGET")
 
-print("PROM_BASELINE_OK active_app=" + ",".join(t["labels"].get("instance", "?") for t in app_up))
+print("PROM_BASELINE_OK active_app=" + ",".join(t.get("labels", {}).get("instance", "?") for t in app_up))
 PY
   local nz_rc=0
   prom_has_nonzero_drill_series || nz_rc=$?
@@ -771,9 +822,10 @@ PY
     printf 'LINGERING_DRILL_SERIES_NONZERO: job="gongchae-drill" still has >0 samples in Prometheus TSDB\n' >&2
     return 1
   elif [[ "$nz_rc" -ne 1 ]]; then
-    printf 'PROM_DRILL_SERIES_CHECK_FAILED: unable to query gongchae-drill TSDB baseline\n' >&2
+    printf 'PROM_DRILL_SERIES_CHECK_FAILED: unable to query gongchae-drill TSDB baseline (rc=%s)\n' "$nz_rc" >&2
     return 1
   fi
+  return 0
 }
 
 preflight_checks() {
@@ -1052,7 +1104,7 @@ PY
 assert_no_unexpected_alerts() {
   local allowed_csv="$1"
   local prom_alerts_json
-  prom_alerts_json="$(prom_api_get "/api/v1/alerts")"
+  prom_alerts_json="$(prom_api_get "/api/v1/alerts")" || return 1
   "$PYTHON_BIN" - "$prom_alerts_json" "$allowed_csv" <<'PY'
 import json, sys
 items = json.loads(sys.argv[1])["data"]["alerts"]

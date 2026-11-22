@@ -40,8 +40,9 @@ docker_host_path() {
 UNRELATED_PID=""
 LEASE_HOLDER_PID=""
 cleanup() {
-  [[ -n "${UNRELATED_PID:-}" ]] && kill -9 "$UNRELATED_PID" >/dev/null 2>&1 || true
-  [[ -n "${LEASE_HOLDER_PID:-}" ]] && kill -9 "$LEASE_HOLDER_PID" >/dev/null 2>&1 || true
+  rm -f "${WORK}/unrelated_keepalive" "${WORK}/lease_keepalive" 2>/dev/null || true
+  [[ -n "${UNRELATED_PID:-}" ]] && kill -TERM "$UNRELATED_PID" >/dev/null 2>&1 || true
+  [[ -n "${LEASE_HOLDER_PID:-}" ]] && kill -TERM "$LEASE_HOLDER_PID" >/dev/null 2>&1 || true
   docker rm -f "$EXPORTER_NAME" "$PROM_NAME" "$PROM_DIR_NAME" "$PROM_STALE_NAME" "$APP_NAME" "$APP_BAD_NAME" "$PG_NAME" >/dev/null 2>&1 || true
   docker network rm "$NET_NAME" >/dev/null 2>&1 || true
   rm -rf "$WORK"
@@ -49,6 +50,24 @@ cleanup() {
 trap cleanup EXIT
 
 fail() { echo "DRILL_TEST_FAIL: $*" >&2; exit 1; }
+
+assert_fixture_alive() {
+  local pid="$1"
+  local label="$2"
+  if kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+  local wrc=0
+  set +e
+  wait "$pid" 2>/dev/null
+  wrc=$?
+  set -e
+  if [[ "$wrc" -gt 128 ]]; then
+    fail "${label} pid=${pid} died unexpectedly via signal=$((wrc - 128)) (wait_rc=${wrc})"
+  else
+    fail "${label} pid=${pid} exited unexpectedly before explicit release (exit_code=${wrc}, not_signal)"
+  fi
+}
 
 mkdir -p "$WORK/deploy/monitoring/prometheus/rules" "$WORK/deploy/state" "$WORK/app" "$WORK/backup" "$WORK/backup2" "$WORK/drill-work" "$WORK/drill-work2"
 cp "$REPO_ROOT/deploy/monitoring/prometheus/prometheus.yml" "$WORK/deploy/monitoring/prometheus/prometheus.yml"
@@ -270,6 +289,97 @@ fi
 docker rm -f "$PROM_STALE_NAME" >/dev/null
 echo "Bounded recreate-cmd terminated TERM-ignoring child+grandchild in ${t_rec_elapsed}s"
 
+echo "=== 1c. R3(round3): check_prom_clean_baseline failure propagation & prom_has_nonzero_drill_series tri-state contract ==="
+REAL_DOCKER_BIN="$(command -v docker)"
+mkdir -p "$WORK/prom-stub-bin"
+cat > "$WORK/prom-stub-bin/docker" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "exec" && "\${2:-}" == "$PROM_NAME" && "\${3:-}" == "wget" ]]; then
+  url="\${@: -1}"
+  case "\$url" in
+    */api/v1/alerts*)
+      if [[ -n "\${STUB_ALERTS_JSON:-}" ]]; then printf '%s\n' "\$STUB_ALERTS_JSON"; exit 0; fi ;;
+    */api/v1/targets*)
+      if [[ -n "\${STUB_TARGETS_JSON:-}" ]]; then printf '%s\n' "\$STUB_TARGETS_JSON"; exit 0; fi ;;
+    */api/v1/status/config*)
+      if [[ -n "\${STUB_CONFIG_JSON:-}" ]]; then printf '%s\n' "\$STUB_CONFIG_JSON"; exit 0; fi ;;
+    */api/v1/query?query=collector_*)
+      if [[ -n "\${STUB_QUERY_JSON:-}" ]]; then printf '%s\n' "\$STUB_QUERY_JSON"; exit 0; fi ;;
+  esac
+fi
+exec "$REAL_DOCKER_BIN" "\$@"
+EOF
+chmod +x "$WORK/prom-stub-bin/docker"
+
+GOOD_ALERTS='{"status":"success","data":{"alerts":[]}}'
+GOOD_TARGETS='{"status":"success","data":{"activeTargets":[{"labels":{"job":"gongchae-app","instance":"app-green:8081"},"scrapeUrl":"http://app-green:8081/actuator/prometheus","health":"up"}]}}'
+GOOD_CONFIG='{"status":"success","data":{"yaml":"scrape_configs:\n  - job_name: gongchae-app\n"}}'
+CLEAN_EMPTY_QUERY='{"status":"success","data":{"resultType":"vector","result":[]}}'
+CLEAN_ZERO_QUERY='{"status":"success","data":{"resultType":"vector","result":[{"metric":{"job":"gongchae-drill"},"value":[1700000000,"0"]}]}}'
+
+assert_no_mutation_after_rejected_run() {
+  local tag="$1"
+  [[ ! -f "$WORK/deploy/state/drill-runtime.owner" ]] || fail "${tag}: OWNER_FILE created despite rejected baseline"
+  [[ ! -f "$WORK/backup/state" ]] || fail "${tag}: backup/state created despite rejected baseline"
+  [[ "$(sha256sum "$WORK/deploy/monitoring/prometheus/prometheus.yml" | awk '{print $1}')" == "$ORIG_PROM_SHA" ]] || fail "${tag}: prometheus.yml mutated"
+  [[ "$(sha256sum "$WORK/deploy/monitoring/prometheus/rules/gongchae.yml" | awk '{print $1}')" == "$ORIG_RULES_SHA" ]] || fail "${tag}: gongchae.yml mutated"
+  if docker ps -a --format '{{.Names}}' | grep -Fxq "$EXPORTER_NAME"; then
+    fail "${tag}: exporter container created despite rejected baseline"
+  fi
+}
+
+# P1: In real `run` invocation (prom_check="$(check_prom_clean_baseline 2>&1)" || fail "$prom_check"),
+# every unhealthy baseline must be rejected BEFORE any mutation even when TSDB query is clean.
+run_rejected_baseline_case() {
+  local tag="$1" expect_re="$2" a_json="$3" t_json="$4" c_json="$5" q_json="$6"
+  if PATH="$WORK/prom-stub-bin:$PATH" \
+      STUB_ALERTS_JSON="$a_json" STUB_TARGETS_JSON="$t_json" STUB_CONFIG_JSON="$c_json" STUB_QUERY_JSON="$q_json" \
+      bash "$DRILL_SH" run "${COMMON_ARGS[@]}" >"$WORK/p_r3_${tag}.log" 2>&1; then
+    fail "run should reject unhealthy baseline (${tag}): $(cat "$WORK/p_r3_${tag}.log")"
+  fi
+  grep -Eq "$expect_re" "$WORK/p_r3_${tag}.log" || fail "${tag}: expected /${expect_re}/, got: $(cat "$WORK/p_r3_${tag}.log")"
+  assert_no_mutation_after_rejected_run "$tag"
+}
+
+run_rejected_baseline_case "firing_alert" "EXISTING_ALERTS_NONEMPTY" \
+  '{"status":"success","data":{"alerts":[{"labels":{"alertname":"ProductionAlert"},"state":"firing"}]}}' \
+  "$GOOD_TARGETS" "$GOOD_CONFIG" "$CLEAN_EMPTY_QUERY"
+run_rejected_baseline_case "pending_alert" "EXISTING_ALERTS_NONEMPTY" \
+  '{"status":"success","data":{"alerts":[{"labels":{"alertname":"ProductionPending"},"state":"pending"}]}}' \
+  "$GOOD_TARGETS" "$GOOD_CONFIG" "$CLEAN_EMPTY_QUERY"
+run_rejected_baseline_case "no_healthy_app" "NO_ACTIVE_HEALTHY_GONGCHAE_APP_TARGET" \
+  "$GOOD_ALERTS" '{"status":"success","data":{"activeTargets":[]}}' "$GOOD_CONFIG" "$CLEAN_EMPTY_QUERY"
+run_rejected_baseline_case "existing_drill_cfg" "DRILL_JOB_ALREADY_IN_PROM_CONFIG" \
+  "$GOOD_ALERTS" "$GOOD_TARGETS" '{"status":"success","data":{"yaml":"scrape_configs:\n  - job_name: gongchae-drill\n"}}' "$CLEAN_EMPTY_QUERY"
+run_rejected_baseline_case "existing_drill_target" "DRILL_TARGET_ALREADY_ACTIVE" \
+  "$GOOD_ALERTS" \
+  '{"status":"success","data":{"activeTargets":[{"labels":{"job":"gongchae-app","instance":"app-green:8081"},"scrapeUrl":"http://app-green:8081/actuator/prometheus","health":"up"},{"labels":{"job":"gongchae-drill","instance":"drill-exporter:8081"},"scrapeUrl":"http://drill-exporter:8081/actuator/prometheus","health":"up"}]}}' \
+  "$GOOD_CONFIG" "$CLEAN_EMPTY_QUERY"
+
+# P2: TSDB query tri-state contract (malformed/missing/non-numeric/NaN -> error 2, positive -> 0, valid empty/zero -> clean 1)
+run_rejected_baseline_case "tsdb_truncated_json" "PROM_DRILL_SERIES_CHECK_FAILED" \
+  "$GOOD_ALERTS" "$GOOD_TARGETS" "$GOOD_CONFIG" '{'
+run_rejected_baseline_case "tsdb_missing_result" "PROM_DRILL_SERIES_CHECK_FAILED" \
+  "$GOOD_ALERTS" "$GOOD_TARGETS" "$GOOD_CONFIG" '{"status":"success","data":{}}'
+run_rejected_baseline_case "tsdb_non_numeric" "PROM_DRILL_SERIES_CHECK_FAILED" \
+  "$GOOD_ALERTS" "$GOOD_TARGETS" "$GOOD_CONFIG" '{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1700000000,"not-a-number"]}]}}'
+run_rejected_baseline_case "tsdb_nan_value" "PROM_DRILL_SERIES_CHECK_FAILED" \
+  "$GOOD_ALERTS" "$GOOD_TARGETS" "$GOOD_CONFIG" '{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1700000000,"NaN"]}]}}'
+run_rejected_baseline_case "tsdb_positive_series" "LINGERING_DRILL_SERIES_NONZERO" \
+  "$GOOD_ALERTS" "$GOOD_TARGETS" "$GOOD_CONFIG" '{"status":"success","data":{"resultType":"vector","result":[{"metric":{"job":"gongchae-drill"},"value":[1700000000,"500"]}]}}'
+
+# Valid empty vector and valid zero vector MUST both pass preflight cleanly
+PATH="$WORK/prom-stub-bin:$PATH" \
+  STUB_ALERTS_JSON="$GOOD_ALERTS" STUB_TARGETS_JSON="$GOOD_TARGETS" STUB_CONFIG_JSON="$GOOD_CONFIG" STUB_QUERY_JSON="$CLEAN_EMPTY_QUERY" \
+  bash "$DRILL_SH" preflight "${COMMON_ARGS[@]}" >"$WORK/p_r3_empty_ok.log" 2>&1 || fail "valid empty vector should pass preflight: $(cat "$WORK/p_r3_empty_ok.log")"
+grep -q "DRILL_PREFLIGHT_OK" "$WORK/p_r3_empty_ok.log" || fail "expected DRILL_PREFLIGHT_OK for empty vector"
+
+PATH="$WORK/prom-stub-bin:$PATH" \
+  STUB_ALERTS_JSON="$GOOD_ALERTS" STUB_TARGETS_JSON="$GOOD_TARGETS" STUB_CONFIG_JSON="$GOOD_CONFIG" STUB_QUERY_JSON="$CLEAN_ZERO_QUERY" \
+  bash "$DRILL_SH" preflight "${COMMON_ARGS[@]}" >"$WORK/p_r3_zero_ok.log" 2>&1 || fail "valid zero vector should pass preflight: $(cat "$WORK/p_r3_zero_ok.log")"
+grep -q "DRILL_PREFLIGHT_OK" "$WORK/p_r3_zero_ok.log" || fail "expected DRILL_PREFLIGHT_OK for zero vector"
+echo "Round-3 baseline fail-closed propagation (5 cases, 0 mutations) and TSDB tri-state preflight contract verified"
+
 echo "=== 2. Directory bind mount compatibility check ==="
 docker run -d --name "$PROM_DIR_NAME" --network "$NET_NAME" \
   -v "$(docker_host_path "$WORK/deploy/monitoring/prometheus"):/etc/prometheus:ro" \
@@ -404,6 +514,27 @@ bash "$DRILL_SH" restore "${COMMON_ARGS[@]}" >"$WORK/rest_after_bound.log" 2>&1 
 grep -q "DRILL_RESTORE_VERIFIED_OK" "$WORK/rest_after_bound.log" || fail "expected DRILL_RESTORE_VERIFIED_OK after clean retry"
 echo "Bounded restore under signal masking killed TERM-ignoring child+grandchild in ${t_bound_elapsed}s and recorded RESTORE_FAILED"
 
+echo "=== 5b. R3(round3): Malformed TSDB query responses during restore fail closed as RESTORE_FAILED ==="
+for pair in \
+  "truncated|{" \
+  "missing_result|{\"status\":\"success\",\"data\":{}}" \
+  "non_numeric|{\"status\":\"success\",\"data\":{\"resultType\":\"vector\",\"result\":[{\"metric\":{},\"value\":[1700000000,\"not-a-number\"]}]}}"; do
+  tag="${pair%%|*}"
+  bad_q="${pair#*|}"
+  sed -i.bak 's/^STATE=.*/STATE=ARMED/' "$WORK/backup/meta.env" && rm -f "$WORK/backup/meta.env.bak"
+  echo "ARMED" > "$WORK/backup/state"
+  if PATH="$WORK/prom-stub-bin:$PATH" STUB_QUERY_JSON="$bad_q" \
+      bash "$DRILL_SH" restore "${COMMON_ARGS[@]}" >"$WORK/rest_bad_tsdb_${tag}.log" 2>&1; then
+    fail "restore must fail closed on malformed TSDB response (${tag}): $(cat "$WORK/rest_bad_tsdb_${tag}.log")"
+  fi
+  grep -q "failed to query Prometheus TSDB for lingering gongchae-drill series" "$WORK/rest_bad_tsdb_${tag}.log" \
+    || fail "${tag}: expected TSDB query failure message, got: $(cat "$WORK/rest_bad_tsdb_${tag}.log")"
+  [[ "$(cat "$WORK/backup/state")" == "RESTORE_FAILED" ]] || fail "${tag}: expected RESTORE_FAILED, got $(cat "$WORK/backup/state")"
+done
+bash "$DRILL_SH" restore "${COMMON_ARGS[@]}" >"$WORK/rest_after_bad_tsdb.log" 2>&1 || fail "clean restore retry after malformed TSDB tests failed: $(cat "$WORK/rest_after_bad_tsdb.log")"
+grep -q "DRILL_RESTORE_VERIFIED_OK" "$WORK/rest_after_bad_tsdb.log" || fail "expected DRILL_RESTORE_VERIFIED_OK after malformed TSDB retry"
+echo "Malformed TSDB responses (truncated JSON, missing result, non-numeric) all failed closed as RESTORE_FAILED"
+
 echo "=== 6. R3: Supervisor SIGKILL -> manual restore fences/kills old worker -> new run on same work-dir blocks late writer -> PID-reuse safety ==="
 DRILL_TEST_WORKER_STALL_SEC=180 bash "$DRILL_SH" run "${COMMON_ARGS[@]}" >"$WORK/sigkill_run.log" 2>&1 &
 SUP_KILL_PID=$!
@@ -489,7 +620,10 @@ set -e
 grep -q "DRILL_RESTORE_VERIFIED_OK" "$WORK/new_run_after_kill9.log" || fail "new run did not restore cleanly after SIGTERM"
 
 # 6c) PID-reuse safety (NEVER kill unrelated process!) + unverified lease fail-closed (Linux flock)
-sleep 300 &
+# Self-owned sentinel keepalive fixtures remain alive until this test explicitly removes their sentinel files,
+# and assert_fixture_alive distinguishes signal termination from normal exit via wait status.
+touch "$WORK/unrelated_keepalive" "$WORK/lease_keepalive"
+bash -c 'while [[ -f "$1" ]]; do sleep 1; done' _ "$WORK/unrelated_keepalive" &
 UNRELATED_PID=$!
 sed -i.bak \
   -e 's/^STATE=.*/STATE=ARMED/' \
@@ -505,27 +639,30 @@ if command -v flock >/dev/null 2>&1; then
   (
     exec 7>"$CUR_LOCK_FILE"
     flock -n 7
-    exec sleep 300
+    while [[ -f "$WORK/lease_keepalive" ]]; do sleep 1; done
   ) &
   LEASE_HOLDER_PID=$!
   sleep 1
+  assert_fixture_alive "$LEASE_HOLDER_PID" "lease holder"
   if bash "$DRILL_SH" restore "${COMMON_ARGS[@]}" >"$WORK/rest_unverified_lease.log" 2>&1; then
-    kill -9 "$LEASE_HOLDER_PID" "$UNRELATED_PID" 2>/dev/null || true
     fail "restore must fail closed when unverified worker lease is still held"
   fi
   grep -q "UNVERIFIED_WORKER_ALIVE" "$WORK/rest_unverified_lease.log" \
     || fail "expected UNVERIFIED_WORKER_ALIVE: $(cat "$WORK/rest_unverified_lease.log")"
   [[ "$(cat "$WORK/backup/state")" == "RESTORE_FAILED" ]] || fail "expected RESTORE_FAILED when unverified lease held"
-  kill -0 "$UNRELATED_PID" 2>/dev/null || fail "restore killed unrelated reused PID during unverified lease check!"
-  kill -9 "$LEASE_HOLDER_PID" 2>/dev/null || true
-  wait "$LEASE_HOLDER_PID" 2>/dev/null || true
+  assert_fixture_alive "$UNRELATED_PID" "unrelated PID fixture during unverified lease check"
+  assert_fixture_alive "$LEASE_HOLDER_PID" "lease holder fixture before explicit release"
+  rm -f "$WORK/lease_keepalive"
+  wait "$LEASE_HOLDER_PID" || fail "lease holder did not exit cleanly (exit 0) on explicit release"
+  LEASE_HOLDER_PID=""
 fi
 
 bash "$DRILL_SH" restore "${COMMON_ARGS[@]}" >"$WORK/rest_pid_reuse.log" 2>&1 || fail "restore failed on freed lease with reused PID: $(cat "$WORK/rest_pid_reuse.log")"
 grep -q "DRILL_RESTORE_VERIFIED_OK" "$WORK/rest_pid_reuse.log" || fail "expected DRILL_RESTORE_VERIFIED_OK on PID-reuse check"
-kill -0 "$UNRELATED_PID" 2>/dev/null || fail "restore killed unrelated process pid=${UNRELATED_PID} on PID reuse!"
-kill "$UNRELATED_PID" 2>/dev/null || true
-wait "$UNRELATED_PID" 2>/dev/null || true
+assert_fixture_alive "$UNRELATED_PID" "unrelated PID fixture after PID-reuse restore"
+rm -f "$WORK/unrelated_keepalive"
+wait "$UNRELATED_PID" || fail "unrelated PID fixture did not exit cleanly (exit 0) on explicit release"
+UNRELATED_PID=""
 echo "Supervisor SIGKILL -> manual restore fencing, same-work-dir isolation, PID-reuse safety, and unverified lease fail-closed verified"
 
 echo "=== 7. R3/R1: Already-RESTORED no-op, ARMED external config preservation, DB drift detection, restore error non-masking ==="
