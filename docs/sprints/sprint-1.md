@@ -51,7 +51,7 @@ PR마다 구현자 외 두 리뷰를 거쳤다([reviews](../../collab/reviews/))
 ## 후속 상태 안내 (2026-11-22)
 
 - 위 본문(로컬 개발 DB 36,768건, 미완료 목록, 스크린샷 없음, KPT 회고)은 **2026-11-14~2026-11-15 M1 완료 시점의 역사 기록**으로 보존한다.
-- 2026-11-22(`main` `2090c4c`, PR #38·#40·#41 병합 기준) 최신 누적 현황과 남은 PRD §7 공개 출시 게이트는 [구현 및 출시 검증 현황](../implementation-status.md)에서 관리한다.
+- 2026-11-22(`main` `fb51d48`, PR #38·#40·#41·#42 병합 기준 · 운영 앱 `e0208ff` 유지) 최신 누적 현황과 남은 PRD §7 공개 출시 게이트는 [구현 및 출시 검증 현황](../implementation-status.md)에서 관리한다.
   - 운영 DB 최초 3년 적재(36,879건, 2026-11-19): [운영 초기 배포 기록](../../collab/2026-11-19-resume/claude-runtime-result.md)
   - M3 수동 blue/green·사후 롤백·모니터링 mount·`e0208ff` 배포 및 제한 성능 실측: [G4 기록](../../collab/2026-11-19-resume/claude-g4-result.md), [4cc 기록](../../collab/2026-11-19-resume/claude-main4cc-deploy-result.md), [e020 기록](../../collab/2026-11-19-resume/claude-main-e020-deploy-result.md)
   - 프론트엔드 리프레시 구조 문서 및 합성 스크린샷/QA 증거(PR #39·#41): [프론트 구조](../design/frontend-structure.md), [합성 QA 기록](../qa/frontend-refresh-2026-11-22.md)
