@@ -409,6 +409,15 @@ function Assert-SafeLocalPath {
       Fail-Run "CONFIG_INVALID $Role must not be a bare drive root: $norm"
     }
 
+    # Reject Windows 8.3 short-name path components (e.g. ONEDRI~1, GOOGLE~1) fail-closed
+    # so lexical sync/Git exclusions cannot be bypassed via short-name aliases.
+    $relTail = $norm.Substring($rootDrive.Length)
+    foreach ($seg in ($relTail -split '[\\/]')) {
+      if ($seg -match '~[0-9]+(\.[^.]+)?$') {
+        Fail-Run "${ErrorPrefix}_SHORT_NAME_FORBIDDEN refusing 8.3 short-name path component '$seg' for $Role ($norm); use full long path"
+      }
+    }
+
     # Walk every component from leaf (even if non-existent) up to drive root:
     # reject any ancestor symlink/junction/reparse point and fail closed on inspection errors.
     $nearestExisting = ""
@@ -605,6 +614,20 @@ function Load-Config {
     Fail-Run "CONFIG_INVALID PC_ALLOW_CUSTOM_PATHS is not supported; all local paths are always validated against UNC, reparse points, non-NTFS, sync dirs, and Git checkouts"
   }
 
+  # Test-harness-only overrides must NEVER be accepted from production env files.
+  # The harness marker itself is strictly process-environment-only and rejected if placed inside the env file.
+  if ($kv.ContainsKey("PC_PULL_TEST_HARNESS_MODE") -and -not [string]::IsNullOrWhiteSpace($kv["PC_PULL_TEST_HARNESS_MODE"])) {
+    Fail-Run "CONFIG_INVALID PC_PULL_TEST_HARNESS_MODE cannot be set in the env file; reserved for isolated test harness process environment only"
+  }
+  $isTestHarness = ($env:PC_PULL_TEST_HARNESS_MODE -eq "1")
+  foreach ($testOnlyKey in @("PC_NOW_EPOCH_OVERRIDE", "PC_POST_NOW_EPOCH_OVERRIDE", "PC_ALLOW_LOCAL_SOURCE")) {
+    if ($kv.ContainsKey($testOnlyKey) -and -not [string]::IsNullOrWhiteSpace($kv[$testOnlyKey])) {
+      if (-not $isTestHarness) {
+        Fail-Run "CONFIG_INVALID $testOnlyKey is reserved for isolated test harness runs and forbidden in production env files"
+      }
+    }
+  }
+
   $checkAcl = $true
   if ($kv.ContainsKey("PC_CHECK_ACL") -and -not [string]::IsNullOrWhiteSpace($kv["PC_CHECK_ACL"])) {
     $checkAcl = ($kv["PC_CHECK_ACL"].Trim().ToLowerInvariant() -ne "false")
@@ -613,7 +636,7 @@ function Load-Config {
     Assert-RestrictedWindowsAcl $resolvedEnv "PC pull env file"
   }
 
-  $allowLocalSource = ($kv.ContainsKey("PC_ALLOW_LOCAL_SOURCE") -and $kv["PC_ALLOW_LOCAL_SOURCE"].Trim().ToLowerInvariant() -eq "true")
+  $allowLocalSource = ($isTestHarness -and $kv.ContainsKey("PC_ALLOW_LOCAL_SOURCE") -and $kv["PC_ALLOW_LOCAL_SOURCE"].Trim().ToLowerInvariant() -eq "true")
 
   $localApp = if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { $env:LOCALAPPDATA } else { $env:HOME }
   $baseDir = Join-Path $localApp "gongchae-bell"
@@ -744,14 +767,14 @@ function Load-Config {
   }
 
   $nowOverride = $null
-  if ($kv.ContainsKey("PC_NOW_EPOCH_OVERRIDE") -and -not [string]::IsNullOrWhiteSpace($kv["PC_NOW_EPOCH_OVERRIDE"])) {
+  if ($isTestHarness -and $kv.ContainsKey("PC_NOW_EPOCH_OVERRIDE") -and -not [string]::IsNullOrWhiteSpace($kv["PC_NOW_EPOCH_OVERRIDE"])) {
     if ($kv["PC_NOW_EPOCH_OVERRIDE"].Trim() -notmatch '^[1-9][0-9]*$') {
       Fail-Run "CONFIG_INVALID PC_NOW_EPOCH_OVERRIDE must be a positive integer epoch"
     }
     $nowOverride = [long]$kv["PC_NOW_EPOCH_OVERRIDE"].Trim()
   }
   $postNowOverride = $null
-  if ($kv.ContainsKey("PC_POST_NOW_EPOCH_OVERRIDE") -and -not [string]::IsNullOrWhiteSpace($kv["PC_POST_NOW_EPOCH_OVERRIDE"])) {
+  if ($isTestHarness -and $kv.ContainsKey("PC_POST_NOW_EPOCH_OVERRIDE") -and -not [string]::IsNullOrWhiteSpace($kv["PC_POST_NOW_EPOCH_OVERRIDE"])) {
     if ($kv["PC_POST_NOW_EPOCH_OVERRIDE"].Trim() -notmatch '^[1-9][0-9]*$') {
       Fail-Run "CONFIG_INVALID PC_POST_NOW_EPOCH_OVERRIDE must be a positive integer epoch"
     }

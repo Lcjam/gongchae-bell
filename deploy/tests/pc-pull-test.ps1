@@ -53,7 +53,8 @@ $DAY = 86400
 $WINDOW = 14 * $DAY
 $BASE_NOW = 1800000000L
 
-$TMP_ROOT = Join-Path ([System.IO.Path]::GetTempPath()) ("gongchae-pc-pull-test-" + [Guid]::NewGuid().ToString("N").Substring(0, 10))
+$baseTemp = if (-not [string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath() }
+$TMP_ROOT = Join-Path $baseTemp ("gongchae-pc-pull-test-" + [Guid]::NewGuid().ToString("N").Substring(0, 10))
 New-Item -ItemType Directory -Path $TMP_ROOT -Force | Out-Null
 
 $script:ReadOnlyDirsToRestore = @()
@@ -175,6 +176,7 @@ function Invoke-PcPull {
     [string]$Subcommand,
     [string]$EnvPath,
     [switch]$StandaloneInit,
+    [switch]$TestHarness,
     [hashtable]$ExtraEnv = @{}
   )
   $psExe = (Get-Process -Id $PID).Path
@@ -193,6 +195,12 @@ function Invoke-PcPull {
   $psi.RedirectStandardError = $true
   $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
   $psi.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
+  if ($psi.EnvironmentVariables.ContainsKey("PC_PULL_TEST_HARNESS_MODE")) {
+    $psi.EnvironmentVariables.Remove("PC_PULL_TEST_HARNESS_MODE")
+  }
+  if ($TestHarness) {
+    $psi.EnvironmentVariables["PC_PULL_TEST_HARNESS_MODE"] = "1"
+  }
   foreach ($k in $ExtraEnv.Keys) {
     $psi.EnvironmentVariables[$k] = [string]$ExtraEnv[$k]
   }
@@ -552,6 +560,199 @@ try {
     Assert-Contains ($r1fDrive.StdOut + $r1fDrive.StdErr) "DEST_DRIVE_UNAVAILABLE" "unmounted drive rejected fail-closed"
   }
 
+  # 1g: Test-only overrides (PC_NOW_EPOCH_OVERRIDE, PC_POST_NOW_EPOCH_OVERRIDE, PC_ALLOW_LOCAL_SOURCE) and
+  #     in-env PC_PULL_TEST_HARNESS_MODE must be rejected in production mode (without process test marker)
+  #     BEFORE any snapshot deletion or success heartbeat.
+  $dst1g = Join-Path $c1 "dst1g-valid-repo"
+  $cache1g = Join-Path $c1 "cache1g"
+  $data1g = Join-Path $c1 "data1g"
+  New-Item -ItemType Directory -Path $dst1g, $cache1g, $data1g -Force | Out-Null
+  Assert-Eq 0 (Invoke-ResticDirect -Repo $dst1g -Password "local-pass-1" -CacheDir $cache1g -ArgsList @("init")).ExitCode "1g dst init"
+  [System.IO.File]::WriteAllText((Join-Path $data1g "keep.txt"), "must-not-be-deleted-by-stray-override")
+  $recentEpoch = [long][DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - 3600
+  Assert-Eq 0 (Invoke-ResticDirect -Repo $dst1g -Password "local-pass-1" -CacheDir $cache1g -ArgsList @("backup", "--tag", "gongchae-bell", "--time", (Format-ResticTime $recentEpoch), $data1g)).ExitCode "1g seed valid snap"
+
+  $futureEpoch = [long][DateTimeOffset]::UtcNow.ToUnixTimeSeconds() + 30 * $DAY
+  $env1gNow = Join-Path $c1 "env1g-now.env"
+  Write-CaseEnv $env1gNow @{
+    PC_RESTIC_REPOSITORY     = $dst1g
+    PC_RESTIC_PASSWORD_FILE  = $pwFile1
+    HEALTHCHECKS_PC_PULL_URL = $hbServer.Url
+    PC_LOCK_FILE             = (Join-Path $c1 "l1g.lock")
+    PC_CACHE_DIR             = $cache1g
+    PC_LOG_DIR               = (Join-Path $c1 "logs1g")
+    RESTIC_BIN               = $ResticBin
+    PYTHON_BIN               = $PythonBin
+    EXPIRE_SELECT_PATH       = $EXPIRE_SELECT
+    PC_NOW_EPOCH_OVERRIDE    = "$futureEpoch"
+  }
+  if (Test-Path $hbLog) { Remove-Item $hbLog -Force }
+  $r1gNow = Invoke-PcPull -Subcommand "run" -EnvPath $env1gNow
+  Assert-True ($r1gNow.ExitCode -ne 0) "PC_NOW_EPOCH_OVERRIDE without process harness marker must fail"
+  Assert-Contains ($r1gNow.StdOut + $r1gNow.StdErr) "CONFIG_INVALID PC_NOW_EPOCH_OVERRIDE" "now override rejected in prod mode"
+  Assert-NotContains ($r1gNow.StdOut + $r1gNow.StdErr) "PC_PULL_OK" "no success on rejected override"
+  Assert-Eq 1 @(Get-RepoSnapshots -Repo $dst1g -Password "local-pass-1" -CacheDir $cache1g -Tag "gongchae-bell").Count "valid snapshot preserved when future PC_NOW_EPOCH_OVERRIDE rejected"
+  $hb1g = if (Test-Path $hbLog) { [System.IO.File]::ReadAllText($hbLog) } else { "" }
+  Assert-NotContains $hb1g "PC_PULL_OK" "no success heartbeat when override rejected"
+
+  $env1gPost = Join-Path $c1 "env1g-post.env"
+  Write-CaseEnv $env1gPost @{
+    PC_RESTIC_REPOSITORY       = $dst1g
+    PC_RESTIC_PASSWORD_FILE    = $pwFile1
+    PC_LOCK_FILE               = (Join-Path $c1 "l1g2.lock")
+    PC_CACHE_DIR               = $cache1g
+    PC_LOG_DIR                 = (Join-Path $c1 "logs1g2")
+    RESTIC_BIN                 = $ResticBin
+    PYTHON_BIN                 = $PythonBin
+    EXPIRE_SELECT_PATH         = $EXPIRE_SELECT
+    PC_POST_NOW_EPOCH_OVERRIDE = "$futureEpoch"
+  }
+  $r1gPost = Invoke-PcPull -Subcommand "run" -EnvPath $env1gPost
+  Assert-True ($r1gPost.ExitCode -ne 0) "PC_POST_NOW_EPOCH_OVERRIDE without process harness marker must fail"
+  Assert-Contains ($r1gPost.StdOut + $r1gPost.StdErr) "CONFIG_INVALID PC_POST_NOW_EPOCH_OVERRIDE" "post now override rejected in prod mode"
+
+  $env1gLocalSrc = Join-Path $c1 "env1g-localsrc.env"
+  Write-CaseEnv $env1gLocalSrc @{
+    PC_RESTIC_REPOSITORY    = $dst1g
+    PC_RESTIC_PASSWORD_FILE = $pwFile1
+    PC_LOCK_FILE            = (Join-Path $c1 "l1g3.lock")
+    PC_CACHE_DIR            = $cache1g
+    PC_LOG_DIR              = (Join-Path $c1 "logs1g3")
+    RESTIC_BIN              = $ResticBin
+    PYTHON_BIN              = $PythonBin
+    EXPIRE_SELECT_PATH      = $EXPIRE_SELECT
+    PC_ALLOW_LOCAL_SOURCE   = "true"
+  }
+  $r1gLocalSrc = Invoke-PcPull -Subcommand "run" -EnvPath $env1gLocalSrc
+  Assert-True ($r1gLocalSrc.ExitCode -ne 0) "PC_ALLOW_LOCAL_SOURCE without process harness marker must fail"
+  Assert-Contains ($r1gLocalSrc.StdOut + $r1gLocalSrc.StdErr) "CONFIG_INVALID PC_ALLOW_LOCAL_SOURCE" "local source override rejected in prod mode"
+
+  $env1gInEnvMarker = Join-Path $c1 "env1g-marker-in-env.env"
+  Write-CaseEnv $env1gInEnvMarker @{
+    PC_RESTIC_REPOSITORY      = $dst1g
+    PC_RESTIC_PASSWORD_FILE   = $pwFile1
+    PC_LOCK_FILE              = (Join-Path $c1 "l1g4.lock")
+    PC_CACHE_DIR              = $cache1g
+    PC_LOG_DIR                = (Join-Path $c1 "logs1g4")
+    RESTIC_BIN                = $ResticBin
+    PYTHON_BIN                = $PythonBin
+    EXPIRE_SELECT_PATH        = $EXPIRE_SELECT
+    PC_PULL_TEST_HARNESS_MODE = "1"
+    PC_NOW_EPOCH_OVERRIDE     = "$futureEpoch"
+  }
+  $r1gInEnvMarker = Invoke-PcPull -Subcommand "run" -EnvPath $env1gInEnvMarker
+  Assert-True ($r1gInEnvMarker.ExitCode -ne 0) "PC_PULL_TEST_HARNESS_MODE inside env file must fail"
+  Assert-Contains ($r1gInEnvMarker.StdOut + $r1gInEnvMarker.StdErr) "CONFIG_INVALID PC_PULL_TEST_HARNESS_MODE" "in-env harness marker rejected"
+
+  # 1h: Windows 8.3 short-name path components rejected fail-closed (repo + auxiliary paths), while normal long path succeeds
+  if ($env:OS -eq "Windows_NT") {
+    $synthLongOd = Join-Path $c1 "OneDrive - Synthetic Co"
+    New-Item -ItemType Directory -Path $synthLongOd -Force | Out-Null
+    $longOdEnv = @{ OneDrive = $synthLongOd; OneDriveConsumer = ""; OneDriveCommercial = "" }
+
+    # Long name rejected by OneDrive sync check
+    $env1hLong = Join-Path $c1 "env1h-long-od.env"
+    Write-CaseEnv $env1hLong @{
+      PC_RESTIC_REPOSITORY    = (Join-Path $synthLongOd "replica")
+      PC_RESTIC_PASSWORD_FILE = $pwFile1
+      PC_LOCK_FILE            = (Join-Path $c1 "l1h1.lock")
+      PC_CACHE_DIR            = (Join-Path $c1 "cache1h1")
+      PC_LOG_DIR              = (Join-Path $c1 "logs1h1")
+      RESTIC_BIN              = $ResticBin
+      PYTHON_BIN              = $PythonBin
+      EXPIRE_SELECT_PATH      = $EXPIRE_SELECT
+    }
+    $r1hLong = Invoke-PcPull -Subcommand "init" -EnvPath $env1hLong -StandaloneInit -ExtraEnv $longOdEnv
+    Assert-True ($r1hLong.ExitCode -ne 0) "long OneDrive path must fail"
+    Assert-Contains ($r1hLong.StdOut + $r1hLong.StdErr) "DEST_SYNC_DIR_FORBIDDEN" "long OneDrive path reason"
+
+    # If the NTFS volume has 8.3 short-name generation enabled (e.g. Windows 11 C:), test the ACTUAL OS 8.3 alias too!
+    $actualShort = (& cmd.exe /c "for %I in (`"$synthLongOd`") do @echo %~sI" 2>$null | Select-Object -First 1)
+    if (-not [string]::IsNullOrWhiteSpace($actualShort)) { $actualShort = $actualShort.Trim() }
+    if (-not [string]::IsNullOrWhiteSpace($actualShort) -and $actualShort -match '~[0-9]+') {
+      Write-Host "  (8.3 short-name active on volume: testing real OS alias)"
+      $env1hRealShortRepo = Join-Path $c1 "env1h-real-short-repo.env"
+      Write-CaseEnv $env1hRealShortRepo @{
+        PC_RESTIC_REPOSITORY    = (Join-Path $actualShort "replica-short")
+        PC_RESTIC_PASSWORD_FILE = $pwFile1
+        PC_LOCK_FILE            = (Join-Path $c1 "l1h2.lock")
+        PC_CACHE_DIR            = (Join-Path $c1 "cache1h2")
+        PC_LOG_DIR              = (Join-Path $c1 "logs1h2")
+        RESTIC_BIN              = $ResticBin
+        PYTHON_BIN              = $PythonBin
+        EXPIRE_SELECT_PATH      = $EXPIRE_SELECT
+      }
+      $r1hRealRepo = Invoke-PcPull -Subcommand "init" -EnvPath $env1hRealShortRepo -StandaloneInit -ExtraEnv $longOdEnv
+      Assert-True ($r1hRealRepo.ExitCode -ne 0) "real OS 8.3 short-name repo path must fail"
+      Assert-Contains ($r1hRealRepo.StdOut + $r1hRealRepo.StdErr) "DEST_SHORT_NAME_FORBIDDEN" "real OS 8.3 short-name repo reason"
+      Assert-True (-not (Test-Path -LiteralPath (Join-Path $synthLongOd "replica-short"))) "no repo created via real 8.3 alias"
+
+      $env1hRealShortLog = Join-Path $c1 "env1h-real-short-log.env"
+      Write-CaseEnv $env1hRealShortLog @{
+        PC_RESTIC_REPOSITORY    = (Join-Path $c1 "dst1h-ok")
+        PC_RESTIC_PASSWORD_FILE = $pwFile1
+        PC_LOCK_FILE            = (Join-Path $c1 "l1h3.lock")
+        PC_CACHE_DIR            = (Join-Path $c1 "cache1h3")
+        PC_LOG_DIR              = (Join-Path $actualShort "logs-short")
+        RESTIC_BIN              = $ResticBin
+        PYTHON_BIN              = $PythonBin
+        EXPIRE_SELECT_PATH      = $EXPIRE_SELECT
+      }
+      $r1hRealLog = Invoke-PcPull -Subcommand "init" -EnvPath $env1hRealShortLog -StandaloneInit -ExtraEnv $longOdEnv
+      Assert-True ($r1hRealLog.ExitCode -ne 0) "real OS 8.3 short-name log path must fail"
+      Assert-Contains ($r1hRealLog.StdOut + $r1hRealLog.StdErr) "PATH_SHORT_NAME_FORBIDDEN" "real OS 8.3 short-name log reason"
+      Assert-True (-not (Test-Path -LiteralPath (Join-Path $synthLongOd "logs-short"))) "no log created via real 8.3 alias"
+    }
+
+    # Deterministic lexical 8.3 component checks (covers volumes with 8.3 disabled, e.g. CI D:)
+    $env1hLexRepo = Join-Path $c1 "env1h-lex-repo.env"
+    Write-CaseEnv $env1hLexRepo @{
+      PC_RESTIC_REPOSITORY    = (Join-Path $c1 "ONEDRI~1\replica")
+      PC_RESTIC_PASSWORD_FILE = $pwFile1
+      PC_LOCK_FILE            = (Join-Path $c1 "l1h4.lock")
+      PC_CACHE_DIR            = (Join-Path $c1 "cache1h4")
+      PC_LOG_DIR              = (Join-Path $c1 "logs1h4")
+      RESTIC_BIN              = $ResticBin
+      PYTHON_BIN              = $PythonBin
+      EXPIRE_SELECT_PATH      = $EXPIRE_SELECT
+    }
+    $r1hLexRepo = Invoke-PcPull -Subcommand "init" -EnvPath $env1hLexRepo -StandaloneInit
+    Assert-True ($r1hLexRepo.ExitCode -ne 0) "lexical 8.3 repo path must fail"
+    Assert-Contains ($r1hLexRepo.StdOut + $r1hLexRepo.StdErr) "DEST_SHORT_NAME_FORBIDDEN" "lexical 8.3 repo reason"
+
+    $env1hLexAux = Join-Path $c1 "env1h-lex-aux.env"
+    Write-CaseEnv $env1hLexAux @{
+      PC_RESTIC_REPOSITORY    = (Join-Path $c1 "dst1h-ok2")
+      PC_RESTIC_PASSWORD_FILE = $pwFile1
+      PC_LOCK_FILE            = (Join-Path $c1 "l1h5.lock")
+      PC_CACHE_DIR            = (Join-Path $c1 "GOOGLE~1\cache")
+      PC_LOG_DIR              = (Join-Path $c1 "logs1h5")
+      RESTIC_BIN              = $ResticBin
+      PYTHON_BIN              = $PythonBin
+      EXPIRE_SELECT_PATH      = $EXPIRE_SELECT
+    }
+    $r1hLexAux = Invoke-PcPull -Subcommand "init" -EnvPath $env1hLexAux -StandaloneInit
+    Assert-True ($r1hLexAux.ExitCode -ne 0) "lexical 8.3 cache path must fail"
+    Assert-Contains ($r1hLexAux.StdOut + $r1hLexAux.StdErr) "PATH_SHORT_NAME_FORBIDDEN" "lexical 8.3 aux reason"
+
+    # Normal long non-sync path succeeds in strict production mode (no -TestHarness)
+    $normalLongRepo = Join-Path $c1 "normal-long-folder-name\standalone-replica"
+    $env1hNormal = Join-Path $c1 "env1h-normal.env"
+    Write-CaseEnv $env1hNormal @{
+      PC_RESTIC_REPOSITORY    = $normalLongRepo
+      PC_RESTIC_PASSWORD_FILE = $pwFile1
+      PC_LOCK_FILE            = (Join-Path $c1 "l1h6.lock")
+      PC_CACHE_DIR            = (Join-Path $c1 "cache1h6")
+      PC_LOG_DIR              = (Join-Path $c1 "logs1h6")
+      RESTIC_BIN              = $ResticBin
+      PYTHON_BIN              = $PythonBin
+      EXPIRE_SELECT_PATH      = $EXPIRE_SELECT
+    }
+    $r1hNormal = Invoke-PcPull -Subcommand "init" -EnvPath $env1hNormal -StandaloneInit
+    Assert-Eq 0 $r1hNormal.ExitCode "normal long non-sync path must succeed in production mode: $($r1hNormal.StdOut) $($r1hNormal.StdErr)"
+    Assert-Contains $r1hNormal.StdOut "PC_RESTIC_REPO_INITIALIZED mode=standalone" "normal long path initialized"
+  }
+
   # ---------------------------------------------------------------------------
   Write-Host "=== [2/10] Init (--copy-chunker-params from RO source) + [3/10] 14d boundary, foreign tag, RO copy, idempotency ==="
   $c2 = Join-Path $TMP_ROOT "case2"
@@ -617,12 +818,12 @@ try {
   }
 
   # Init local PC repo from strictly read-only source (--copy-chunker-params --no-lock)
-  $rInit = Invoke-PcPull -Subcommand "init" -EnvPath $env2
+  $rInit = Invoke-PcPull -Subcommand "init" -EnvPath $env2 -TestHarness
   Assert-Eq 0 $rInit.ExitCode "init from RO src must succeed: $($rInit.StdOut) $($rInit.StdErr)"
   Assert-Contains $rInit.StdOut "PC_RESTIC_REPO_INITIALIZED mode=copy-chunker-params" "init logged"
 
   # Idempotent re-init
-  $rInit2 = Invoke-PcPull -Subcommand "init" -EnvPath $env2
+  $rInit2 = Invoke-PcPull -Subcommand "init" -EnvPath $env2 -TestHarness
   Assert-Eq 0 $rInit2.ExitCode "re-init must succeed"
   Assert-Contains $rInit2.StdOut "PC_RESTIC_REPO_ALREADY_INITIALIZED" "already initialized logged"
 
@@ -636,7 +837,7 @@ try {
 
   # Run PC pull!
   if (Test-Path $hbLog) { Remove-Item $hbLog -Force }
-  $rRun = Invoke-PcPull -Subcommand "run" -EnvPath $env2
+  $rRun = Invoke-PcPull -Subcommand "run" -EnvPath $env2 -TestHarness
   Assert-Eq 0 $rRun.ExitCode "happy run must succeed: $($rRun.StdOut) $($rRun.StdErr)"
   Assert-Contains $rRun.StdOut "PRE_RETENTION_SUMMARY policy=wall-clock-14d forgotten=1 total=0 expire=0 keep=0" "pre-expiry deleted 18d local copy"
   Assert-Contains $rRun.StdOut "SOURCE_COPY_OK candidates=2" "only 2 non-expired source snapshots copied (14d exact and 14d-1s)"
@@ -664,7 +865,7 @@ try {
   Assert-NotContains $hbContent "/fail" "no fail ping on success"
 
   # Verify idempotent re-run does not duplicate snapshots
-  $rRun2 = Invoke-PcPull -Subcommand "run" -EnvPath $env2
+  $rRun2 = Invoke-PcPull -Subcommand "run" -EnvPath $env2 -TestHarness
   Assert-Eq 0 $rRun2.ExitCode "idempotent re-run must succeed"
   $dstSnaps2 = @(Get-RepoSnapshots -Repo $dst2 -Password $dstPass -CacheDir $cache2 -Tag "gongchae-bell")
   Assert-Eq 2 $dstSnaps2.Count "idempotent re-run keeps exactly 2 snapshots (no duplicates)"
@@ -689,7 +890,7 @@ try {
     PC_NOW_EPOCH_OVERRIDE    = "$allExpiredNow"
     COPY_MAX_RETRIES         = "0"
   }
-  $rZero = Invoke-PcPull -Subcommand "run" -EnvPath $env4
+  $rZero = Invoke-PcPull -Subcommand "run" -EnvPath $env4 -TestHarness
   Assert-Eq 0 $rZero.ExitCode "all-expired 0-copy run must succeed: $($rZero.StdOut) $($rZero.StdErr)"
   Assert-Contains $rZero.StdOut "PRE_RETENTION_SUMMARY policy=wall-clock-14d forgotten=2 total=0 expire=0 keep=0" "all local copies deleted"
   Assert-Contains $rZero.StdOut "SOURCE_COPY_SKIPPED valid_candidates=0" "no expired source snapshots copied"
@@ -727,7 +928,7 @@ try {
     COPY_RETRY_DELAY_SECONDS = "0"
   }
   if (Test-Path $hbLog) { Remove-Item $hbLog -Force }
-  $r5 = Invoke-PcPull -Subcommand "run" -EnvPath $env5
+  $r5 = Invoke-PcPull -Subcommand "run" -EnvPath $env5 -TestHarness
   Assert-True ($r5.ExitCode -ne 0) "missing source must exit non-zero"
   Assert-Contains $r5.StdOut "PRE_RETENTION_SUMMARY policy=wall-clock-14d forgotten=1 total=0 expire=0 keep=0" "local pre-expiry ran BEFORE source check"
   Assert-Contains ($r5.StdOut + $r5.StdErr) "LOCAL_RETENTION_OK_BUT_SOURCE_FAILED" "distinguished local retention ok vs source fail"
@@ -752,7 +953,7 @@ try {
     COPY_MAX_RETRIES         = "1"
     COPY_RETRY_DELAY_SECONDS = "0"
   }
-  $r5Retry = Invoke-PcPull -Subcommand "run" -EnvPath $env5Retry
+  $r5Retry = Invoke-PcPull -Subcommand "run" -EnvPath $env5Retry -TestHarness
   Assert-True ($r5Retry.ExitCode -ne 0) "retry missing source must fail"
   Assert-Contains ($r5Retry.StdOut + $r5Retry.StdErr) "attempt 1/2" "first source snapshot attempt logged"
   Assert-Contains ($r5Retry.StdOut + $r5Retry.StdErr) "attempt 2/2" "second source snapshot retry executed even when delay=0"
@@ -776,7 +977,7 @@ try {
     PC_NOW_EPOCH_OVERRIDE    = "$BASE_NOW"
     COPY_MAX_RETRIES         = "0"
   }
-  $r5PwMiss = Invoke-PcPull -Subcommand "run" -EnvPath $env5PwMiss
+  $r5PwMiss = Invoke-PcPull -Subcommand "run" -EnvPath $env5PwMiss -TestHarness
   Assert-True ($r5PwMiss.ExitCode -ne 0) "missing OCI password file must fail"
   Assert-Contains $r5PwMiss.StdOut "PRE_RETENTION_SUMMARY policy=wall-clock-14d forgotten=1 total=0 expire=0 keep=0" "local pre-expiry ran even with missing OCI password file"
   Assert-Contains ($r5PwMiss.StdOut + $r5PwMiss.StdErr) "LOCAL_RETENTION_OK_BUT_SOURCE_FAILED" "distinguished local retention ok vs missing OCI password file"
@@ -804,7 +1005,7 @@ try {
     PC_NOW_EPOCH_OVERRIDE    = "$BASE_NOW"
     COPY_MAX_RETRIES         = "0"
   }
-  $r5OdPw = Invoke-PcPull -Subcommand "run" -EnvPath $env5OdPw -ExtraEnv $odEnv
+  $r5OdPw = Invoke-PcPull -Subcommand "run" -EnvPath $env5OdPw -TestHarness -ExtraEnv $odEnv
   Assert-True ($r5OdPw.ExitCode -ne 0) "OneDrive OCI password file must fail"
   Assert-Contains $r5OdPw.StdOut "PRE_RETENTION_SUMMARY policy=wall-clock-14d forgotten=1 total=0 expire=0 keep=0" "local pre-expiry ran before rejecting OneDrive OCI password file"
   Assert-Contains ($r5OdPw.StdOut + $r5OdPw.StdErr) "PATH_SYNC_DIR_FORBIDDEN" "OneDrive OCI password file rejected by path guard"
@@ -828,7 +1029,7 @@ try {
     PC_NOW_EPOCH_OVERRIDE    = "$BASE_NOW"
     COPY_MAX_RETRIES         = "0"
   }
-  $r5SamePw = Invoke-PcPull -Subcommand "run" -EnvPath $env5SamePw
+  $r5SamePw = Invoke-PcPull -Subcommand "run" -EnvPath $env5SamePw -TestHarness
   Assert-True ($r5SamePw.ExitCode -ne 0) "identical PC and OCI passwords must fail"
   Assert-Contains ($r5SamePw.StdOut + $r5SamePw.StdErr) "PC_RESTIC_PASSWORD must be separate from OCI_RESTIC_PASSWORD" "separate password guard"
 
@@ -847,7 +1048,7 @@ try {
     EXPIRE_SELECT_PATH       = $EXPIRE_SELECT
     PC_ALLOW_LOCAL_SOURCE    = "true"
   }
-  $r5b = Invoke-PcPull -Subcommand "run" -EnvPath $env5b
+  $r5b = Invoke-PcPull -Subcommand "run" -EnvPath $env5b -TestHarness
   Assert-True ($r5b.ExitCode -ne 0) "bad local password must fail"
   Assert-Contains ($r5b.StdOut + $r5b.StdErr) "LOCAL_REPO_AUTH_FAIL" "explicit local auth failure code"
 
@@ -879,7 +1080,7 @@ try {
     COPY_MAX_RETRIES         = "0"
   }
   if (Test-Path $hbLog) { Remove-Item $hbLog -Force }
-  $r6 = Invoke-PcPull -Subcommand "run" -EnvPath $env6
+  $r6 = Invoke-PcPull -Subcommand "run" -EnvPath $env6 -TestHarness
   $r6Combined = $r6.StdOut + "`n" + $r6.StdErr
   Assert-True ($r6.ExitCode -ne 0) "6a read-only destination locks must fail during pre-copy local check"
   Assert-Contains $r6Combined "unable to create lock in backend" "6a failed trying to create local destination lock"
@@ -946,7 +1147,7 @@ sys.exit(rc)
     COPY_MAX_RETRIES         = "0"
   }
   if (Test-Path $hbLog) { Remove-Item $hbLog -Force }
-  $r6b = Invoke-PcPull -Subcommand "run" -EnvPath $env6b
+  $r6b = Invoke-PcPull -Subcommand "run" -EnvPath $env6b -TestHarness
   $r6bCombined = $r6b.StdOut + "`n" + $r6b.StdErr
   Assert-True ($r6b.ExitCode -ne 0) "6b copy-stage destination append-lock refusal must fail"
   Assert-Contains $r6bCombined "PRE_RETENTION_SUMMARY policy=wall-clock-14d forgotten=0 total=0 expire=0 keep=0" "6b pre-retention passed cleanly before copy"
@@ -1000,7 +1201,7 @@ sys.exit(rc)
     COPY_RETRY_DELAY_SECONDS = "0"
   }
   if (Test-Path $hbLog) { Remove-Item $hbLog -Force }
-  $r7 = Invoke-PcPull -Subcommand "run" -EnvPath $env7
+  $r7 = Invoke-PcPull -Subcommand "run" -EnvPath $env7 -TestHarness
   Assert-True ($r7.ExitCode -ne 0) "source prune race must fail (never hide as success)"
   Assert-Contains ($r7.StdOut + $r7.StdErr) "SOURCE_COPY_FAIL" "copy failure recorded"
   Assert-Contains $r7.StdOut "POST_RETENTION_SUMMARY policy=wall-clock-14d forgotten=0 total=0 expire=0 keep=0" "post-copy prune ran after copy failure"
@@ -1039,7 +1240,7 @@ sys.exit(rc)
     PC_POST_NOW_EPOCH_OVERRIDE = "$($BASE_NOW + 2)"
     COPY_MAX_RETRIES           = "0"
   }
-  $r8 = Invoke-PcPull -Subcommand "run" -EnvPath $env8
+  $r8 = Invoke-PcPull -Subcommand "run" -EnvPath $env8 -TestHarness
   Assert-Eq 0 $r8.ExitCode "boundary-crossing run must succeed cleanly: $($r8.StdOut) $($r8.StdErr)"
   Assert-Contains $r8.StdOut "SOURCE_COPY_OK candidates=1" "copied while still <=14d"
   Assert-Contains $r8.StdOut "POST_RETENTION_SUMMARY policy=wall-clock-14d forgotten=1 total=0 expire=0 keep=0" "post-copy retention deleted newly expired copy"
@@ -1050,7 +1251,7 @@ sys.exit(rc)
   $lock9 = Join-Path $c8 "pc-pull.lock"
   $heldStream = [System.IO.File]::Open($lock9, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
   try {
-    $r9 = Invoke-PcPull -Subcommand "run" -EnvPath $env8
+    $r9 = Invoke-PcPull -Subcommand "run" -EnvPath $env8 -TestHarness
     Assert-Eq 20 $r9.ExitCode "concurrent run must exit 20"
     Assert-Contains ($r9.StdOut + $r9.StdErr) "LOCK_HELD" "LOCK_HELD logged"
   } finally {
@@ -1122,7 +1323,7 @@ sys.exit(rc)
     COPY_MAX_RETRIES          = "0"
   }
   if (Test-Path $hbLog) { Remove-Item $hbLog -Force }
-  $r10b = Invoke-PcPull -Subcommand "run" -EnvPath $env10b
+  $r10b = Invoke-PcPull -Subcommand "run" -EnvPath $env10b -TestHarness
   Assert-True ($r10b.ExitCode -ne 0) "case10b expected failure"
   $combined10b = $r10b.StdOut + "`n" + $r10b.StdErr
   $logFile10b = Join-Path $c10 "logs10b\pc-pull.log"

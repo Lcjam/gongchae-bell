@@ -14,8 +14,10 @@
   - 실제 운영에서는 작업 스케줄러가 Git 저장소나 Orca worktree 안의 스크립트를 직접 가리키지 않도록 `pc-pull.ps1`과 `expire-select.py`를 `%LOCALAPPDATA%\gongchae-bell\runtime\`으로 복사해 실행한다.
 - **전 역할 경로 보호 및 중첩 금지 (변경·네트워크 접근 전 차단)**:
   - `pc-pull.ps1`은 `PC_RESTIC_REPOSITORY`뿐 아니라 `PC_PULL_ENV_FILE`, 비밀번호 파일(`PC_RESTIC_PASSWORD_FILE`·`OCI_RESTIC_PASSWORD_FILE`), `PC_CACHE_DIR`, `PC_LOG_DIR`, `PC_LOCK_FILE` 전체에 공통 로컬 NTFS 경로 검증을 적용한다(경로 우회 옵션 없음).
-  - 원격 백엔드(`s3:` 등), UNC 경로(`\\server\share`), 네트워크 드라이브, 비-NTFS 볼륨, 준비되지 않은 드라이브(조회 실패 포함 fail-closed), 대상 자체 및 **모든 기존 조상 경로의 junction/symlink/reparse point**(아직 생성되지 않은 하위 leaf 포함), OneDrive, Google Drive(`G:` 등), Git 체크아웃(`.git` 상위 탐색)을 파일·디렉터리 생성이나 네트워크 접근 **전에** 즉시 거부한다.
-  - 로컬 저장소(`PC_RESTIC_REPOSITORY`)와 env·비밀번호·잠금·캐시·로그·selector 경로는 서로 중첩(동일/상하위 포함)될 수 없다(`PATH_OVERLAP_FORBIDDEN`). `PC_CHECK_ACL=false`는 운영 우회 수단으로 사용하지 않는다.
+  - 원격 백엔드(`s3:` 등), UNC 경로(`\\server\share`), 네트워크 드라이브, 비-NTFS 볼륨, 준비되지 않은 드라이브(조회 실패 포함 fail-closed), 대상 자체 및 **모든 기존 조상 경로의 junction/symlink/reparse point**(아직 생성되지 않은 하위 leaf 포함), Windows **8.3 단축 이름 경로 구성요소**(`ONEDRI~1`, `GOOGLE~1` 등 `~숫자` 형태), OneDrive, Google Drive(`G:` 등), Git 체크아웃(`.git` 상위 탐색)을 파일·디렉터리 생성이나 네트워크 접근 **전에** 즉시 거부한다.
+  - 로컬 저장소(`PC_RESTIC_REPOSITORY`)와 env·비밀번호·잠금·캐시·로그·selector 경로는 서로 중첩(동일/상하위 포함)될 수 없다(`PATH_OVERLAP_FORBIDDEN`).
+  - 운영 기본 실행은 항상 실제 현재 UTC 시각과 `s3:https://` 원본만 허용하며, 시험 전용 설정(`PC_NOW_EPOCH_OVERRIDE`, `PC_POST_NOW_EPOCH_OVERRIDE`, `PC_ALLOW_LOCAL_SOURCE`)과 시험 하네스 표지(`PC_PULL_TEST_HARNESS_MODE`)는 운영 `.env` 파일에 남아 있으면 `CONFIG_INVALID`로 즉시 거부한다. `PC_CHECK_ACL=false`는 운영 우회 수단으로 사용하지 않는다.
+  - **경로 한계 (`subst`)**: Windows `subst` 가상 드라이브는 미지원·미검증 범위이며 운영 경로로 사용하지 않는다.
 
 | 역할 | 권장 로컬 NTFS 경로 (기본값) | 비고 |
 |---|---|---|
