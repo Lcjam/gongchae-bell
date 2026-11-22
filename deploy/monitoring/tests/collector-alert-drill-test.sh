@@ -305,6 +305,16 @@ if [[ "\${1:-}" == "exec" && "\${2:-}" == "$PROM_NAME" && "\${3:-}" == "wget" ]]
       if [[ -n "\${STUB_CONFIG_JSON:-}" ]]; then printf '%s\n' "\$STUB_CONFIG_JSON"; exit 0; fi ;;
     */api/v1/query?query=collector_*)
       if [[ -n "\${STUB_QUERY_JSON:-}" ]]; then printf '%s\n' "\$STUB_QUERY_JSON"; exit 0; fi ;;
+    */api/v1/rules?type=alert*)
+      if [[ "\${STUB_RULES_ADVANCE:-0}" == "1" ]]; then
+        seq_file="$WORK/stub_rules_seq"
+        n=0
+        [[ -f "\$seq_file" ]] && n="\$(cat "\$seq_file")"
+        n=\$(( n + 1 ))
+        printf '%s\n' "\$n" > "\$seq_file"
+        printf '{"status":"success","data":{"groups":[{"name":"gongchae","lastEvaluation":"2026-11-22T00:00:%02dZ"}]}}\n' "\$(( (n % 50) + 1 ))"
+        exit 0
+      fi ;;
   esac
 fi
 exec "$REAL_DOCKER_BIN" "\$@"
@@ -523,7 +533,8 @@ for pair in \
   bad_q="${pair#*|}"
   sed -i.bak 's/^STATE=.*/STATE=ARMED/' "$WORK/backup/meta.env" && rm -f "$WORK/backup/meta.env.bak"
   echo "ARMED" > "$WORK/backup/state"
-  if PATH="$WORK/prom-stub-bin:$PATH" STUB_QUERY_JSON="$bad_q" \
+  cp "$WORK/backup/meta.env" "$WORK/deploy/state/drill-runtime.owner"
+  if PATH="$WORK/prom-stub-bin:$PATH" STUB_RULES_ADVANCE=1 STUB_QUERY_JSON="$bad_q" \
       bash "$DRILL_SH" restore "${COMMON_ARGS[@]}" >"$WORK/rest_bad_tsdb_${tag}.log" 2>&1; then
     fail "restore must fail closed on malformed TSDB response (${tag}): $(cat "$WORK/rest_bad_tsdb_${tag}.log")"
   fi
@@ -531,9 +542,100 @@ for pair in \
     || fail "${tag}: expected TSDB query failure message, got: $(cat "$WORK/rest_bad_tsdb_${tag}.log")"
   [[ "$(cat "$WORK/backup/state")" == "RESTORE_FAILED" ]] || fail "${tag}: expected RESTORE_FAILED, got $(cat "$WORK/backup/state")"
 done
-bash "$DRILL_SH" restore "${COMMON_ARGS[@]}" >"$WORK/rest_after_bad_tsdb.log" 2>&1 || fail "clean restore retry after malformed TSDB tests failed: $(cat "$WORK/rest_after_bad_tsdb.log")"
-grep -q "DRILL_RESTORE_VERIFIED_OK" "$WORK/rest_after_bad_tsdb.log" || fail "expected DRILL_RESTORE_VERIFIED_OK after malformed TSDB retry"
 echo "Malformed TSDB responses (truncated JSON, missing result, non-numeric) all failed closed as RESTORE_FAILED"
+
+echo "=== 5c. R4(round4): Metadata publish failures (meta.env / state / owner), partial RESTORED mismatch, double failure, and retry convergence ==="
+REAL_MV_BIN="$(command -v mv)"
+mkdir -p "$WORK/meta-fail-bin"
+cat > "$WORK/meta-fail-bin/mv" <<EOF
+#!/usr/bin/env bash
+target="\${@: -1}"
+if [[ -n "\${FAIL_MV_TARGET_SUFFIX:-}" && "\$target" == *"\$FAIL_MV_TARGET_SUFFIX" ]]; then
+  echo "INJECTED_MV_FAILURE target=\${target}" >&2
+  exit 1
+fi
+exec "$REAL_MV_BIN" "\$@"
+EOF
+chmod +x "$WORK/meta-fail-bin/mv"
+
+set_all_meta_state() {
+  local st="$1"
+  sed -i.bak "s/^STATE=.*/STATE=${st}/" "$WORK/backup/meta.env" && rm -f "$WORK/backup/meta.env.bak"
+  printf '%s\n' "$st" > "$WORK/backup/state"
+  cp "$WORK/backup/meta.env" "$WORK/deploy/state/drill-runtime.owner"
+}
+
+assert_all_meta_restored() {
+  local m_st s_st o_st
+  m_st="$(awk -F= '$1=="STATE"{print $2}' "$WORK/backup/meta.env")"
+  s_st="$(cat "$WORK/backup/state")"
+  o_st="$(awk -F= '$1=="STATE"{print $2}' "$WORK/deploy/state/drill-runtime.owner")"
+  [[ "$m_st" == "RESTORED" && "$s_st" == "RESTORED" && "$o_st" == "RESTORED" ]] \
+    || fail "expected all 3 metadata records RESTORED, got meta.env=${m_st} state=${s_st} owner=${o_st}"
+}
+
+for pair in "meta_env|/meta.env|meta.env" "state_file|/state|state" "owner_file|/drill-runtime.owner|owner"; do
+  IFS='|' read -r tag suffix expect_target <<< "$pair"
+  set_all_meta_state "ARMED"
+  if PATH="$WORK/meta-fail-bin:$WORK/prom-stub-bin:$PATH" STUB_RULES_ADVANCE=1 FAIL_MV_TARGET_SUFFIX="$suffix" \
+      bash "$DRILL_SH" restore "${COMMON_ARGS[@]}" >"$WORK/rest_meta_fail_${tag}.log" 2>&1; then
+    fail "restore must fail non-zero when ${expect_target} publish fails: $(cat "$WORK/rest_meta_fail_${tag}.log")"
+  fi
+  grep -q "META_PUBLISH_FAILED target=${expect_target}" "$WORK/rest_meta_fail_${tag}.log" \
+    || fail "${tag}: missing META_PUBLISH_FAILED target=${expect_target}: $(cat "$WORK/rest_meta_fail_${tag}.log")"
+  grep -q "DRILL_RESTORE_FAILED" "$WORK/rest_meta_fail_${tag}.log" \
+    || fail "${tag}: missing DRILL_RESTORE_FAILED"
+  if grep -Eq "DRILL_RESTORE_VERIFIED_OK|DRILL_RESTORE_ALREADY_RESTORED_NOOP" "$WORK/rest_meta_fail_${tag}.log"; then
+    fail "${tag}: restore reported success despite ${expect_target} publish failure: $(cat "$WORK/rest_meta_fail_${tag}.log")"
+  fi
+  if ls "$WORK/backup"/*.tmp.* "$WORK/deploy/state"/*.tmp.* >/dev/null 2>&1; then
+    fail "${tag}: leftover temp files found after publish failure"
+  fi
+done
+
+# Partial RESTORED mismatch (meta.env already RESTORED while state or owner is still ARMED) must NOT no-op!
+sed -i.bak 's/^STATE=.*/STATE=RESTORED/' "$WORK/backup/meta.env" && rm -f "$WORK/backup/meta.env.bak"
+printf 'ARMED\n' > "$WORK/backup/state"
+sed -i.bak 's/^STATE=.*/STATE=ARMED/' "$WORK/deploy/state/drill-runtime.owner" && rm -f "$WORK/deploy/state/drill-runtime.owner.bak"
+if PATH="$WORK/meta-fail-bin:$WORK/prom-stub-bin:$PATH" STUB_RULES_ADVANCE=1 FAIL_MV_TARGET_SUFFIX="/state" \
+    bash "$DRILL_SH" restore "${COMMON_ARGS[@]}" >"$WORK/rest_partial_state.log" 2>&1; then
+  fail "partial RESTORED (meta.env=RESTORED, state=ARMED) must not succeed as no-op: $(cat "$WORK/rest_partial_state.log")"
+fi
+if grep -Eq "DRILL_RESTORE_VERIFIED_OK|DRILL_RESTORE_ALREADY_RESTORED_NOOP" "$WORK/rest_partial_state.log"; then
+  fail "partial RESTORED mismatch reported success: $(cat "$WORK/rest_partial_state.log")"
+fi
+
+sed -i.bak 's/^STATE=.*/STATE=RESTORED/' "$WORK/backup/meta.env" && rm -f "$WORK/backup/meta.env.bak"
+printf 'RESTORED\n' > "$WORK/backup/state"
+sed -i.bak 's/^STATE=.*/STATE=ARMED/' "$WORK/deploy/state/drill-runtime.owner" && rm -f "$WORK/deploy/state/drill-runtime.owner.bak"
+if PATH="$WORK/meta-fail-bin:$WORK/prom-stub-bin:$PATH" STUB_RULES_ADVANCE=1 FAIL_MV_TARGET_SUFFIX="/drill-runtime.owner" \
+    bash "$DRILL_SH" restore "${COMMON_ARGS[@]}" >"$WORK/rest_partial_owner.log" 2>&1; then
+  fail "partial RESTORED (meta.env/state=RESTORED, owner=ARMED) must not succeed as no-op: $(cat "$WORK/rest_partial_owner.log")"
+fi
+if grep -Eq "DRILL_RESTORE_VERIFIED_OK|DRILL_RESTORE_ALREADY_RESTORED_NOOP" "$WORK/rest_partial_owner.log"; then
+  fail "partial RESTORED owner mismatch reported success: $(cat "$WORK/rest_partial_owner.log")"
+fi
+
+# Double failure: earlier restore error (malformed TSDB) AND RESTORE_FAILED publish failure must NOT mask failure!
+set_all_meta_state "ARMED"
+if PATH="$WORK/meta-fail-bin:$WORK/prom-stub-bin:$PATH" STUB_RULES_ADVANCE=1 STUB_QUERY_JSON="{" FAIL_MV_TARGET_SUFFIX="/meta.env" \
+    bash "$DRILL_SH" restore "${COMMON_ARGS[@]}" >"$WORK/rest_double_fail.log" 2>&1; then
+  fail "double failure (TSDB error + RESTORE_FAILED publish error) must exit non-zero"
+fi
+grep -q "DRILL_RESTORE_FAILED" "$WORK/rest_double_fail.log" || fail "double failure missing DRILL_RESTORE_FAILED"
+if grep -Eq "DRILL_RESTORE_VERIFIED_OK|DRILL_RESTORE_ALREADY_RESTORED_NOOP" "$WORK/rest_double_fail.log"; then
+  fail "double failure masked original error as success: $(cat "$WORK/rest_double_fail.log")"
+fi
+
+# Leave partial RESTORED mismatch (meta.env=RESTORED, state=ARMED, owner=ARMED), clear transient fault,
+# and verify a real unstubbed restore retry converges ALL THREE records to RESTORED!
+sed -i.bak 's/^STATE=.*/STATE=RESTORED/' "$WORK/backup/meta.env" && rm -f "$WORK/backup/meta.env.bak"
+printf 'ARMED\n' > "$WORK/backup/state"
+sed -i.bak 's/^STATE=.*/STATE=ARMED/' "$WORK/deploy/state/drill-runtime.owner" && rm -f "$WORK/deploy/state/drill-runtime.owner.bak"
+bash "$DRILL_SH" restore "${COMMON_ARGS[@]}" >"$WORK/rest_after_meta_faults.log" 2>&1 || fail "clean restore retry after metadata publish faults failed: $(cat "$WORK/rest_after_meta_faults.log")"
+grep -q "DRILL_RESTORE_VERIFIED_OK" "$WORK/rest_after_meta_faults.log" || fail "expected DRILL_RESTORE_VERIFIED_OK after partial mismatch retry: $(cat "$WORK/rest_after_meta_faults.log")"
+assert_all_meta_restored
+echo "Metadata publish failure propagation (meta.env/state/owner), partial-RESTORED guard, double-failure non-masking, and 3-record retry convergence verified"
 
 echo "=== 6. R3: Supervisor SIGKILL -> manual restore fences/kills old worker -> new run on same work-dir blocks late writer -> PID-reuse safety ==="
 DRILL_TEST_WORKER_STALL_SEC=180 bash "$DRILL_SH" run "${COMMON_ARGS[@]}" >"$WORK/sigkill_run.log" 2>&1 &

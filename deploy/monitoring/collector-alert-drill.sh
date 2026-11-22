@@ -390,10 +390,33 @@ WORKER_REVOKED_FILE=${WORKER_REVOKED_FILE}
 STATE=${state}
 EOF
 )"
-  mkdir -p "$BACKUP_DIR" "$STATE_DIR"
-  printf '%s\n' "$content" > "${BACKUP_DIR}/meta.env.tmp.$$" && mv -f "${BACKUP_DIR}/meta.env.tmp.$$" "${BACKUP_DIR}/meta.env"
-  printf '%s\n' "$state" > "${BACKUP_DIR}/state.tmp.$$" && mv -f "${BACKUP_DIR}/state.tmp.$$" "${BACKUP_DIR}/state"
-  printf '%s\n' "$content" > "${OWNER_FILE}.tmp.$$" && mv -f "${OWNER_FILE}.tmp.$$" "$OWNER_FILE"
+  mkdir -p "$BACKUP_DIR" "$STATE_DIR" || {
+    printf 'META_PUBLISH_FAILED step=mkdir state=%s\n' "$state" >&2
+    return 1
+  }
+
+  local meta_tmp="${BACKUP_DIR}/meta.env.tmp.$$"
+  local state_tmp="${BACKUP_DIR}/state.tmp.$$"
+  local owner_tmp="${OWNER_FILE}.tmp.$$"
+
+  # Each file is replaced atomically via sibling temp+rename (preventing truncated reads),
+  # and any failure is propagated immediately rather than masked by later writes.
+  if ! printf '%s\n' "$content" > "$meta_tmp" || ! mv -f "$meta_tmp" "${BACKUP_DIR}/meta.env"; then
+    rm -f "$meta_tmp" 2>/dev/null || true
+    printf 'META_PUBLISH_FAILED target=meta.env state=%s\n' "$state" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$state" > "$state_tmp" || ! mv -f "$state_tmp" "${BACKUP_DIR}/state"; then
+    rm -f "$state_tmp" 2>/dev/null || true
+    printf 'META_PUBLISH_FAILED target=state state=%s\n' "$state" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$content" > "$owner_tmp" || ! mv -f "$owner_tmp" "$OWNER_FILE"; then
+    rm -f "$owner_tmp" 2>/dev/null || true
+    printf 'META_PUBLISH_FAILED target=owner state=%s\n' "$state" >&2
+    return 1
+  fi
+  return 0
 }
 
 read_meta_key() {
@@ -1250,11 +1273,18 @@ restore_and_verify() {
     return 1
   fi
 
-  local cur_state
-  cur_state="$(read_meta_key "${BACKUP_DIR}/meta.env" "STATE" || echo "UNKNOWN")"
+  local cur_meta_state cur_state_file cur_owner_state all_restored=0
+  cur_meta_state="$(read_meta_key "${BACKUP_DIR}/meta.env" "STATE" || echo "UNKNOWN")"
+  cur_state_file="$(cat "${BACKUP_DIR}/state" 2>/dev/null || echo "MISSING")"
+  cur_owner_state="$(read_meta_key "$OWNER_FILE" "STATE" || echo "MISSING")"
+  if [[ "$cur_meta_state" == "RESTORED" && "$cur_state_file" == "RESTORED" && "$cur_owner_state" == "RESTORED" ]]; then
+    all_restored=1
+  elif [[ "$cur_meta_state" == "RESTORED" ]]; then
+    log "Partial RESTORED metadata detected (meta.env=${cur_meta_state} state=${cur_state_file} owner=${cur_owner_state}); refusing no-op and re-verifying to converge all three records..."
+  fi
 
-  # R3: Already-RESTORED backup must NEVER overwrite newer valid production config!
-  if [[ "$cur_state" == "RESTORED" ]]; then
+  # R3: Already-RESTORED backup (all three metadata records converged) must NEVER overwrite newer valid production config!
+  if [[ "$all_restored" -eq 1 ]]; then
     log "Backup state is already RESTORED; running read-only verification without overwriting config files..."
     local nrc=0 exp_rc=0 nz_rc=0
     if ! is_worker_lease_free "$WORKER_LOCK_FILE" "$RUN_ID"; then
@@ -1504,11 +1534,17 @@ PY
 
   if [[ "$rrc" -eq 0 ]]; then
     rm -f "$WORKER_LOCK_FILE" "$WORKER_REVOKED_FILE" 2>/dev/null || true
-    write_meta_files "RESTORED"
-    RESTORE_DONE=1
-    log "DRILL_RESTORE_VERIFIED_OK (prom_written=${prom_touched} rules_written=${rules_touched})"
+    if write_meta_files "RESTORED"; then
+      RESTORE_DONE=1
+      log "DRILL_RESTORE_VERIFIED_OK (prom_written=${prom_touched} rules_written=${rules_touched})"
+    else
+      rrc=1
+      printf 'DRILL_RESTORE_FAILED failed to publish RESTORED metadata records\n' >&2
+      write_meta_files "RESTORE_FAILED" || printf 'DRILL_RESTORE_FAILED also failed to publish RESTORE_FAILED metadata records\n' >&2
+      printf '%s [drill] DRILL_RESTORE_FAILED (non-zero exit)\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >&2
+    fi
   else
-    write_meta_files "RESTORE_FAILED"
+    write_meta_files "RESTORE_FAILED" || printf 'DRILL_RESTORE_FAILED also failed to publish RESTORE_FAILED metadata records\n' >&2
     printf '%s [drill] DRILL_RESTORE_FAILED (non-zero exit)\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >&2
   fi
   return "$rrc"
@@ -1657,7 +1693,7 @@ BACKEND_NET="$(run_bounded "$CMD_TIMEOUT_SEC" docker inspect -f '{{range $k,$v :
 log "Using backend network: ${BACKEND_NET}"
 
 prepare_drill_files
-write_meta_files "ARMED"
+write_meta_files "ARMED" || fail "META_PUBLISH_FAILED: could not publish initial ARMED metadata"
 MUTATIONS_STARTED=1
 
 trap supervisor_on_signal INT TERM HUP
@@ -1708,7 +1744,7 @@ else
   WORKER_PID=$!
 fi
 WORKER_START_TIME="$(read_proc_start_time "$WORKER_PID" || true)"
-write_meta_files "ARMED"
+write_meta_files "ARMED" || fail "META_PUBLISH_FAILED: could not publish worker identity metadata"
 
 deadline_epoch=$(( $(date +%s) + MAX_DURATION_SEC ))
 worker_rc=0
