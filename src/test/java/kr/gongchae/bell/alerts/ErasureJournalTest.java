@@ -84,6 +84,113 @@ class ErasureJournalTest {
         assertThat(new ErasureJournal(new AlertsProperties(false, null, null, null, null, null, null, null))).as("off: not checked").isNotNull();
     }
 
+    static final UUID M1 = UUID.fromString("67636862-6172-8a1b-9c3d-4e5f60718293");
+    static final UUID M2 = UUID.fromString("67636862-6172-8fff-bfff-000000000001");
+
+    static String line(UUID id) { return id + "\t2026-11-20T01:02:03.456789Z\n"; }
+
+    static ErasureJournal.Snapshot snap(UUID... ids) throws IOException {
+        StringBuilder text = new StringBuilder();
+        for (UUID id : ids) text.append(line(id));
+        return ErasureJournal.parse(text.toString().getBytes(UTF_8), "ERASURE_LOG");
+    }
+
+    @Test
+    void onlyTheReservedVersion8TagIsAMarker() {
+        assertThat(ErasureJournal.isMarker(M1)).isTrue();
+        assertThat(ErasureJournal.isMarker(M2)).isTrue();
+        assertThat(ErasureJournal.isMarker(UUID.randomUUID())).as("a subscription id (v4)").isFalse();
+        assertThat(ErasureJournal.isMarker(UUID.fromString("67636862-6172-4a1b-9c3d-4e5f60718293"))).as("tag but v4").isFalse();
+        assertThat(ErasureJournal.isMarker(UUID.fromString("67636862-6173-8a1b-9c3d-4e5f60718293"))).as("other v8 tag").isFalse();
+        assertThat(ErasureJournal.isMarker(UUID.fromString("67636862-6172-8a1b-cc3d-4e5f60718293"))).as("not the IETF variant").isFalse();
+    }
+
+    @Test
+    void markersAreNeverSubscriptionIdsAndARepeatedMarkerFailsTheWholeJournal() throws Exception {
+        Path file = prepared();
+        UUID a = UUID.randomUUID(), b = UUID.randomUUID();
+        Files.writeString(file, line(a) + line(M1) + line(b), UTF_8);
+        assertThat(new ErasureJournal(file).readStrict()).containsExactly(a, b);
+        Files.writeString(file, line(M1) + line(a) + line(M1), UTF_8);
+        assertThatThrownBy(() -> new ErasureJournal(file).readStrict()).hasMessage("ERASURE_LOG_DUPLICATE_MARKER");
+        Files.writeString(file, line(a) + line(a), UTF_8);
+        assertThat(new ErasureJournal(file).readStrict()).as("a repeated subscription line is harmless, as before").containsExactly(a, a);
+    }
+
+    @Test
+    void theBundleUsesTheSameStrictGrammarAndCanBeReadOnly() throws Exception {
+        Path bundle = dir.resolve("bundle.log");
+        UUID a = UUID.randomUUID();
+        Files.writeString(bundle, line(a) + line(M1), UTF_8);
+        assertThat(bundle.toFile().setWritable(false)).isTrue();
+        try {
+            assertThat(ErasureJournal.readBundle(bundle).subscriptionIds()).as("read-only mount").containsExactly(a);
+        } finally {
+            bundle.toFile().setWritable(true);
+        }
+        assertThatThrownBy(() -> ErasureJournal.readBundle(null)).hasMessage("ERASURE_BUNDLE_REQUIRED");
+        assertThatThrownBy(() -> ErasureJournal.readBundle(dir.resolve("missing.log"))).hasMessage("ERASURE_BUNDLE_MISSING");
+        assertThatThrownBy(() -> ErasureJournal.readBundle(dir)).hasMessage("ERASURE_BUNDLE_MISSING");
+        Files.writeString(bundle, line(a) + a, UTF_8);
+        assertThatThrownBy(() -> ErasureJournal.readBundle(bundle)).hasMessage("ERASURE_BUNDLE_TORN_LAST_LINE");
+        Files.writeString(bundle, line(a) + a + "\t2026-02-30T00:00:00Z\n", UTF_8);
+        assertThatThrownBy(() -> ErasureJournal.readBundle(bundle)).as("not a calendar date").hasMessage("ERASURE_BUNDLE_BAD_LINE_2");
+        Files.writeString(bundle, M1.toString().toUpperCase() + "\t2026-11-20T00:00:00Z\n", UTF_8);
+        assertThatThrownBy(() -> ErasureJournal.readBundle(bundle)).as("canonical form only").hasMessage("ERASURE_BUNDLE_BAD_LINE_1");
+        Files.writeString(bundle, line(M1) + line(M1), UTF_8);
+        assertThatThrownBy(() -> ErasureJournal.readBundle(bundle)).hasMessage("ERASURE_BUNDLE_DUPLICATE_MARKER");
+        Files.writeString(bundle, a + "\t2026-11-20T00:00:00Z\n" + a + "\t2026-11-20T00:00:00.1Z\n", UTF_8);
+        assertThat(ErasureJournal.readBundle(bundle).lines()).as("any fraction Instant.parse accepts").hasSize(2);
+    }
+
+    @Test
+    void withoutAHeadMarkerTheWholeBundleMustBeAPrefixOfTheLatestJournal() throws Exception {
+        UUID a = UUID.randomUUID(), b = UUID.randomUUID(), c = UUID.randomUUID();
+        // S0: no marker in L.
+        assertThat(ErasureJournal.verifyCoverage(snap(), snap())).isEqualTo(ErasureJournal.Coverage.LEGACY_PREFIX);
+        assertThat(ErasureJournal.verifyCoverage(snap(a, b), snap(a, b, c))).isEqualTo(ErasureJournal.Coverage.LEGACY_PREFIX);
+        assertThat(ErasureJournal.verifyCoverage(snap(), snap(a))).as("an empty B, e.g. a dump before any unsubscribe").isNotNull();
+        assertThatThrownBy(() -> ErasureJournal.verifyCoverage(snap(b, a), snap(a, b, c))).as("reordered")
+                .hasMessage("ERASURE_COVERAGE_NOT_PREFIX");
+        assertThatThrownBy(() -> ErasureJournal.verifyCoverage(snap(a, b, c), snap(a, b))).as("B longer than L")
+                .hasMessage("ERASURE_COVERAGE_NOT_PREFIX");
+        assertThatThrownBy(() -> ErasureJournal.verifyCoverage(snap(a), snap())).as("L recreated empty")
+                .hasMessage("ERASURE_COVERAGE_NOT_PREFIX");
+        assertThatThrownBy(() -> ErasureJournal.verifyCoverage(snap(M1), snap())).as("B marked, L recreated empty")
+                .hasMessage("ERASURE_COVERAGE_NOT_PREFIX");
+        assertThatThrownBy(() -> ErasureJournal.verifyCoverage(snap(a, M1), snap(a, b))).as("B marked, L lost its marker")
+                .hasMessage("ERASURE_COVERAGE_NOT_PREFIX");
+        // S1: a marker in L but not first. Nothing was cut, so the same prefix rule.
+        assertThat(ErasureJournal.verifyCoverage(snap(a), snap(a, b, M1, c))).isEqualTo(ErasureJournal.Coverage.LEGACY_PREFIX);
+        assertThat(ErasureJournal.verifyCoverage(snap(a, b, M1), snap(a, b, M1, c))).isEqualTo(ErasureJournal.Coverage.LEGACY_PREFIX);
+        assertThatThrownBy(() -> ErasureJournal.verifyCoverage(snap(M1, c), snap(c, M2))).as("head marker removed from L")
+                .hasMessage("ERASURE_COVERAGE_NOT_PREFIX");
+        // Only bytes count: the same ids with another timestamp text are not the same journal.
+        ErasureJournal.Snapshot other = ErasureJournal.parse((a + "\t2026-11-20T01:02:03Z\n").getBytes(UTF_8), "ERASURE_LOG");
+        assertThatThrownBy(() -> ErasureJournal.verifyCoverage(other, snap(a))).hasMessage("ERASURE_COVERAGE_NOT_PREFIX");
+    }
+
+    @Test
+    void withAHeadMarkerTheBundleFromThatMarkerOnMustBeAPrefixOfTheLatestJournal() throws Exception {
+        UUID a = UUID.randomUUID(), b = UUID.randomUUID(), c = UUID.randomUUID(), d = UUID.randomUUID();
+        // S2: L = [M1, c, M2, d] after the lines before M1 were cut.
+        ErasureJournal.Snapshot latest = snap(M1, c, M2, d);
+        assertThat(ErasureJournal.verifyCoverage(snap(a, b, M1, c), latest)).isEqualTo(ErasureJournal.Coverage.MARKER_SUFFIX);
+        assertThat(ErasureJournal.verifyCoverage(snap(a, M1), latest)).isEqualTo(ErasureJournal.Coverage.MARKER_SUFFIX);
+        assertThat(ErasureJournal.verifyCoverage(snap(M1, c, M2, d), latest)).as("B == L").isEqualTo(ErasureJournal.Coverage.MARKER_SUFFIX);
+        assertThatThrownBy(() -> ErasureJournal.verifyCoverage(snap(a, b), latest)).as("a dump from before the kept marker")
+                .hasMessage("ERASURE_COVERAGE_MARKER_ABSENT");
+        assertThatThrownBy(() -> ErasureJournal.verifyCoverage(snap(), latest)).as("an empty B before any marker")
+                .hasMessage("ERASURE_COVERAGE_MARKER_ABSENT");
+        assertThatThrownBy(() -> ErasureJournal.verifyCoverage(snap(a, M2, d), snap(M1, c))).as("B newer than L")
+                .hasMessage("ERASURE_COVERAGE_MARKER_ABSENT");
+        assertThatThrownBy(() -> ErasureJournal.verifyCoverage(snap(M1, d), latest)).as("L lost c after the marker")
+                .hasMessage("ERASURE_COVERAGE_NOT_PREFIX");
+        assertThatThrownBy(() -> ErasureJournal.verifyCoverage(snap(M1, c, M2, d, a), latest)).as("B longer than L")
+                .hasMessage("ERASURE_COVERAGE_NOT_PREFIX");
+        assertThat(ErasureJournal.verifyCoverage(snap(M1), snap(M1))).as("a marked, still empty journal").isNotNull();
+    }
+
     @Test
     void everyAppendForcesTheDirectoryWhileStillHoldingTheFileLockAndAFailureReachesTheCaller() throws Exception {
         Path file = prepared();
