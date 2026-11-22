@@ -777,16 +777,16 @@ check_prom_clean_baseline() {
 import json, sys
 
 try:
-    alerts_doc = json.loads(sys.argv[1])
+    prom_alerts_doc = json.loads(sys.argv[1])
     targets_doc = json.loads(sys.argv[2])
     cfg_doc = json.loads(sys.argv[3])
     if (
-        not isinstance(alerts_doc, dict) or alerts_doc.get("status") != "success"
+        not isinstance(prom_alerts_doc, dict) or prom_alerts_doc.get("status") != "success"
         or not isinstance(targets_doc, dict) or targets_doc.get("status") != "success"
         or not isinstance(cfg_doc, dict) or cfg_doc.get("status") != "success"
     ):
         raise SystemExit("PROM_BASELINE_API_STATUS_NOT_SUCCESS")
-    items = alerts_doc["data"]["alerts"]
+    items = prom_alerts_doc["data"]["alerts"]
     targets = targets_doc["data"]["activeTargets"]
     cfg = cfg_doc["data"]["yaml"]
     if not isinstance(items, list) or not isinstance(targets, list) or not isinstance(cfg, str):
