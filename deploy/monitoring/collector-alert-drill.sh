@@ -390,10 +390,10 @@ WORKER_REVOKED_FILE=${WORKER_REVOKED_FILE}
 STATE=${state}
 EOF
 )"
-  printf '%s\n' "$content" > "${BACKUP_DIR}/meta.env"
-  printf '%s\n' "$state" > "${BACKUP_DIR}/state"
-  mkdir -p "$STATE_DIR"
-  printf '%s\n' "$content" > "$OWNER_FILE"
+  mkdir -p "$BACKUP_DIR" "$STATE_DIR"
+  printf '%s\n' "$content" > "${BACKUP_DIR}/meta.env.tmp.$$" && mv -f "${BACKUP_DIR}/meta.env.tmp.$$" "${BACKUP_DIR}/meta.env"
+  printf '%s\n' "$state" > "${BACKUP_DIR}/state.tmp.$$" && mv -f "${BACKUP_DIR}/state.tmp.$$" "${BACKUP_DIR}/state"
+  printf '%s\n' "$content" > "${OWNER_FILE}.tmp.$$" && mv -f "${OWNER_FILE}.tmp.$$" "$OWNER_FILE"
 }
 
 read_meta_key() {
