@@ -68,6 +68,32 @@ jobs:
           ./deploy/tests/backup-test.sh
       - name: Disposable PostgreSQL 17 and restic restore integration test
         run: ./deploy/tests/backup-integration-test.sh
+  pc-pull-verify:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Download checksum-verified restic 0.19.1 portable binary
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "restic-0.19.1"
+          New-Item -ItemType Directory -Path $dir -Force | Out-Null
+          $zip = Join-Path $dir "restic_0.19.1_windows_amd64.zip"
+          $expected = "da948ad707ed690426473aaba2046cd61f8f90f6f0e7dab6be0d5796531de67d"
+          curl.exe -fsSL -o $zip "https://github.com/restic/restic/releases/download/v0.19.1/restic_0.19.1_windows_amd64.zip"
+          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "SHA256 mismatch: expected=$expected actual=$actual" }
+          Expand-Archive -Path $zip -DestinationPath $dir -Force
+          $exe = Join-Path $dir "restic_0.19.1_windows_amd64.exe"
+          "RESTIC_BIN=$exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Native Windows PowerShell 5.1 PC pull & wall-clock retention tests
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File deploy/tests/pc-pull-test.ps1 -ResticBin "$env:RESTIC_BIN" -PythonBin python
+      - name: Native PowerShell 7 (pwsh) PC pull & default ACL verification
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -ExecutionPolicy Bypass -File deploy/tests/pc-pull-test.ps1 -ResticBin "$env:RESTIC_BIN" -PythonBin python
   secrets:
     runs-on: ubuntu-latest
     timeout-minutes: 10
