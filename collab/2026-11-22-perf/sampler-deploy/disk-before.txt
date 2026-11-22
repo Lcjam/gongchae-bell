@@ -1,0 +1,10 @@
+captured_utc=2026-11-22T08:11:14Z
+=== df -B1 / ===
+Filesystem       1B-blocks       Used   Available Use% Mounted on
+/dev/sda1      47321268224 8351342592 38953148416  18% /
+=== docker system df ===
+TYPE            TOTAL     ACTIVE    SIZE      RECLAIMABLE
+Images          8         5         3.878GB   3.236GB (83%)
+Containers      5         5         151.6kB   0B (0%)
+Local Volumes   5         5         379.9MB   0B (0%)
+Build Cache     0         0         0B        0B

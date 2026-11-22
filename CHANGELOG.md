@@ -3,6 +3,16 @@
 모든 주요 변경 사항을 [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/) 형식으로 기록한다.
 실측하지 않은 운영 수치나 미실행 서버 배포를 완료로 적지 않는다.
 
+## [2026-11-22] - 운영 배포 main `e0208ff`
+
+`gongchae.enjoylcjworld.com` 운영 서버에 blue/green으로 배포했다. 직전 운영판은 `4cc6e4e`다.
+- 배포: Deploy run [`45001647801`](https://github.com/Lcjam/gongchae-bell/actions/runs/45001647801)(workflow_dispatch), `bluegreen-e0208ffd16c3-45001647801-1`, blue → **green**, `DEPLOY_OK`, 운영 이미지 digest `sha256:5f80098b29b51fe6e5f759241a66e6532a645b8690a81af417355d4cb2d264f9`
+- 외부 G4(GitHub 러너): 28요청, 실패 0, p95 934ms, max 945ms
+- 사용자 화면에 반영된 변경: 프론트 디자인 통합(PR #39, `app.css`·공통 layout). 알림이 꺼진 상태라 header의 `알림 받기`는 나타나지 않는다.
+- 함께 반영된 변경: 해지 대장 처리 보완(PR #34, `ALERTS_ENABLED=false`라 운영에서는 아직 쓰이지 않음), 서버 `deploy/perf/` 성능 도구(PR #35)
+- 바뀌지 않은 것: DB 스키마(Flyway V5), `COLLECTOR_ENABLED=false`, `ALERTS_ENABLED=false`, 모니터링 컨테이너
+- 기록: [`collab/2026-11-19-resume/claude-main-e020-deploy-result.md`](collab/2026-11-19-resume/claude-main-e020-deploy-result.md)
+
 ## [Unreleased]
 
 ### Added
