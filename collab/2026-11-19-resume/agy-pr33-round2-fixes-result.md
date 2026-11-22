@@ -5,8 +5,10 @@
 - **작업 위치 / 브랜치**: `C:/Users/lcj/orca/workspaces/my-project/issue-15-collector-drill` / `ops/#15-collector-drill`
 - **기준 `origin/main` SHA**: `eb903017c4fb256a8ece665da795d7a94f6aeb25`
 - **보존된 직전 PR #33 HEAD SHA**: `7a2df3178f6a046b0b83a3d0cc6a4476fc9e3a2e` (R1 수정 소스 `3cb5eab1b67a59dc9bf57eaa9a2dc8a338be500a`)
-- **이번 R2 수정 소스 커밋 SHA**: `55eae4e61a4c3c350e600a448f7e54e430cabb8e` (`fix: bound kill grace, fence orphaned workers after SIGKILL, and flush TSDB on restore (Refs #15)`)
-- **최종 PR #33 HEAD**: 본 결과 문서 커밋(`55eae4e61a4c3c350e600a448f7e54e430cabb8e` 직후 1커밋, 코드/스크립트/테스트 추가 변경 없음). 최종 HEAD SHA와 최종 HEAD 기준 7잡 CI 결과는 Draft PR #33 본문에 함께 갱신.
+- **이번 R2 수정 소스 커밋 SHA**:
+  - `55eae4e61a4c3c350e600a448f7e54e430cabb8e` (`fix: bound kill grace, fence orphaned workers after SIGKILL, and flush TSDB on restore (Refs #15)`)
+  - `784337e0a110d3a75223c4d1fd6c4e71ea742c72` (`test: extend unrelated PID probe lifetime beyond dual restore eval window (Refs #15)` — `fa662fe`의 `compose-integration` `#45003677085/job/137150449931`에서 Case 6c의 두 차례 `restore`(각 ~30s post-SIGHUP 평가 대기) 합산 ~61초가 `sleep 60` 무관 PID probe 수명을 자연 만료시킨 테스트 결함을 `sleep 300` + `cleanup()` 정리로 수정)
+- **최종 PR #33 HEAD**: 본 결과 문서 갱신 커밋(`784337e0a110d3a75223c4d1fd6c4e71ea742c72` 직후 1커밋, 코드/스크립트/테스트 추가 변경 없음). 최종 HEAD SHA와 최종 HEAD 기준 7잡 CI 결과는 Draft PR #33 본문에 함께 기록.
 - **Draft PR**: [#33](https://github.com/Lcjam/gongchae-bell/pull/33) (Draft 유지, `#15` 미종료)
 
 ---
@@ -68,10 +70,11 @@
   - Case 6: 감독자만 `SIGKILL` → 워커 생존 확인 → `preflight` 차단(`PREVIOUS_DRILL_NOT_RESTORED`) → 수동 `restore`가 생존 워커 종료 및 `ATTEMPT_DIR` 정리(`DRILL_RESTORE_VERIFIED_OK`) → 동일 `--work-dir` 새 `run` 중 구 `RUN_ID` 지연 writer 거부 및 새 `metrics.prom` 해시 불변 → 무관 프로세스 PID 재사용 시 미종료 확인.
   - Case 7: `STATE=RESTORED` no-op 신규 설정 보존, `STATE=ARMED` 외부 변경 보존(`UNEXPECTED_EXTERNAL_CHANGE`), 실제 `posting.last_seen_at` 변경 탐지(`DRILL_RESTORE_FAILED`) 및 원복 후 멱등 재복구.
 
-### 원격 ARM64 Linux CI 검증 (소스 커밋 `55eae4e61a4c3c350e600a448f7e54e430cabb8e` 기준, 7/7 `SUCCESS`)
-- **CI** ([`#45002682356`](https://github.com/Lcjam/gongchae-bell/actions/runs/45002682356)): `test` (`2m24s`), `deploy-verify` (`1m33s`), `backup-verify` (`1m4s`), `secrets` (`8s`) — **4/4 `pass`**.
-- **Monitoring** ([`#45002682325`](https://github.com/Lcjam/gongchae-bell/actions/runs/45002682325)): `rules` (`10s`), `compose-integration` ([`job/137147432372`](https://github.com/Lcjam/gongchae-bell/actions/runs/45002682325/job/137147432372), `10m7s`), `alert-e2e` (`6m16s`) — **3/3 `pass`**.
-  - `ubuntu-24.04-arm` 실실행 확인 항목: Linux `tar` stale single-file inode 탐지(`MOUNT_STALE_SINGLE_FILE`), bounded recreate `3s`, Case 3 TSDB `0/0` flush, Case 4 독립 마감 복구 `89s < 180s`, Case 5 신호 마스킹 하 `TERM` 무시 자식+후손 종료 `31s` + `RESTORE_FAILED`, Case 6 Linux `flock` 기반 미확인 lease fail-closed(`UNVERIFIED_WORKER_ALIVE`) + 감독자 `SIGKILL` 후 수동 복구 워커 종료 + PID 재사용 보호 + 동일 `--work-dir` 격리, `COLLECTOR_ALERT_DRILL_TEST_PASSED`.
+### 원격 ARM64 Linux CI 검증 (최종 소스·테스트 커밋 `784337e0a110d3a75223c4d1fd6c4e71ea742c72` 기준, 7/7 `SUCCESS`)
+- **CI** ([`#45004482797`](https://github.com/Lcjam/gongchae-bell/actions/runs/45004482797)): `test` (`2m15s`), `deploy-verify` (`1m40s`), `backup-verify` (`1m2s`), `secrets` (`9s`) — **4/4 `pass`**.
+- **Monitoring** ([`#45004482840`](https://github.com/Lcjam/gongchae-bell/actions/runs/45004482840)): `rules` (`10s`), `compose-integration` ([`job/137152905837`](https://github.com/Lcjam/gongchae-bell/actions/runs/45004482840/job/137152905837), `9m20s`), `alert-e2e` (`6m30s`) — **3/3 `pass`**.
+- *(참고: 직전 코드 커밋 `55eae4e61a4c3c350e600a448f7e54e430cabb8e`도 `CI #45002682356` 4/4 `pass` · `Monitoring #45002682325` 3/3 `pass`였으며, 중간 결과 커밋 `fa662fe07fe7423b8b900d5aadbb4fb36741f7d8`에서 `compose-integration` `#45003677085/job/137150449931`이 Case 6c `sleep 60` 자연 만료로 실패한 원인을 확인해 `784337e`로 수정 후 7/7 통과를 재검증했다.)*
+- `ubuntu-24.04-arm` 실실행 확인 항목: Linux `tar` stale single-file inode 탐지(`MOUNT_STALE_SINGLE_FILE`), bounded recreate `3s`, Case 3 TSDB `0/0` flush, Case 4 독립 마감 복구 `89s < 180s`, Case 5 신호 마스킹 하 `TERM` 무시 자식+후손 종료 `31s` + `RESTORE_FAILED`, Case 6 Linux `flock` 기반 미확인 lease fail-closed(`UNVERIFIED_WORKER_ALIVE`) + 감독자 `SIGKILL` 후 수동 복구 워커 종료 + PID 재사용 보호 + 동일 `--work-dir` 격리, `COLLECTOR_ALERT_DRILL_TEST_PASSED`.
 
 ### 미실행 및 보존된 한계
 - 실제 운영 SSH · OCI · 계정 · `.env` · 비밀키 · 운영 DB · 공개 앱 · 외부 공공 API · 운영 Discord · Resend에는 전혀 접근/변경하지 않았다.
