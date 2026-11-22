@@ -1,0 +1,243 @@
+{
+    "entries":  [
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/html",
+                        "timestamp":  1795354390670
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/css/bootstrap.min.css",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/css",
+                        "timestamp":  1795354390771
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/css/app.css",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/css",
+                        "timestamp":  1795354390771
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/jobs",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/html",
+                        "timestamp":  1795354393469
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/css/bootstrap.min.css",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/css",
+                        "timestamp":  1795354393565
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/css/app.css",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/css",
+                        "timestamp":  1795354393565
+                    },
+                    {
+                        "url":  "data:image/svg+xml,%3csvg xmlns=\u0027http://www.w3.org/2000/svg\u0027 viewBox=\u00270 0 16 16\u0027%3e%3cpath fill=\u0027none\u0027 stroke=\u0027%23343a40\u0027 stroke-linecap=\u0027round\u0027 stroke-linejoin=\u0027round\u0027 stroke-width=\u00272\u0027 d=\u0027m2 5 6 6 6-6\u0027/%3e%3c/svg%3e",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "image/svg+xml",
+                        "timestamp":  1795354393565
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/js/filter-toggle.js",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/javascript",
+                        "timestamp":  1795354393671
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/jobs",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/html",
+                        "timestamp":  1795354396265
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/css/bootstrap.min.css",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/css",
+                        "timestamp":  1795354396470
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/css/app.css",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/css",
+                        "timestamp":  1795354396470
+                    },
+                    {
+                        "url":  "data:image/svg+xml,%3csvg xmlns=\u0027http://www.w3.org/2000/svg\u0027 viewBox=\u00270 0 16 16\u0027%3e%3cpath fill=\u0027none\u0027 stroke=\u0027%23343a40\u0027 stroke-linecap=\u0027round\u0027 stroke-linejoin=\u0027round\u0027 stroke-width=\u00272\u0027 d=\u0027m2 5 6 6 6-6\u0027/%3e%3c/svg%3e",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "image/svg+xml",
+                        "timestamp":  1795354396470
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/js/filter-toggle.js",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/javascript",
+                        "timestamp":  1795354396470
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/jobs?q=gongchae-no-results-20261122-r0001\u0026status=all",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/html",
+                        "timestamp":  1795354484061
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/css/bootstrap.min.css",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/css",
+                        "timestamp":  1795354484264
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/css/app.css",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/css",
+                        "timestamp":  1795354484264
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/js/filter-toggle.js",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/javascript",
+                        "timestamp":  1795354484264
+                    },
+                    {
+                        "url":  "data:image/svg+xml,%3csvg xmlns=\u0027http://www.w3.org/2000/svg\u0027 viewBox=\u00270 0 16 16\u0027%3e%3cpath fill=\u0027none\u0027 stroke=\u0027%23343a40\u0027 stroke-linecap=\u0027round\u0027 stroke-linejoin=\u0027round\u0027 stroke-width=\u00272\u0027 d=\u0027m2 5 6 6 6-6\u0027/%3e%3c/svg%3e",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "image/svg+xml",
+                        "timestamp":  1795354484360
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/jobs/306769",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/html",
+                        "timestamp":  1795354487070
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/css/bootstrap.min.css",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/css",
+                        "timestamp":  1795354487070
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/css/app.css",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/css",
+                        "timestamp":  1795354487070
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/institutions/C0066",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/html",
+                        "timestamp":  1795354489761
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/css/bootstrap.min.css",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/css",
+                        "timestamp":  1795354489960
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/css/app.css",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/css",
+                        "timestamp":  1795354489960
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/privacy",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/html",
+                        "timestamp":  1795354492676
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/css/bootstrap.min.css",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/css",
+                        "timestamp":  1795354492766
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/css/app.css",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/css",
+                        "timestamp":  1795354492766
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/subscriptions/new",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/html",
+                        "timestamp":  1795354495460
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/css/bootstrap.min.css",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/css",
+                        "timestamp":  1795354495569
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/css/app.css",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/css",
+                        "timestamp":  1795354495569
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/jobs/999999999999",
+                        "method":  "GET",
+                        "status":  404,
+                        "mimeType":  "text/html",
+                        "timestamp":  1795354498260
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/css/bootstrap.min.css",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/css",
+                        "timestamp":  1795354498363
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/css/app.css",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/css",
+                        "timestamp":  1795354498363
+                    },
+                    {
+                        "url":  "https://gongchae.enjoylcjworld.com/css/app.css",
+                        "method":  "GET",
+                        "status":  200,
+                        "mimeType":  "text/css",
+                        "timestamp":  1795354607969
+                    }
+                ],
+    "truncated":  false
+}
