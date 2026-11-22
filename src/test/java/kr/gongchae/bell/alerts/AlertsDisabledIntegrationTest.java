@@ -36,6 +36,7 @@ class AlertsDisabledIntegrationTest extends IntegrationTestSupport {
                 .andExpect(content().string(containsString("개인정보를 수집하지 않습니다")));
         mvc.perform(get("/jobs")).andExpect(status().isOk())
                 .andExpect(content().string(containsString("이 조건으로 알림 받기 (준비 중)")))
-                .andExpect(content().string(not(containsString("/subscriptions/new?"))));
+                .andExpect(content().string(not(containsString("/subscriptions/new?"))))
+                .andExpect(content().string(not(containsString("class=\"site-nav-cta\""))));
     }
 }

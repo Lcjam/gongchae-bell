@@ -353,6 +353,7 @@ class SubscriptionFlowIntegrationTest extends IntegrationTestSupport {
         mvc.perform(get("/privacy")).andExpect(status().isOk()).andExpect(content().string(containsString("개인정보 담당(시험값)")))
                 .andExpect(content().string(containsString("Plus Five Five, Inc.")));
         mvc.perform(get("/jobs").param("ncs", "R600020")).andExpect(status().isOk())
+                .andExpect(content().string(containsString("class=\"site-nav-cta\" href=\"/subscriptions/new\"")))
                 // unset filters stay as empty arguments (agy's PR #13 note said they are left out; they are not)
                 .andExpect(content().string(containsString("/subscriptions/new?ncs=R600020&amp;region=&amp;hire=&amp;career=&amp;q=\"")));
         mvc.perform(get("/subscriptions/new?ncs=R600020&region=&hire=&career=&q=")).andExpect(status().isOk())

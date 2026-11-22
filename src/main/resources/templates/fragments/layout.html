@@ -9,30 +9,41 @@
   <link rel="stylesheet" th:href="@{/css/app.css}">
 </head>
 <body>
-<header th:fragment="header" class="border-bottom bg-white">
-  <a class="visually-hidden-focusable" href="#main">본문 바로가기</a>
-  <nav class="container d-flex align-items-center justify-content-between py-3 gap-3" aria-label="주 메뉴">
-    <a class="brand text-decoration-none" th:href="@{/}">공채벨<span class="brand-dot" aria-hidden="true">●</span></a>
-    <div class="d-flex align-items-center gap-3">
-      <a class="nav-link fw-semibold" th:href="@{/jobs}">채용공고</a>
-    </div>
+<!-- th:block keeps every page's single `layout :: header` call while the delay banner sits outside the sticky bar -->
+<th:block th:fragment="header">
+<a class="visually-hidden-focusable skip-link" href="#main">본문 바로가기</a>
+<header class="site-header">
+  <nav class="container site-nav d-flex align-items-center justify-content-between gap-3" aria-label="주 메뉴">
+    <a class="brand" th:href="@{/}"><span class="brand-mark" aria-hidden="true"></span>공채벨</a>
+    <ul class="list-unstyled d-flex align-items-center gap-2 mb-0">
+      <li><a class="site-nav-link" th:href="@{/jobs}">채용공고</a></li>
+      <li th:if="${alertsEnabled}"><a class="site-nav-cta" th:href="@{/subscriptions/new}">알림 받기</a></li>
+    </ul>
   </nav>
-  <div th:if="${freshness != null and freshness.delayed}" class="container pb-3" role="status">
-    <div class="alert alert-warning py-2 px-3 small mb-0">
+</header>
+<div th:if="${freshness != null and freshness.delayed}" class="delay-banner" role="status">
+  <div class="container">
+    <span class="dot dot-warn" aria-hidden="true"></span>
+    <p class="mb-0">
       <strong>수집 지연 안내:</strong>
       최근 정기 수집 이후 2시간 이상 새 완료 기록이 없어 일부 공고·마감 정보가 늦게 반영될 수 있습니다
-      (<span th:text="${freshness.display}">기준 시각</span> 기준).
-    </div>
+      (<span class="text-nowrap" th:text="${freshness.display}">기준 시각</span> 기준).
+    </p>
   </div>
-</header>
-<footer th:fragment="footer" class="container border-top py-4 mt-5 text-secondary small">
-  <p class="mb-1">
-    데이터 기준 <strong th:text="${freshness != null ? freshness.display : (lastCollected ?: '아직 완전 수집 기록이 없습니다')}">미수집</strong>
-    <span th:if="${freshness != null and freshness.delayed}" class="badge text-bg-warning ms-1">수집 지연</span>
-  </p>
-  <p class="mb-0">공공기관 채용정보를 모아 전합니다. 지원 전 원문에서 조건과 일정을 확인하세요.</p>
-  <p class="mt-2 mb-0">출처: <a href="https://www.data.go.kr/data/15125273/openapi.do" target="_blank" rel="noopener noreferrer">공공데이터포털 · 공공기관 채용정보</a></p>
-  <p class="mt-2 mb-0"><a th:href="@{/privacy}">개인정보처리방침</a></p>
+</div>
+</th:block>
+<footer th:fragment="footer" class="site-footer">
+  <div class="container">
+    <p class="mb-2 d-flex flex-wrap align-items-center gap-2">
+      <span>데이터 기준 <strong th:text="${freshness != null ? freshness.display : (lastCollected ?: '아직 완전 수집 기록이 없습니다')}">미수집</strong></span>
+      <span th:if="${freshness != null and freshness.delayed}" class="badge status-badge"><span class="dot dot-warn" aria-hidden="true"></span>수집 지연</span>
+    </p>
+    <p class="mb-2">공공기관 채용정보를 모아 전합니다. 지원 전 원문에서 조건과 일정을 확인하세요.</p>
+    <ul class="list-unstyled d-flex flex-wrap gap-2 gap-md-4 mb-0">
+      <li>출처: <a href="https://www.data.go.kr/data/15125273/openapi.do" target="_blank" rel="noopener noreferrer">공공데이터포털 · 공공기관 채용정보</a></li>
+      <li><a th:href="@{/privacy}">개인정보처리방침</a></li>
+    </ul>
+  </div>
 </footer>
 </body>
 </html>
