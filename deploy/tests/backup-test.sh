@@ -384,6 +384,18 @@ expect_reject "foreign tag" "[$(snap "$(id_of 8)" "$(iso_utc "$NOW")" other-app)
 expect_reject "future beyond skew" "[$(snap "$(id_of 8)" "$(iso_utc $((NOW + 301)))")]"
 # One bad entry rejects the whole list: nothing is selected from a list that cannot be trusted.
 expect_reject "bad entry among good" "[$(snap "$(id_of 9)" "$(iso_utc $((NOW - 30 * DAY)))"),$(snap "$(id_of 8)" "2026-11-01T03:00:00")]"
+# --mode kept reuses the exact same validation and emits only non-expired full IDs (oldest first) for PC pull.
+kept_out="$(printf '%s' "$boundary" | "$PYTHON_BIN" -I "$EXPIRE_SELECT" --mode kept "$NOW" "$WINDOW")"
+assert_eq "total=3 expire=1 keep=2" "$(head -n 1 <<<"$kept_out" | cut -d' ' -f1-3)" "--mode kept summary matches"
+assert_eq "$(id_of 2) $(iso_utc $((NOW - WINDOW)))" "$(sed -n 2p <<<"$kept_out")" "--mode kept lists exact 14d oldest first"
+assert_eq "$(id_of 1) $(iso_utc $((NOW - WINDOW + 1)))" "$(sed -n 3p <<<"$kept_out")" "--mode kept lists 14d-1s second"
+assert_eq "3" "$(wc -l <<<"$kept_out" | tr -d '[:space:]')" "--mode kept excludes 14d+1s expired snapshot"
+if printf '%s' "[$(snap "$(id_of 1)" "$(iso_utc "$NOW")"),$(snap "$(id_of 8)" "2026-11-01T03:00:00")]" | "$PYTHON_BIN" -I "$EXPIRE_SELECT" --mode kept "$NOW" "$WINDOW" >/dev/null 2>&1; then
+  echo "expire-select --mode kept accepted bad entry" >&2; exit 1
+fi
+if printf '[]' | "$PYTHON_BIN" -I "$EXPIRE_SELECT" --mode invalid "$NOW" "$WINDOW" >/dev/null 2>&1; then
+  echo "expire-select accepted invalid mode" >&2; exit 1
+fi
 
 echo "=== [5/12] pg_dump failure & corrupt dump: expiry already done, no upload, /fail ==="
 setup_env dump_fail

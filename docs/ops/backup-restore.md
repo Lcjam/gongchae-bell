@@ -37,7 +37,7 @@
 - **실제 물리 잔류와 한계 (최대 14일 고정 삭제를 약속하지 않음)**:
   - **실행 간격에 따른 잔류**: 14일 직전 시점의 사본은 다음 실행까지 남으므로 정상 운영(일 1회 `03:00 KST`)에서도 실제 최대 잔류 기간은 **14일 + 실행 간격(약 15일)**이다.
   - **snapshot 목록 제거(`forget`)와 pack 물리 삭제(`prune`)의 구별 및 장애 시 잔류**: `RESTIC_REPO_UNAVAILABLE`(자격·네트워크 오류), 잠금 충돌, `RESTIC_FORGET_FAIL`, `RESTIC_PRUNE_FAIL`이 발생하면 snapshot 목록 제거 또는 pack 물리 삭제가 지연될 수 있다. 이 상태를 보유기간 준수·삭제 완료로 간주하지 않으며, `/fail`·미수신 경보로 감지하고 원인 복구 뒤 다음 실행에서 정리한다.
-  - **OCI 밖 PC/NAS 오프라인 한계**: PC/NAS가 꺼져 있는 동안에는 로컬 정리가 실행되지 않으므로 오프라인 기간만큼 물리 사본이 더 잔류할 수 있다. 복귀 후 다음 실행에서는 **네트워크 작업(`restic copy`) 전에** 로컬 저장소에서 `expire-select.py` + 명시 ID `forget` + `prune --max-unused 0` + 재조회 검증을 먼저 수행해 OCI 연결/copy 실패일에도 로컬 만료가 건너뛰어지지 않게 하고, `restic copy`(원본 snapshot 시각 보존) 뒤에도 만료 재검사·정리를 수행해 14일 초과 사본이 재보관되지 않도록 한다. 실패 시 보유기간 준수로 세지 않는다.
+  - **OCI 밖 PC/NAS 오프라인 한계**: PC/NAS가 꺼져 있는 동안에는 로컬 정리가 실행되지 않으므로 오프라인 기간만큼 물리 사본이 더 잔류할 수 있다. Windows PC 구현체(`deploy/backup/pc/pc-pull.ps1`, 상세 설치·운영 절차는 [PC pull 운영 절차](pc-pull-backup.md))는 **네트워크 작업(`restic copy`) 전에** 로컬 저장소에서 `expire-select.py` + 명시 ID `forget` + `prune --max-unused 0` + 재조회 검증을 먼저 수행해 OCI 연결/copy 실패일에도 로컬 만료가 건너뛰어지지 않게 하고, `restic copy --no-lock`(원본 snapshot 시각 보존, `expire-select.py --mode kept`로 14일 이내 ID만 선택) 뒤에도 만료 재검사·정리를 수행해 14일 초과 사본이 재보관되지 않도록 한다. 실패 시 보유기간 준수로 세지 않는다.
   - **장기 실패 시 복원 사본 0개**: 백업이 14일을 넘겨 계속 실패하면 `gongchae-bell` 복원 사본이 0개가 될 수 있다(사용자 수용 결정).
 
 ---
@@ -311,7 +311,7 @@
 
 ### #17 및 M2 전환 전 이관·선행 범위
 
-- 사용자 NAS·PC에서 외부 포트 개방 없이 `restic copy` pull 스케줄 실행 및 사본 접근 제한·별도 Healthchecks.io heartbeat 검증 (로컬 저장소 만료는 **네트워크 `restic copy` 전에** `deploy/backup/expire-select.py` + 명시 ID `restic forget` + `restic prune --max-unused 0` + 재조회 검증을 먼저 수행하고, 원본 snapshot 시각을 보존하는 `restic copy` 뒤에도 만료 재검사·정리를 수행해 네트워크 실패일 잔류와 오래된 OCI 사본 재보관을 모두 막으며 실패 시 보유기간 준수로 세지 않음; 오프라인 지연 한계 반영)
+- 사용자 NAS·PC에서 외부 포트 개방 없이 `restic copy` pull 스케줄 실행 및 사본 접근 제한·별도 Healthchecks.io heartbeat 검증 (Windows PC 소스·로컬 격리 시험·설치 절차는 `deploy/backup/pc/pc-pull.ps1`과 [PC pull 운영 절차](pc-pull-backup.md)에 준비 완료; 실제 OCI 읽기 전용 IAM 주체·버킷 연동, PC 영구 설치·NTFS ACL 적용·작업 스케줄러 등록·실운영 heartbeat 수신은 별도 운영 적용 라운드에서 수행)
 - **M2 활성화 전 백업 읽기 권한 게이트**: 호스트 `ubuntu`(UID `1001`)로 도는 `gongchae-backup.service`가 앱 컨테이너(`1000:1000`, `0600`)가 생성하는 `/var/lib/gongchae-bell/erasure/erasure.log`를 fail-closed 없이 읽을 수 있도록 읽기 권한 또는 복사 방식을 `ALERTS_ENABLED=true` 전환 전 선행 확정·검증
 - 실운영 스키마·키가 포함된 격리 PostgreSQL 복원 리허설, `ERASURE_REAPPLY_COMPLETE` 및 missing/손상 대장 fail-closed 검증, 실측 기반 RTO/RPO 설정
 - `erasure.log` 정리 주기, 허용 복원 최소 시점, 연속 커버리지, PC pull 오프라인/실패 복구 절차 및 개인정보처리방침의 실제 사본 파기·잔류 한계(실행 간격·prune/자격 오류·PC 오프라인) 고지 정합성 확정

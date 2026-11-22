@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Pick the gongchae-bell restic snapshots that are past the retention window (ADR-0017).
+"""Pick gongchae-bell restic snapshots against the wall-clock retention window (ADR-0017).
 
-Usage: restic snapshots --tag gongchae-bell --json | expire-select.py NOW_EPOCH WINDOW_SECONDS
+Usage: restic snapshots --tag gongchae-bell --json | expire-select.py [--mode expired|kept] NOW_EPOCH WINDOW_SECONDS
 
 A snapshot expires when NOW_EPOCH - snapshot time > WINDOW_SECONDS (strictly older). There is no
 "keep the latest" exception: every copy past the window is selected, so zero copies may remain.
 
-stdout: one summary line, then "<full id> <time UTC>" for each snapshot to expire, oldest first.
+stdout: one summary line, then "<full id> <time UTC>" for each snapshot in the chosen mode
+("expired" by default, or "kept" to pick non-expired copies for PC pull), oldest first.
 Exit 2 (reason on stderr) when the list cannot be trusted: not JSON, not an array, an entry
 without a 64-hex id, a time that is missing or has no zone, a snapshot without the gongchae-bell
 tag, or a time more than FUTURE_SKEW_SECONDS ahead of NOW_EPOCH. Nothing is selected then.
@@ -32,9 +33,14 @@ def utc(epoch):
 
 
 def main(argv):
-    if len(argv) != 3 or not argv[1].isdigit() or not argv[2].isdigit():
-        fail("usage: expire-select.py NOW_EPOCH WINDOW_SECONDS")
-    now, window = int(argv[1]), int(argv[2])
+    args = argv[1:]
+    mode = "expired"
+    if len(args) >= 2 and args[0] == "--mode":
+        mode = args[1]
+        args = args[2:]
+    if mode not in ("expired", "kept") or len(args) != 2 or not args[0].isdigit() or not args[1].isdigit():
+        fail("usage: expire-select.py [--mode expired|kept] NOW_EPOCH WINDOW_SECONDS")
+    now, window = int(args[0]), int(args[1])
 
     try:
         snapshots = json.load(sys.stdin)
@@ -75,7 +81,8 @@ def main(argv):
         f" newest_kept_utc={utc(kept[-1][0]) if kept else 'none'}"
         f" now_utc={utc(now)} window_seconds={window}"
     )
-    for epoch, sid in expired:
+    selected = expired if mode == "expired" else kept
+    for epoch, sid in selected:
         print(sid, utc(epoch))
 
 
