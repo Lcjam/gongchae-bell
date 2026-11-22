@@ -45,3 +45,13 @@ PR마다 구현자 외 두 리뷰를 거쳤다([reviews](../../collab/reviews/))
 - 외부 API의 날짜·필터 의미는 명세 문구 대신 실제 응답 분포(경계를 걸친 행, 미래 날짜)로 확인하고 fixture로 고정한다.
 - 완료 판정에서 "응답이 완결됐다"와 "목표 범위를 다 받았다"를 따로 기록한다.
 - 커밋 직후 `git show`로 의도한 파일과 내용이 들어갔는지 확인한다.
+
+---
+
+## 후속 상태 안내 (2026-11-22)
+
+- 위 본문(로컬 개발 DB 36,768건, 미완료 목록, 스크린샷 없음, KPT 회고)은 **2026-11-14~2026-11-15 M1 완료 시점의 역사 기록**으로 보존한다.
+- 2026-11-22(`main` `33d9f5a`) 기준 최신 누적 현황과 남은 PRD §7 공개 출시 게이트는 [구현 및 출시 검증 현황](../implementation-status.md)에서 관리한다.
+  - 운영 DB 최초 3년 적재(36,879건, 2026-11-19): [운영 초기 배포 기록](../../collab/2026-11-19-resume/claude-runtime-result.md)
+  - M3 수동 blue/green·사후 롤백·모니터링 mount·`e0208ff` 배포 및 제한 성능 실측: [G4 기록](../../collab/2026-11-19-resume/claude-g4-result.md), [4cc 기록](../../collab/2026-11-19-resume/claude-main4cc-deploy-result.md), [e020 기록](../../collab/2026-11-19-resume/claude-main-e020-deploy-result.md)
+  - 프론트엔드 리프레시 구조 문서 및 합성 스크린샷/QA 증거(PR #39·#41): [프론트 구조](../design/frontend-structure.md), [합성 QA 기록](../qa/frontend-refresh-2026-11-22.md)
