@@ -17,6 +17,7 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -26,8 +27,9 @@ import org.springframework.stereotype.Component;
  * ADR-0013 host-file erasure journal, shared by blue and green: one line {@code <subscription uuid>\t<instant>\n}
  * per unsubscribe, written under the subscription row lock before the DB delete.
  *
- * <p>The operator creates the empty file once, before alerts are first enabled. With alerts enabled the app refuses
- * to start without it, and the app never creates it. So a missing file always means a wrong path or mount, never
+ * <p>The operator prepares the file once, before alerts are first enabled ({@link ErasureJournalTool} {@code init}, under
+ * a supervised stop that does not exist yet). With alerts enabled the app refuses to start without it, and the app never
+ * creates it. So a missing file always means a wrong path or mount, never
  * "nothing erased yet", both in service and at restore.
  *
  * <p>Writers in one JVM are serialized here, and writers across containers by an OS file lock. A write loop puts
@@ -89,12 +91,17 @@ public class ErasureJournal {
         byte[] bytes;
         synchronized (writers) {
             try (FileChannel channel = FileChannel.open(path, READ, WRITE); FileLock lock = channel.lock()) {
-                ByteBuffer all = ByteBuffer.allocate(Math.toIntExact(channel.size()));
-                while (all.hasRemaining() && channel.read(all, all.position()) >= 0) { }
-                bytes = all.array();
+                bytes = readAll(channel);
             }
         }
         return parse(bytes, "ERASURE_LOG");
+    }
+
+    /** Every byte of an open file, from the start. */
+    static byte[] readAll(FileChannel channel) throws IOException {
+        ByteBuffer all = ByteBuffer.allocate(Math.toIntExact(channel.size()));
+        while (all.hasRemaining() && channel.read(all, all.position()) >= 0) { }
+        return all.array();
     }
 
     /**
@@ -113,6 +120,11 @@ public class ErasureJournal {
     /** A barrier marker line, never a subscription id. The app only creates version-4 subscription ids. */
     static boolean isMarker(UUID id) {
         return id.version() == 8 && id.variant() == 2 && (id.getMostSignificantBits() >>> 16) == MARKER_TAG;
+    }
+
+    /** A new barrier marker: the reserved tag, version 8, the IETF variant and 74 random bits. */
+    static UUID newMarker(Random random) {
+        return new UUID(MARKER_TAG << 16 | 0x8000L | (random.nextLong() & 0x0fffL), Long.MIN_VALUE | random.nextLong() >>> 2);
     }
 
     /** One line: its id, whether it is a marker, and its byte range {@code [start, end)} including the newline. */

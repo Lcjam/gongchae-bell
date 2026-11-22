@@ -16,6 +16,8 @@
 ## [Unreleased]
 
 ### Added
+- **#17 해지 대장 파일 도구 (`ops/#17-journal-tool`)**: 앱 JAR의 `erasure-journal version|check|init|mark|verify`. Spring·DB 없이 공통 strict 파서로 대장을 검사하고, 첫 표지 생성(`init`)과 표지 추가(`mark`)를 같은 디렉터리 임시 파일 → fsync → 원자 게시 → 디렉터리 fsync → 재확인 순서로 한다. 실제 boot JAR을 Linux 컨테이너에서 DB·env·네트워크 없이 돌리는 smoke를 CI `test` 잡에 붙였다.
+  - *(미완료)*: 앱 정지·권한 설치·보존 사본 확인을 맡는 감독 작업과 대장 정리(compact)는 다음 PR이다. 그 전에는 운영에서 쓰기 명령을 실행하지 않는다.
 - **#14 배포 자동화 소스·문서 준비 (`ops/#14-bluegreen-deploy`)**:
   - ARM64 멀티스테이지 `Dockerfile`(`eclipse-temurin:21-jdk-noble` → `eclipse-temurin:21-jre-noble`, UID `1000:1000` 비루트 실행, `-Xmx512m`)과 민감 자료·로컬 상태를 제외한 `.dockerignore`.
   - 운영 Compose `compose.prod.yml` (`postgres:17` 내부망 격리, `app-blue`/`app-green` `profiles` 분리 및 `stop_grace_period: 40s`, `caddy:2-alpine` 80/443 전용 공개, `erasure` 호스트 디렉터리 분리).
