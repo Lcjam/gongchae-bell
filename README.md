@@ -2,7 +2,13 @@
 
 공공기관 채용공고에서 기관의 최근 3년 채용 이력까지 이어 보고, 관심 조건의 새 공고와 마감 임박 알림을 받는 서비스입니다.
 
-현재는 **M1 구현 중**입니다. 실행 기반, PostgreSQL 스키마, 공고 웹 화면(`/` · `/jobs` · `/jobs/{sn}` · `/institutions/{code}` · `/robots.txt` · `/sitemap.xml`)과 수집 실행기(정기 수집·시작일 기준 3년 최초 적재·상세 수집, 기본값 꺼짐 `COLLECTOR_ENABLED=false`)가 구현됐습니다. 최초 적재는 2026-11-15 로컬 개발 DB에서 2023-11-15~2026-11-15에 시작한 공고 36,768건으로 실측했습니다([실행 기록](collab/2026-11-15-backfill/agy-start-scan-result.md), [검수](collab/2026-11-15-backfill/codex-start-scan-review.md)). 알림 구독(#6: 이메일·디스코드 신청, 확인, 관리, 해지, 기본 꺼짐 `ALERTS_ENABLED=false`)은 리뷰 중이고, 실제 공고 알림 발송(#7)·운영 기반·공개 배포는 아직 제공하지 않습니다. 전체 요구사항은 [PRD](docs/prd.md), 구조는 [아키텍처](docs/design/architecture.md), 작업은 [Issues](https://github.com/Lcjam/gongchae-bell/issues)에서 확인할 수 있습니다.
+현재는 **M1·M2 핵심 소스 및 M3 운영 기반 일부가 `main`에 병합됐으나, [PRD §7](docs/prd.md#7-완료-기준-공개-출시-조건) 공개 출시 전체는 미완료** 상태입니다(2026-11-22, `main` `fb51d48` 기준 · 운영 앱은 `e0208ff` 유지 · 상세 [구현 및 출시 검증 현황](docs/implementation-status.md)).
+
+- **M1 수집·웹**: 실행 기반, PostgreSQL 스키마, 공고 웹 화면(`/` · `/jobs` · `/jobs/{sn}` · `/institutions/{code}` · `/robots.txt` · `/sitemap.xml`)과 수집 실행기(기본값 꺼짐 `COLLECTOR_ENABLED=false`)가 병합됐습니다. 운영 DB 최초 3년 적재는 2026-11-19에 2023-11-19~2026-11-19 범위 36,879건(37페이지/HTTP 37회, 2분 20초)으로 완료했고([운영 기록](collab/2026-11-19-resume/claude-runtime-result.md), 2026-11-15 로컬 개발 DB 36,768건 실측과 구별), 정기 수집 `COMPLETE` 운영 관측은 아직 없습니다. 프론트엔드 디자인 리프레시([PR #39](https://github.com/Lcjam/gongchae-bell/pull/39))와 구조 문서·합성 QA 기록([PR #41](https://github.com/Lcjam/gongchae-bell/pull/41), [구조](docs/design/frontend-structure.md), [합성 QA](docs/qa/frontend-refresh-2026-11-22.md))도 병합됐습니다.
+- **M2 알림**: 구독·관리·해지(#6, [PR #13](https://github.com/Lcjam/gongchae-bell/pull/13))와 알림 매칭·발송·관측(#7, [PR #23](https://github.com/Lcjam/gongchae-bell/pull/23)·[PR #31](https://github.com/Lcjam/gongchae-bell/pull/31)) 소스가 병합됐으나 기본값은 꺼짐(`ALERTS_ENABLED=false`)이며, 실제 이메일·Discord 전체 흐름(신청→확인/수정/발송/해지)과 개인정보·백업·초기 표지 운영 게이트가 남아 있습니다.
+- **M3 운영 기반**: 수동 blue/green 배포 및 사후 롤백·외부 G4 성공, 모니터링 디렉터리 mount(9규칙) 및 공통 전달 경로 훈련, `e0208ff` 배포 및 제한 성능 실측(S1·S2, [기록](collab/2026-11-19-resume/claude-main-e020-deploy-result.md)), OCI 밖 Docker 비의존 Windows 네이티브 PC pull 소스([PR #38](https://github.com/Lcjam/gongchae-bell/pull/38), `2090c4c` 병합)와 해지 대장 파일 도구 소스([PR #42](https://github.com/Lcjam/gongchae-bell/pull/42), `fb51d48` 병합)가 준비됐습니다(실운영 앱은 `e0208ff` 그대로이며 `main` 추가 배포 없음). `main` 자동 배포·실패 유도 G4, 분리된 웹/배치 경보(PR #33 진행 중), 실제 OCI 자동 백업·PC 영구 설치/작업 스케줄러·대장 감독/권한/guard/compact/운영 init·mark·격리 복원 리허설(#17 미완료)·훈련 포스트모템·홍보 규정 확인은 미완료입니다.
+
+전체 요구사항은 [PRD](docs/prd.md), 구조는 [아키텍처](docs/design/architecture.md), 작업은 [Issues](https://github.com/Lcjam/gongchae-bell/issues)에서 확인할 수 있습니다.
 
 ## 로컬 실행
 
