@@ -1,0 +1,90 @@
+# Sanitized Live Collector Alert Drill Evidence (2026-11-23, Issue #15)
+# Classification: CONTROLLED OPS DRILL (NOT A REAL INCIDENT)
+# Secrets, credentials, webhook URLs, and raw .env contents are intentionally excluded.
+
+FIXED_MAIN_SHA=f3f55a90aa0c544c3d9d2438cd3e74b20742959a
+DEPLOYED_DRILL_SH_SHA256=91bd2b48bede0dde0d2231979083e6fc7d080fd53655fef6be65a35ebed38c2d
+EXPECTED_PROM_SHA256=b7127f953236d414cefe54592d7fe8e09545052d15cc2c47f26f4dec6a48ea22
+EXPECTED_RULES_SHA256=7043847527f6472776296e9ab2881b50cd736b1c2971ee9e8bb8d4305ea3b4eb
+RUN_ID=20261123T063734Z-1482951-23079
+SUPERVISOR_PID=1482951
+
+[PRE-DRILL BASELINE 2026-11-23T06:35:56Z]
+active_color=green
+active_sha=sha-e0208ffd16c39b511cc0065dc8ee40e5c8b4f9c1
+last_deploy_result=DEPLOY_OK
+pending_deploy_id=none
+env_mode=600
+FILE:COLLECTOR_ENABLED=false
+FILE:ALERTS_ENABLED=false
+OPS_DISCORD_WEBHOOK_URL_SET=True
+APP[269f29fc1df7]:COLLECTOR_ENABLED=false:ALERTS_ENABLED=false
+mount_kind=directory (/opt/gongchae-bell/deploy/monitoring/prometheus -> /etc/prometheus, ro)
+host_prom_sha=b7127f953236d414cefe54592d7fe8e09545052d15cc2c47f26f4dec6a48ea22
+cont_prom_sha=b7127f953236d414cefe54592d7fe8e09545052d15cc2c47f26f4dec6a48ea22
+host_rules_sha=7043847527f6472776296e9ab2881b50cd736b1c2971ee9e8bb8d4305ea3b4eb
+cont_rules_sha=7043847527f6472776296e9ab2881b50cd736b1c2971ee9e8bb8d4305ea3b4eb
+prom_rules_count=9 (group=gongchae)
+prom_alerts_before=[]
+grafana_health=database:ok,version:13.0.2
+grafana_alerting_notification_latency_seconds_count_before=0
+containers_running=5 (app-green,caddy,grafana,postgres,prometheus; all restarts=0)
+db_before: posting_count=36879 posting_md5=5df42f2e45d716487504e6b28d6bf26e collect_run=40:40 api_attempt=37:37 api_budget=2026-11-19=37
+
+[PREFLIGHT 2026-11-23T06:36:59Z]
+2026-11-23T06:36:59Z [drill] Flags verified false (file + runtime): FILE:COLLECTOR_ENABLED=false FILE:ALERTS_ENABLED=false APP[269f29fc1df7]:COLLECTOR_ENABLED=false:ALERTS_ENABLED=false
+2026-11-23T06:36:59Z [drill] Mount status: MOUNT_OK:directory
+2026-11-23T06:36:59Z [drill] PROM_BASELINE_OK active_app=app-green:8081
+2026-11-23T06:36:59Z [drill] DB baseline captured (posting_count=36879 posting_md5=5df42f2e45d716487504e6b28d6bf26e collect_run=40:40 api_attempt=37:37 api_budget=2026-11-19=37)
+2026-11-23T06:36:59Z [drill] DRILL_PREFLIGHT_OK
+
+[SANITIZED HARNESS TIMELINE 2026-11-23T06:37:34Z..06:52:24Z]
+2026-11-23T06:37:34Z [drill] Mount status: MOUNT_OK:directory
+2026-11-23T06:37:34Z [drill] PROM_BASELINE_OK active_app=app-green:8081
+2026-11-23T06:37:35Z [drill] promtool check config/rules passed for staged drill files
+2026-11-23T06:37:35Z [drill] Starting temporary exporter (gongchae-drill-exporter) on gongchae-bell-prod_backend (no host port, ttl=1560s)
+2026-11-23T06:37:35Z [drill] Applying in-place drill config (job_name: gongchae-drill) and [훈련] label summaries + SIGHUP
+2026-11-23T06:37:38Z [drill] DRILL_BASELINE_UP (gongchae-drill up, 0/0 scraped, 0 alerts)
+2026-11-23T06:37:38Z [drill] DRILL_INJECTED budget=500 failing=2
+2026-11-23T06:38:24Z [drill] DRILL_BUDGET_WARNING_FIRING
+2026-11-23T06:38:24Z [drill] DRILL_COLLECTION_FAILING_PENDING
+2026-11-23T06:42:40Z [drill] DRILL_COLLECTION_FAILING_STILL_PENDING_AT_5M
+2026-11-23T06:48:25Z [drill] DRILL_COLLECTION_FAILING_FIRING elapsed_sec=647
+2026-11-23T06:49:56Z [drill] DRILL_RECOVERY_INJECTED budget=0 failing=0
+2026-11-23T06:50:21Z [drill] DRILL_ALERTS_RESOLVED_IN_PROMETHEUS
+2026-11-23T06:50:21Z [drill] Waiting 90s for Grafana [RESOLVED] delivery...
+2026-11-23T06:51:52Z [drill] DRILL_WORKER_COMPLETE
+2026-11-23T06:51:52Z [drill] Starting idempotent restore and post-condition verification (run_id=20261123T063734Z-1482951-23079)...
+2026-11-23T06:52:24Z [drill] DRILL_RESTORE_VERIFIED_OK (prom_written=1 rules_written=1)
+2026-11-23T06:52:24Z [drill] DRILL_RUN_COMPLETE
+
+[CHECKPOINT OBSERVATIONS]
+CP1 2026-11-23T06:40:38Z:
+  targets: gongchae-app(app-green:8081=up, app-blue:8081=down), gongchae-drill(drill-exporter:8081=up)
+  alerts: GongchaeApiBudgetWarning=firing(activeAt=06:38:21.422Z,val=500), GongchaeRegularCollectionFailing=pending(activeAt=06:38:21.422Z,val=2)
+  grafana: notifications_total{integration="discord"}=1, requests_total=1, latency_count=1, latency_sum=0.443522s, state_alerting=1, failed=0
+CP2 2026-11-23T06:43:40Z:
+  alerts: GongchaeRegularCollectionFailing=pending, GongchaeApiBudgetWarning=firing
+  grafana: notifications_total{integration="discord"}=1, latency_count=1, state_alerting=1, failed=0
+CP3 2026-11-23T06:50:15Z:
+  alerts: GongchaeRegularCollectionFailing=firing(val=2), GongchaeApiBudgetWarning=firing(val=500)
+  grafana: notifications_total{integration="discord"}=2, requests_total=2, latency_count=2, latency_sum=0.746151s, state_alerting=2, failed=0
+CP4 2026-11-23T06:54:37Z (POST-RESTORE AUDIT):
+  supervisor_pid_1482951=EXITED_CLEAN
+  meta.env=STATE=RESTORED, state=RESTORED, drill-runtime.owner=STATE=RESTORED (WORKER_PID empty)
+  tmp_work_dir=CLEAN, exporter_container=ABSENT
+  host_prom_sha=b7127f953236d414cefe54592d7fe8e09545052d15cc2c47f26f4dec6a48ea22
+  cont_prom_sha=b7127f953236d414cefe54592d7fe8e09545052d15cc2c47f26f4dec6a48ea22
+  host_rules_sha=7043847527f6472776296e9ab2881b50cd736b1c2971ee9e8bb8d4305ea3b4eb
+  cont_rules_sha=7043847527f6472776296e9ab2881b50cd736b1c2971ee9e8bb8d4305ea3b4eb
+  prom_config_gongchae_drill_matches=0
+  prom_targets: gongchae-app(app-green:8081=up, app-blue:8081=down)
+  prom_alerts=[]
+  prom_rules: group=gongchae, count=9, lastEvaluation=2026-11-23T06:54:21.42335175Z
+  prom_tsdb_drill_budget=0, prom_tsdb_drill_failing=0
+  diffs: DB_DIFF_EMPTY_OK, FLAGS_DIFF_EMPTY_OK, CONTAINERS_DIFF_EMPTY_OK
+  containers_running=5 (same IDs, same StartedAt, all restarts=0)
+  db_after: posting_count=36879 posting_md5=5df42f2e45d716487504e6b28d6bf26e collect_run=40:40 api_attempt=37:37 api_budget=2026-11-19=37
+  env_mode=600, remote_raw_log_mode=600, remote_backup_dir_mode=700
+  grafana: notifications_total{integration="discord"}=4, requests_total=4, latency_count=4, latency_sum=1.375472s, state_alerting=0, state_normal=2, active=0, failed=0
+  discord_channel_ui_visual_check=PENDING_HUMAN_CONFIRMATION
