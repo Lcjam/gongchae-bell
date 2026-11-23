@@ -25,7 +25,9 @@ services:
       - monitoring
 
   grafana:
-    image: grafana/grafana-oss:13.0.2
+    # Grafana 12.4+ stopped updating grafana/grafana-oss; grafana/grafana carries the same OSS image
+    # (see docs/security/grafana-update-2026-11-23.md). Pinned to the 13.1.10 multi-arch manifest index digest.
+    image: grafana/grafana:13.1.10@sha256:467fa061e60b09f4011c6f84620b9ec8805b077f85dfb2b76c5bdbc35b1b1a8f
     restart: unless-stopped
     depends_on:
       - prometheus

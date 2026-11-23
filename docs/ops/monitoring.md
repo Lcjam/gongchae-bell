@@ -32,6 +32,8 @@
 
 **경보 흐름.** Prometheus가 규칙을 평가하고, Grafana 규칙 하나(`GongchaePrometheusAlert`)가 `ALERTS{alertstate="firing"}`을 30초마다 읽어 경보마다 운영 디스코드로 보낸다. 경보가 풀리면 해제 메시지도 보낸다. Alertmanager는 쓰지 않는다(ADR-0006). 임계값을 Prometheus 규칙에 둔 이유는 `promtool`로 CI에서 발동·복구를 시험할 수 있어서다. Grafana는 `alertname`을 자기 규칙 이름으로 덮어쓰므로 Prometheus 경보 이름은 `prom_alert` 라벨로 옮긴다. 알림 정책은 `prom_alert`별로 묶는다. 처음 대기 30초, 묶음 간격 1분, 계속 발동 중이면 4시간마다 다시 보낸다. Prometheus를 조회하지 못하면 Grafana 자체 경보(`DatasourceError`)가 같은 채널로 간다. VM 전체나 Docker가 멈추면 Grafana도 멈추므로, 그때는 외부 감시(UptimeRobot, Healthchecks.io)만 울린다. 그래서 둘을 따로 둔다.
 
+> **주의 (기존 `grafana_data` 볼륨이 있는 설치에서 Grafana 이미지가 바뀐 경우):** `deploy.yml`이 새 `compose.monitoring.yml`을 서버에 동기화한 뒤 평소의 `deploy/deploy.sh monitoring up -d grafana`(웹훅 활성화 포함)나 `deploy/deploy.sh monitoring up -d prometheus grafana`를 실행해도 새 Grafana 이미지로 컨테이너가 재생성되며 기존 `grafana_data`(`grafana.db`) 마이그레이션이 시작된다. [Grafana OSS 보안 갱신 기록](../security/grafana-update-2026-11-23.md#52-실제-운영-rollout-전-별도-운영-gate-이번-pr-미실행)의 **Gate 1(Grafana 중지 후 `grafana_data` 사전 백업)과 Gate 2(외부 egress 차단 네트워크 격리 리허설)**를 마치기 전에는 기존 `grafana_data` 볼륨을 대상으로 `grafana`를 `pull`·`up`·재생성하지 않는다.
+
 **전송은 기본 꺼짐.** `OPS_DISCORD_WEBHOOK_URL`이 비어 있으면 compose가 `http://127.0.0.1:9/alerts-off`(Grafana 컨테이너 자신의 닫힌 포트)를 넣는다. Grafana는 웹훅 URL이 비어 있으면 시작하지 않기 때문이다(13.0.2에서 확인: `could not find webhook url property in settings`). 이 상태로 대시보드와 Prometheus를 먼저 띄울 수 있다. 운영자가 보는 실제 동작은 이렇다.
 - 경보는 평가되고 Grafana 경보 목록에 발동으로 보인다. 받는 곳은 없다.
 - 발동 중인 경보가 있으면 Grafana 로그에 로컬 전송 실패(`connection refused`, 대상 `127.0.0.1:9`)가 반복해 남는다. 밖으로는 아무것도 나가지 않는다.
