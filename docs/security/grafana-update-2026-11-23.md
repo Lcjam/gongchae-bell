@@ -83,5 +83,8 @@
 이번 PR은 운영 서버·SSH·실제 `grafana_data` 볼륨·실제 Discord에 접근하지 않는다. 실제 운영 반영 전 아래 3단계를 별도 운영 gate로 완료해야 한다.
 
 1. **사전 `grafana_data` 백업 확보 (미실행):** 공식 SQLite 백업 지침에 따라 운영 Grafana 컨테이너를 중지한 상태에서 `grafana_data` 볼륨(`grafana.db` 포함)의 복구 가능한 백업 사본을 생성하고 보관한다.
-2. **복구 사본 기반 격리 업그레이드 검증 (미실행):** 운영 볼륨을 직접 변경하지 않고, 위 백업 사본을 별도 격리 볼륨/컨테이너에 마운트해 `grafana/grafana:13.1.10@sha256:467fa061...` 기동(`OPS_DISCORD_WEBHOOK_URL=http://127.0.0.1:9/alerts-off` 유지로 실 Discord 송신 차단) 및 `13.0.2 → 13.1.10` 실제 SQLite 마이그레이션·관리자 로그인·대시보드·규칙 정합을 확인한다.
+2. **복구 사본 기반 격리 업그레이드 검증 (미실행):** 운영 볼륨을 직접 변경하지 않고, 위 백업 사본을 별도 격리 볼륨·컨테이너에 마운트해 `grafana/grafana:13.1.10@sha256:467fa061...` 기동 및 `13.0.2 → 13.1.10` 실제 SQLite 마이그레이션·관리자 로그인·대시보드·규칙 정합을 확인한다.
+   - **최초 기동 전 네트워크 egress 차단:** 복원 사본 컨테이너는 처음 기동하기 전부터 외부 egress가 없는 전용 격리 네트워크(`internal` 네트워크 또는 `--network=none`)에만 두고, 외부 송신이 허용된 운영 `monitoring` 네트워크(`compose.monitoring.yml`의 non-internal 네트워크)에는 연결하지 않는다. 쿼리 확인이 필요하면 격리된 Prometheus 또는 mock만 연결한다.
+   - **off 환경변수의 역할 구분:** `OPS_DISCORD_WEBHOOK_URL=http://127.0.0.1:9/alerts-off`는 Grafana 전역 발송 차단 설정이 아니라 `deploy/monitoring/grafana/provisioning/alerting/forward.yml`의 file provisioning 변수 치환 값이다(<https://grafana.com/docs/grafana/latest/alerting/set-up/provision-alerting-resources/file-provisioning/>, <https://grafana.com/docs/grafana/latest/setup-grafana/configure-grafana/>). 운영 DB 사본에 기존 contact point·알림 상태가 남아 있을 수 있으므로 이 환경변수만으로 외부 송신 차단을 보장할 수 없으며, 신뢰한 프로비저닝 재적용 및 실제 persisted 설정 확인을 위한 **보조 수단**으로만 사용한다.
+   - **민감정보 비출력 및 실발송 경로 분리:** 리허설 로그·결과에는 계정·자격증명·contact point URL을 출력하지 않으며, 실제 발송 경로는 격리 검증 완료 후 운영계에서만 사용한다.
 3. **운영 반영 및 SSH 터널 사후 확인 (미실행):** Gate 1·2 통과 후 `deploy/deploy.sh monitoring pull grafana && deploy/deploy.sh monitoring up -d grafana`로 반영하고, SSH 터널(`127.0.0.1:3000`)로 `/api/health` 버전(`13.1.10`), Prometheus datasource, `gongchae-ops` 대시보드, 경보 규칙 평가 상태를 확인한다. 이상 발생 시 이미지만 내리지 않고 Grafana 중지 → Gate 1 백업 복원 → `13.0.2` 재기동 순으로 복구한다.
